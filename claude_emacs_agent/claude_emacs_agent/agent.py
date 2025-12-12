@@ -36,6 +36,8 @@ MARKER_SESSION_END = "[/SESSION]"
 MARKER_THINKING = "[THINKING]"  # Signals Claude is processing
 MARKER_PROGRESS = "[PROGRESS "  # followed by JSON and ]
 MARKER_RESULT = "[RESULT "  # followed by JSON and ]
+MARKER_PERMISSION_REQUEST = "[PERMISSION_REQUEST "  # followed by JSON and ]
+MARKER_PERMISSION_RESPONSE = "[PERMISSION_RESPONSE "  # followed by JSON and ]
 
 
 def _format_traceback() -> str:
@@ -61,6 +63,10 @@ class AgentState:
     model: Optional[str] = None
     status: str = "initializing"
     pending_tool_calls: dict = field(default_factory=dict)
+    # Permission tracking
+    session_permissions: set = field(default_factory=set)  # Patterns allowed for session
+    pending_permission: Optional[dict] = None  # Current permission request awaiting response
+    last_user_message: Optional[str] = None  # For retry after permission grant
 
 
 class ClaudeEmacsAgent:
@@ -155,7 +161,7 @@ class ClaudeEmacsAgent:
         self._emit(f"{MARKER_SESSION_END}")
         self._emit_ready()
 
-    async def send_user_message(self, message: str) -> None:
+    async def send_user_message(self, message: str, echo: bool = True) -> None:
         """Send a user message to Claude."""
         if not self.claude_process or not self.claude_process.stdin:
             self._emit(f"{MARKER_ERROR_START}")
@@ -164,10 +170,14 @@ class ClaudeEmacsAgent:
             self._emit_ready()
             return
 
-        # Echo the user message back with markers
-        self._emit(f"{MARKER_USER_START}")
-        self._emit(message)
-        self._emit(f"{MARKER_USER_END}")
+        # Store for potential retry after permission grant
+        self.state.last_user_message = message
+
+        # Echo the user message back with markers (skip on retry)
+        if echo:
+            self._emit(f"{MARKER_USER_START}")
+            self._emit(message)
+            self._emit(f"{MARKER_USER_END}")
 
         # Add org-mode reminder to message
         full_message = f"{message}\n\n(Reminder: format your response in org-mode.)"
@@ -179,6 +189,67 @@ class ClaudeEmacsAgent:
         await self._send_to_claude(msg)
         self.state.status = "thinking"
         self._emit(MARKER_THINKING)
+
+    async def handle_permission_response(self, response: dict) -> None:
+        """Handle permission response from Emacs."""
+        action = response.get("action")  # "allow_once", "allow_session", "allow_always", "deny"
+        pattern = response.get("pattern")  # Permission pattern for allow_always
+
+        if action == "deny":
+            self.state.pending_permission = None
+            self._emit(f"{MARKER_SESSION_START}")
+            self._emit("Permission denied by user")
+            self._emit(f"{MARKER_SESSION_END}")
+            self._emit_ready()
+            return
+
+        # Add to session permissions if requested
+        if action == "allow_session" and pattern:
+            self.state.session_permissions.add(pattern)
+
+        # For allow_always, we need to update settings file
+        if action == "allow_always" and pattern:
+            self._add_permanent_permission(pattern)
+
+        # Clear pending and retry the last message
+        self.state.pending_permission = None
+        if self.state.last_user_message:
+            self._emit(f"{MARKER_SESSION_START}")
+            self._emit(f"Retrying with permission: {pattern or 'once'}")
+            self._emit(f"{MARKER_SESSION_END}")
+            await self.send_user_message(self.state.last_user_message, echo=False)
+
+    def _add_permanent_permission(self, pattern: str) -> None:
+        """Add a permission pattern to .claude/settings.local.json."""
+        import os
+        settings_path = os.path.join(self.work_dir, ".claude", "settings.local.json")
+        try:
+            settings = {}
+            if os.path.exists(settings_path):
+                with open(settings_path, "r") as f:
+                    settings = json.load(f)
+
+            if "permissions" not in settings:
+                settings["permissions"] = {}
+            if "allow" not in settings["permissions"]:
+                settings["permissions"]["allow"] = []
+
+            if pattern not in settings["permissions"]["allow"]:
+                settings["permissions"]["allow"].append(pattern)
+
+                # Ensure directory exists
+                os.makedirs(os.path.dirname(settings_path), exist_ok=True)
+
+                with open(settings_path, "w") as f:
+                    json.dump(settings, f, indent=2)
+
+                self._emit(f"{MARKER_SESSION_START}")
+                self._emit(f"Added permanent permission: {pattern}")
+                self._emit(f"{MARKER_SESSION_END}")
+        except Exception as e:
+            self._emit(f"{MARKER_ERROR_START}")
+            self._emit(f"Failed to save permission: {e}")
+            self._emit(f"{MARKER_ERROR_END}")
 
     async def _send_to_claude(self, msg: dict) -> None:
         """Send JSON message to Claude's stdin."""
@@ -287,6 +358,22 @@ class ClaudeEmacsAgent:
 
         elif msg_type == "result":
             self.state.status = "ready"
+
+            # Check for permission denials
+            permission_denials = msg.get("permission_denials", [])
+            if permission_denials:
+                # Emit permission request for user approval
+                denial = permission_denials[0]  # Handle first denial
+                self.state.pending_permission = denial
+                perm_request = {
+                    "tool_name": denial.get("tool_name"),
+                    "tool_input": denial.get("tool_input"),
+                    "tool_use_id": denial.get("tool_use_id"),
+                }
+                self._emit(f"{MARKER_PERMISSION_REQUEST}{json.dumps(perm_request)}]")
+                # Don't emit ready - wait for permission response
+                return
+
             # Emit final result stats
             result_info = {
                 "cost_usd": msg.get("total_cost_usd", 0),
@@ -360,6 +447,17 @@ async def run_agent(
                 break
             elif text == "/interrupt":
                 await agent.interrupt()
+            elif text.startswith("/permit "):
+                # Permission response from Emacs: /permit {"action": "allow_once", "pattern": "..."}
+                try:
+                    json_str = text[8:]  # Strip "/permit "
+                    response = json.loads(json_str)
+                    await agent.handle_permission_response(response)
+                except json.JSONDecodeError as e:
+                    agent._emit(f"{MARKER_ERROR_START}")
+                    agent._emit(f"Invalid permission response: {e}")
+                    agent._emit(f"{MARKER_ERROR_END}")
+                    agent._emit_ready()
             else:
                 # Regular message to Claude
                 await agent.send_user_message(text)

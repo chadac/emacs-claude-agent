@@ -9,6 +9,7 @@ from claude_emacs_agent.agent import (
     MARKER_ASSISTANT_START,
     MARKER_ASSISTANT_END,
     MARKER_TOOL_START,
+    MARKER_PERMISSION_REQUEST,
 )
 
 
@@ -122,4 +123,41 @@ class TestMessageParsing:
 
         captured = capsys.readouterr()
         # Should show ready marker
+        assert MARKER_READY in captured.out
+
+    @pytest.mark.asyncio
+    async def test_handle_result_with_permission_denial(self, capsys):
+        """Test handling of result with permission denial."""
+        agent = ClaudeEmacsAgent("/tmp/test")
+        result_msg = {
+            "type": "result",
+            "permission_denials": [
+                {
+                    "tool_name": "Read",
+                    "tool_use_id": "tool-456",
+                    "tool_input": {"file_path": "/etc/passwd"},
+                }
+            ],
+        }
+        await agent._handle_claude_message(result_msg)
+
+        # Should emit permission request, not ready
+        captured = capsys.readouterr()
+        assert MARKER_PERMISSION_REQUEST in captured.out
+        assert MARKER_READY not in captured.out
+        assert agent.state.pending_permission is not None
+
+    @pytest.mark.asyncio
+    async def test_permission_response_deny(self, capsys):
+        """Test denying a permission request."""
+        agent = ClaudeEmacsAgent("/tmp/test")
+        agent.state.pending_permission = {
+            "tool_name": "Read",
+            "tool_input": {"file_path": "/etc/passwd"},
+        }
+
+        await agent.handle_permission_response({"action": "deny"})
+
+        assert agent.state.pending_permission is None
+        captured = capsys.readouterr()
         assert MARKER_READY in captured.out

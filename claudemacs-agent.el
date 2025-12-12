@@ -279,6 +279,14 @@
           (message "Claude: $%.4f | %dms | %d turns"
                    (or cost 0) (or duration 0) (or turns 0))))))
 
+   ;; Permission request marker - show permission UI
+   ((string-match "^\\[PERMISSION_REQUEST \\(.*\\)\\]$" line)
+    (let* ((json-str (match-string 1 line))
+           (data (ignore-errors (json-read-from-string json-str))))
+      (when data
+        (claudemacs-agent--set-status "Awaiting permission...")
+        (claudemacs-agent--show-permission-prompt data))))
+
    ;; User message start
    ((string= line "[USER]")
     (setq claudemacs-agent--parse-state 'user)
@@ -433,6 +441,175 @@
         (with-selected-window win
           (goto-char (point-max))
           (recenter -2))))))
+
+;;;; Permission prompt UI
+
+(defvar-local claudemacs-agent--permission-data nil
+  "Current permission request data.")
+
+(defvar-local claudemacs-agent--permission-selection 0
+  "Currently selected option in permission prompt (0-3).")
+
+(defface claudemacs-agent-permission-box-face
+  '((t :foreground "#e5c07b" :background "#3e4451" :box (:line-width 1 :color "#5c6370")))
+  "Face for permission dialog box."
+  :group 'claudemacs-agent)
+
+(defface claudemacs-agent-permission-selected-face
+  '((t :foreground "#282c34" :background "#61afef" :weight bold))
+  "Face for selected option in permission dialog."
+  :group 'claudemacs-agent)
+
+(defface claudemacs-agent-permission-option-face
+  '((t :foreground "#abb2bf"))
+  "Face for unselected options in permission dialog."
+  :group 'claudemacs-agent)
+
+(defun claudemacs-agent--format-tool-input (tool-name tool-input)
+  "Format TOOL-INPUT for display based on TOOL-NAME."
+  (cond
+   ((string= tool-name "Read")
+    (format "file: %s" (cdr (assq 'file_path tool-input))))
+   ((string= tool-name "Write")
+    (format "file: %s" (cdr (assq 'file_path tool-input))))
+   ((string= tool-name "Edit")
+    (format "file: %s" (cdr (assq 'file_path tool-input))))
+   ((string= tool-name "Bash")
+    (let ((cmd (cdr (assq 'command tool-input))))
+      (format "cmd: %s" (if (> (length cmd) 50)
+                            (concat (substring cmd 0 47) "...")
+                          cmd))))
+   (t (format "%s" tool-input))))
+
+(defun claudemacs-agent--generate-permission-pattern (tool-name tool-input scope)
+  "Generate permission pattern for TOOL-NAME with TOOL-INPUT at SCOPE level."
+  (pcase scope
+    ('once nil)  ; No pattern needed for once
+    ('session
+     (pcase tool-name
+       ("Read" (format "Read(%s)" (cdr (assq 'file_path tool-input))))
+       ("Write" (format "Write(%s)" (cdr (assq 'file_path tool-input))))
+       ("Edit" (format "Edit(%s)" (cdr (assq 'file_path tool-input))))
+       ("Bash"
+        (let* ((cmd (cdr (assq 'command tool-input)))
+               (first-word (car (split-string cmd))))
+          (format "Bash(%s:*)" first-word)))
+       (_ (format "%s(*)" tool-name))))
+    ('always
+     ;; For always, create a broader pattern
+     (pcase tool-name
+       ("Read"
+        (let* ((path (cdr (assq 'file_path tool-input)))
+               (dir (file-name-directory path)))
+          (format "Read(%s*)" (or dir "/"))))
+       ("Write"
+        (let* ((path (cdr (assq 'file_path tool-input)))
+               (dir (file-name-directory path)))
+          (format "Write(%s*)" (or dir "/"))))
+       ("Edit"
+        (let* ((path (cdr (assq 'file_path tool-input)))
+               (dir (file-name-directory path)))
+          (format "Edit(%s*)" (or dir "/"))))
+       ("Bash"
+        (let* ((cmd (cdr (assq 'command tool-input)))
+               (first-word (car (split-string cmd))))
+          (format "Bash(%s:*)" first-word)))
+       (_ (format "%s(*)" tool-name))))))
+
+(defun claudemacs-agent--show-permission-prompt (data)
+  "Show permission prompt for DATA in the buffer."
+  (setq claudemacs-agent--permission-data data)
+  (setq claudemacs-agent--permission-selection 0)
+  (let* ((tool-name (cdr (assq 'tool_name data)))
+         (tool-input (cdr (assq 'tool_input data)))
+         (input-str (claudemacs-agent--format-tool-input tool-name tool-input))
+         (inhibit-read-only t))
+    ;; Append permission prompt to output
+    (claudemacs-agent--append-output
+     (format "\n┌─ Permission Request ─────────────────────────────────┐\n")
+     'claudemacs-agent-permission-box-face)
+    (claudemacs-agent--append-output
+     (format "│ Claude wants to run: %-34s │\n" tool-name)
+     'claudemacs-agent-permission-box-face)
+    (claudemacs-agent--append-output
+     (format "│ %-53s │\n" (truncate-string-to-width input-str 53))
+     'claudemacs-agent-permission-box-face)
+    (claudemacs-agent--append-output
+     "│                                                       │\n"
+     'claudemacs-agent-permission-box-face)
+    (claudemacs-agent--append-output
+     "│  [1] Allow once    [2] Allow session                  │\n"
+     'claudemacs-agent-permission-box-face)
+    (claudemacs-agent--append-output
+     "│  [3] Always allow  [4] Deny                           │\n"
+     'claudemacs-agent-permission-box-face)
+    (claudemacs-agent--append-output
+     "└───────────────────────────────────────────────────────┘\n"
+     'claudemacs-agent-permission-box-face)
+    ;; Set up temporary keymap for selection
+    (claudemacs-agent--setup-permission-keymap)))
+
+(defun claudemacs-agent--setup-permission-keymap ()
+  "Set up keymap for permission prompt interaction."
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "1") #'claudemacs-agent-permit-once)
+    (define-key map (kbd "2") #'claudemacs-agent-permit-session)
+    (define-key map (kbd "3") #'claudemacs-agent-permit-always)
+    (define-key map (kbd "4") #'claudemacs-agent-deny)
+    (define-key map (kbd "y") #'claudemacs-agent-permit-once)
+    (define-key map (kbd "n") #'claudemacs-agent-deny)
+    (define-key map (kbd "a") #'claudemacs-agent-permit-always)
+    (define-key map (kbd "RET") #'claudemacs-agent-permit-once)
+    (define-key map (kbd "q") #'claudemacs-agent-deny)
+    ;; Set as minor mode map temporarily
+    (setq-local claudemacs-agent--permission-keymap map)
+    (use-local-map (make-composed-keymap map claudemacs-agent-base-mode-map))
+    (message "Permission: [1]once [2]session [3]always [4/n]deny")))
+
+(defun claudemacs-agent--send-permission-response (action)
+  "Send permission response with ACTION to the agent process."
+  (when claudemacs-agent--permission-data
+    (let* ((tool-name (cdr (assq 'tool_name claudemacs-agent--permission-data)))
+           (tool-input (cdr (assq 'tool_input claudemacs-agent--permission-data)))
+           (scope (pcase action
+                    ("allow_once" 'once)
+                    ("allow_session" 'session)
+                    ("allow_always" 'always)
+                    (_ nil)))
+           (pattern (when scope
+                      (claudemacs-agent--generate-permission-pattern
+                       tool-name tool-input scope)))
+           (response (json-encode `((action . ,action)
+                                    (pattern . ,pattern)))))
+      ;; Clear permission state
+      (setq claudemacs-agent--permission-data nil)
+      ;; Restore normal keymap
+      (use-local-map claudemacs-agent-base-mode-map)
+      ;; Send response to process
+      (when (and claudemacs-agent--process
+                 (process-live-p claudemacs-agent--process))
+        (process-send-string claudemacs-agent--process
+                             (format "/permit %s\n" response))))))
+
+(defun claudemacs-agent-permit-once ()
+  "Allow the tool to run once."
+  (interactive)
+  (claudemacs-agent--send-permission-response "allow_once"))
+
+(defun claudemacs-agent-permit-session ()
+  "Allow the tool pattern for this session."
+  (interactive)
+  (claudemacs-agent--send-permission-response "allow_session"))
+
+(defun claudemacs-agent-permit-always ()
+  "Always allow this tool pattern (saves to settings)."
+  (interactive)
+  (claudemacs-agent--send-permission-response "allow_always"))
+
+(defun claudemacs-agent-deny ()
+  "Deny the permission request."
+  (interactive)
+  (claudemacs-agent--send-permission-response "deny"))
 
 ;;;; Process management
 
