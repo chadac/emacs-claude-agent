@@ -15,10 +15,6 @@ dist/
 .uv/
 uv.lock
 
-# Test files
-test_*.py
-test_*.el
-test-*.sh
 
 # Backup files
 *.old
