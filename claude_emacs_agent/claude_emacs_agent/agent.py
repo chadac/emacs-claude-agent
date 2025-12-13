@@ -47,6 +47,8 @@ MARKER_THINKING = "[THINKING]"  # Signals Claude is processing
 MARKER_PROGRESS = "[PROGRESS "  # followed by JSON and ]
 MARKER_RESULT = "[RESULT "  # followed by JSON and ]
 MARKER_PERMISSION_REQUEST = "[PERMISSION_REQUEST "  # followed by JSON and ]
+MARKER_EDIT = "[EDIT "  # followed by JSON with file_path, old_string, new_string
+MARKER_WRITE = "[WRITE "  # followed by JSON with file_path, content
 
 
 def _format_traceback() -> str:
@@ -75,6 +77,8 @@ class AgentState:
     # Permission tracking
     session_permissions: set = field(default_factory=set)  # Patterns allowed for session
     always_permissions: set = field(default_factory=set)  # Patterns always allowed
+    # Message counter for periodic reminders
+    message_count: int = 0
 
 
 class ClaudeEmacsAgent:
@@ -163,6 +167,18 @@ class ClaudeEmacsAgent:
             self.state.session_id = session_id
         if info:
             self._emit(f"{MARKER_SESSION_INFO}{json.dumps(info)}]")
+
+    def _filter_system_reminders(self, text: str) -> str:
+        """Remove <system-reminder>...</system-reminder> blocks from text."""
+        import re
+        # Remove system-reminder blocks (including newlines around them)
+        filtered = re.sub(
+            r'\n?<system-reminder>.*?</system-reminder>\n?',
+            '',
+            text,
+            flags=re.DOTALL
+        )
+        return filtered
 
     def _format_tool_args(self, tool_name: str, tool_input: dict) -> str:
         """Format tool input for display as function-style args."""
@@ -374,8 +390,12 @@ class ClaudeEmacsAgent:
         self._emit(message)
         self._emit(f"{MARKER_USER_END}")
 
-        # Add org-mode reminder to message
-        full_message = f"{message}\n\n(Reminder: format your response in org-mode.)"
+        # Add org-mode reminder periodically (every 10 messages, starting with first)
+        self.state.message_count += 1
+        if self.state.message_count % 10 == 1:
+            full_message = f"{message}\n\n(Reminder: Your response will be displayed in an Emacs buffer with org-mode formatting. Always use org-mode syntax, NOT markdown. Use *bold* not **bold**, use /italic/ not *italic*, use =code= not `code`, use #+begin_src/#+end_src not ```)"
+        else:
+            full_message = message
 
         self.state.status = "thinking"
         self._emit(MARKER_THINKING)
@@ -427,9 +447,26 @@ class ClaudeEmacsAgent:
                             tool_name = getattr(block, "name", "unknown")
                             tool_input = getattr(block, "input", {})
                             current_tool = tool_name
-                            # Format tool args for display
-                            tool_args = self._format_tool_args(tool_name, tool_input)
-                            self._emit(f"{MARKER_TOOL_START}{tool_name} {tool_args}]")
+
+                            # Special handling for Edit tool - emit diff info
+                            if tool_name == "Edit":
+                                edit_info = {
+                                    "file_path": tool_input.get("file_path", ""),
+                                    "old_string": tool_input.get("old_string", ""),
+                                    "new_string": tool_input.get("new_string", ""),
+                                }
+                                self._emit(f"{MARKER_EDIT}{json.dumps(edit_info)}]")
+                            # Special handling for Write tool - emit content for diff
+                            elif tool_name == "Write":
+                                write_info = {
+                                    "file_path": tool_input.get("file_path", ""),
+                                    "content": tool_input.get("content", ""),
+                                }
+                                self._emit(f"{MARKER_WRITE}{json.dumps(write_info)}]")
+                            else:
+                                # Format tool args for display
+                                tool_args = self._format_tool_args(tool_name, tool_input)
+                                self._emit(f"{MARKER_TOOL_START}{tool_name} {tool_args}]")
 
                     # Update token counts if available
                     usage = getattr(msg, "usage", None)
@@ -454,15 +491,15 @@ class ClaudeEmacsAgent:
                                 self._emit(f"{MARKER_TOOL_RESULT_START}")
                                 # Content can be a string or list of content blocks
                                 if isinstance(content, str):
-                                    self._emit(content)
+                                    self._emit(self._filter_system_reminders(content))
                                 elif isinstance(content, list):
                                     for item in content:
                                         if hasattr(item, "text"):
-                                            self._emit(item.text)
+                                            self._emit(self._filter_system_reminders(item.text))
                                         elif isinstance(item, dict) and "text" in item:
-                                            self._emit(item["text"])
+                                            self._emit(self._filter_system_reminders(item["text"]))
                                         elif isinstance(item, str):
-                                            self._emit(item)
+                                            self._emit(self._filter_system_reminders(item))
                                 self._emit(f"{MARKER_TOOL_RESULT_END}")
                             # Close the tool block
                             if current_tool:

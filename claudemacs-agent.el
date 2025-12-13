@@ -88,6 +88,31 @@
   "Face for the input area header."
   :group 'claudemacs-agent)
 
+(defface claudemacs-agent-diff-removed
+  '((t :inherit diff-refine-removed))
+  "Face for removed lines in diff display."
+  :group 'claudemacs-agent)
+
+(defface claudemacs-agent-diff-added
+  '((t :inherit diff-refine-added))
+  "Face for added lines in diff display."
+  :group 'claudemacs-agent)
+
+(defface claudemacs-agent-diff-header
+  '((t :foreground "#5c6370"))
+  "Face for diff box drawing characters."
+  :group 'claudemacs-agent)
+
+(defface claudemacs-agent-file-link
+  '((t :inherit link :underline t))
+  "Face for clickable file paths."
+  :group 'claudemacs-agent)
+
+(defface claudemacs-agent-line-number
+  '((t :foreground "#5c6370"))
+  "Face for line numbers in file content display."
+  :group 'claudemacs-agent)
+
 
 ;;;; Buffer-local variables - Section markers
 ;;
@@ -172,6 +197,14 @@ Set fresh after each dynamic section rebuild.")
   "Face for placeholder text in empty input area."
   :group 'claudemacs-agent)
 
+;;;; Buffer-local variables - Input mode
+
+(defvar-local claudemacs-agent--input-mode 'text
+  "Current input mode: `text' for normal input, `permission' for permission prompt.")
+
+(defvar-local claudemacs-agent--saved-input ""
+  "Saved input text when switching away from text mode.")
+
 ;;;; Buffer-local variables - Message queue
 
 (defvar-local claudemacs-agent--message-queue nil
@@ -223,7 +256,11 @@ Uses org-mode fontification without org-mode keybindings."
   (local-set-key (kbd "M-p") #'claudemacs-agent-previous-input)
   (local-set-key (kbd "M-n") #'claudemacs-agent-next-input)
   ;; Set up placeholder update hook
-  (add-hook 'post-command-hook #'claudemacs-agent--post-command-hook nil t))
+  (add-hook 'post-command-hook #'claudemacs-agent--post-command-hook nil t)
+  ;; Set up evil insert state entry hook to move to input area
+  ;; Use after-change-major-mode-hook to ensure evil is loaded
+  (add-hook 'evil-insert-state-entry-hook
+            #'claudemacs-agent--on-insert-state-entry nil t))
 
 ;;;; Helper functions
 
@@ -272,10 +309,29 @@ Uses org-mode fontification without org-mode keybindings."
         (delete-overlay claudemacs-agent--placeholder-overlay)
         (setq claudemacs-agent--placeholder-overlay nil)))))
 
+(defun claudemacs-agent--in-insert-state-p ()
+  "Return t if evil-mode is active and in insert state."
+  (and (bound-and-true-p evil-local-mode)
+       (eq evil-state 'insert)))
+
+(defun claudemacs-agent--on-insert-state-entry ()
+  "Hook called when entering evil insert state.
+Moves cursor to input area if currently outside it."
+  (when (and claudemacs-agent--input-start-marker
+             (marker-position claudemacs-agent--input-start-marker)
+             (< (point) claudemacs-agent--input-start-marker))
+    (goto-char claudemacs-agent--input-start-marker)))
+
 (defun claudemacs-agent--post-command-hook ()
   "Hook run after each command to update placeholder visibility.
-Also moves point to prompt marker when input area is empty."
+Also constrains cursor to input area when in evil insert state."
   (claudemacs-agent--update-placeholder)
+  ;; In insert mode, keep cursor in input area
+  (when (and claudemacs-agent--input-start-marker
+             (marker-position claudemacs-agent--input-start-marker)
+             (claudemacs-agent--in-insert-state-p)
+             (< (point) claudemacs-agent--input-start-marker))
+    (goto-char claudemacs-agent--input-start-marker))
   ;; If input is empty and we're in the input area, keep cursor at prompt
   (when (and (claudemacs-agent--input-empty-p)
              (claudemacs-agent--in-input-area-p)
@@ -366,50 +422,31 @@ Also moves point to prompt marker when input area is empty."
     ""))
 
 (defun claudemacs-agent--append-to-static (text)
-  "Append TEXT to the static section and re-render dynamic section."
-  ;; Save input and cursor BEFORE any modifications
-  (let* ((saved-input (claudemacs-agent--get-input-text))
-         (cursor-offset (when (and claudemacs-agent--input-start-marker
-                                   (marker-position claudemacs-agent--input-start-marker)
-                                   (>= (point) claudemacs-agent--input-start-marker))
-                          (- (point) claudemacs-agent--input-start-marker)))
-         (inhibit-read-only t))
-    ;; Delete everything from static-end to end
-    (delete-region claudemacs-agent--static-end-marker (point-max))
-    ;; Insert new static content
-    (goto-char claudemacs-agent--static-end-marker)
-    (insert text)
-    (set-marker claudemacs-agent--static-end-marker (point))
-    ;; Insert status bar
-    (when claudemacs-agent--has-conversation
-      (claudemacs-agent--insert-status-bar))
-    ;; Set input marker and restore input
-    (setq claudemacs-agent--input-start-marker (point-marker))
-    (insert saved-input)
-    ;; Finalize
-    (claudemacs-agent--update-read-only)
-    (claudemacs-agent--update-placeholder)
-    ;; Restore cursor
-    (goto-char (if (and cursor-offset (>= cursor-offset 0))
-                   (min (+ claudemacs-agent--input-start-marker cursor-offset) (point-max))
-                 claudemacs-agent--input-start-marker))))
+  "Append TEXT to the static section and re-render dynamic section.
+This is a convenience wrapper for `append-to-log' without styling."
+  (claudemacs-agent--append-to-log text nil nil))
 
 (defun claudemacs-agent--render-dynamic-section ()
   "Render the dynamic section (status bar + input area).
 Clears everything after static-end-marker and re-renders from state.
-Preserves any text in the input area and cursor position."
+Handles different input modes: text input vs permission prompt."
   (let* ((inhibit-read-only t)
-         ;; Save cursor position relative to input-start (offset into input text)
-         (cursor-offset (when (and claudemacs-agent--input-start-marker
+         ;; Only save cursor offset if in text mode
+         (cursor-offset (when (and (eq claudemacs-agent--input-mode 'text)
+                                   claudemacs-agent--input-start-marker
                                    (marker-position claudemacs-agent--input-start-marker)
                                    (>= (point) claudemacs-agent--input-start-marker))
                           (- (point) claudemacs-agent--input-start-marker)))
-         (input-to-restore (claudemacs-agent--get-input-text)))
+         ;; Only capture input if in text mode (permission mode uses saved-input)
+         (input-to-restore (if (eq claudemacs-agent--input-mode 'text)
+                               (claudemacs-agent--get-input-text)
+                             "")))
     ;; Clear overlays in dynamic section
     (when (and claudemacs-agent--static-end-marker
                (marker-position claudemacs-agent--static-end-marker))
       (dolist (ov (overlays-in claudemacs-agent--static-end-marker (point-max)))
-        (when (overlay-get ov 'claudemacs-agent-styled)
+        (when (or (overlay-get ov 'claudemacs-agent-styled)
+                  (overlay-get ov 'claudemacs-permission-face))
           (delete-overlay ov)))
       ;; Delete everything from static-end to end of buffer
       (delete-region claudemacs-agent--static-end-marker (point-max)))
@@ -421,23 +458,40 @@ Preserves any text in the input area and cursor position."
     (when claudemacs-agent--has-conversation
       (claudemacs-agent--insert-status-bar))
 
-    ;; === SET INPUT MARKER AND RESTORE INPUT ===
-    (setq claudemacs-agent--input-start-marker (point-marker))
-    (set-marker-insertion-type claudemacs-agent--input-start-marker nil)
-    (unless (string-empty-p input-to-restore)
-      (insert input-to-restore))
+    ;; === RENDER INPUT AREA BASED ON MODE ===
+    (pcase claudemacs-agent--input-mode
+      ('text
+       ;; Normal text input mode
+       (setq claudemacs-agent--input-start-marker (point-marker))
+       (set-marker-insertion-type claudemacs-agent--input-start-marker nil)
+       (unless (string-empty-p input-to-restore)
+         (insert input-to-restore))
+       ;; Update read-only and placeholder
+       (claudemacs-agent--update-read-only)
+       (claudemacs-agent--update-placeholder)
+       ;; Restore cursor position within input area
+       (if (and cursor-offset (>= cursor-offset 0))
+           (goto-char (min (+ claudemacs-agent--input-start-marker cursor-offset)
+                           (point-max)))
+         (goto-char claudemacs-agent--input-start-marker)))
 
-    ;; Update read-only and placeholder
-    (claudemacs-agent--update-read-only)
-    (claudemacs-agent--update-placeholder)
+      ('empty
+       ;; Empty mode - clear input area and switch to text mode
+       ;; This discards any saved input and starts fresh
+       (setq claudemacs-agent--saved-input "")
+       (setq claudemacs-agent--input-mode 'text)
+       (setq claudemacs-agent--input-start-marker (point-marker))
+       (set-marker-insertion-type claudemacs-agent--input-start-marker nil)
+       ;; Update read-only and placeholder (will show placeholder since empty)
+       (claudemacs-agent--update-read-only)
+       (claudemacs-agent--update-placeholder)
+       (goto-char claudemacs-agent--input-start-marker))
 
-    ;; Restore cursor position within input area
-    (if (and cursor-offset (>= cursor-offset 0))
-        ;; Restore to saved position (clamped to input length)
-        (goto-char (min (+ claudemacs-agent--input-start-marker cursor-offset)
-                        (point-max)))
-      ;; Otherwise position at start of input
-      (goto-char claudemacs-agent--input-start-marker))))
+      ('permission
+       ;; Permission prompt mode - render the permission dialog
+       (setq claudemacs-agent--input-start-marker (point-marker))
+       (claudemacs-agent--render-permission-content)
+       (claudemacs-agent--update-read-only)))))
 
 ;;;; Status bar rendering
 
@@ -536,10 +590,312 @@ Called by `render-dynamic-section'. Assumes point is positioned correctly."
 
 ;;;; Content helpers
 
-(defun claudemacs-agent--append-to-log (text &optional _face _virtual-indent)
+(defun claudemacs-agent--insert-diff (file-path old-string new-string)
+  "Insert a diff display for FILE-PATH with OLD-STRING and NEW-STRING.
+Inserts directly at point with proper faces and clickable link."
+  (let ((inhibit-read-only t))
+    ;; Header with clickable file link
+    (let ((header-start (point)))
+      (insert "\n┌─ Edit: ")
+      (claudemacs-agent--apply-face header-start (point) 'claudemacs-agent-diff-header))
+    ;; File path as button
+    (insert-text-button file-path
+                        'action (lambda (_btn)
+                                  (find-file-other-window
+                                   (button-get _btn 'file-path)))
+                        'file-path file-path
+                        'face 'claudemacs-agent-file-link
+                        'help-echo "Click to open file"
+                        'follow-link t)
+    (let ((nl-start (point)))
+      (insert "\n")
+      (claudemacs-agent--apply-face nl-start (point) 'claudemacs-agent-diff-header))
+    ;; Old lines (removed)
+    (when (and old-string (not (string-empty-p old-string)))
+      (dolist (line (split-string old-string "\n"))
+        (let ((line-start (point)))
+          (insert "│- " line "\n")
+          (claudemacs-agent--apply-face line-start (point) 'claudemacs-agent-diff-removed))))
+    ;; New lines (added)
+    (when (and new-string (not (string-empty-p new-string)))
+      (dolist (line (split-string new-string "\n"))
+        (let ((line-start (point)))
+          (insert "│+ " line "\n")
+          (claudemacs-agent--apply-face line-start (point) 'claudemacs-agent-diff-added))))
+    ;; Footer
+    (let ((footer-start (point)))
+      (insert "└─\n")
+      (claudemacs-agent--apply-face footer-start (point) 'claudemacs-agent-diff-header))))
+
+(defun claudemacs-agent--format-tool-call (tool-name args-string)
+  "Format a tool call for display with TOOL-NAME and ARGS-STRING.
+Returns formatted string like: ⚙ ToolName(args)
+with 1-space indent applied via virtual indentation."
+  (format "\n ⚙ %s(%s)\n" tool-name args-string))
+
+(defun claudemacs-agent--insert-tool-call (tool-name args-string)
+  "Insert a tool call display for TOOL-NAME with ARGS-STRING.
+Uses consistent formatting with 1-space virtual indent and tool face."
+  (claudemacs-agent--append-to-log
+   (claudemacs-agent--format-tool-call tool-name args-string)
+   'claudemacs-agent-tool-face
+   " "))  ; 1-space virtual indent for wrapped lines
+
+(defun claudemacs-agent--insert-tool-result-start ()
+  "Insert the start of a tool result section."
+  (claudemacs-agent--append-to-log " #+begin_example\n" nil " "))
+
+(defun claudemacs-agent--insert-tool-result-end ()
+  "Insert the end of a tool result section."
+  (claudemacs-agent--append-to-log " #+end_example\n" nil))
+
+(defun claudemacs-agent--insert-bash-tool (command)
+  "Insert a Bash tool call with COMMAND formatted as org src block."
+  (claudemacs-agent--append-to-log
+   (format "\n #+begin_src bash\n %s\n #+end_src\n" command)
+   nil
+   " "))
+
+(defvar-local claudemacs-agent--current-read-file nil
+  "File path for current Read tool being displayed.")
+
+(defvar-local claudemacs-agent--current-write-file nil
+  "File path for current Write tool being displayed.")
+
+(defvar-local claudemacs-agent--current-write-content nil
+  "Content for current Write tool being displayed.")
+
+(defun claudemacs-agent--insert-read-tool (file-path)
+  "Insert a Read tool header with FILE-PATH as clickable link."
+  (setq claudemacs-agent--current-read-file file-path)
+  (let* ((inhibit-read-only t)
+         (saved-input (if (eq claudemacs-agent--input-mode 'text)
+                          (claudemacs-agent--get-input-text)
+                        claudemacs-agent--saved-input))
+         (cursor-offset (when (and (eq claudemacs-agent--input-mode 'text)
+                                   claudemacs-agent--input-start-marker
+                                   (marker-position claudemacs-agent--input-start-marker)
+                                   (>= (point) claudemacs-agent--input-start-marker))
+                          (- (point) claudemacs-agent--input-start-marker))))
+    ;; Delete dynamic section
+    (delete-region claudemacs-agent--static-end-marker (point-max))
+    (goto-char claudemacs-agent--static-end-marker)
+    ;; Insert header with tool icon
+    (let ((start (point)))
+      (insert "\n ⚙ Read(")
+      (claudemacs-agent--apply-face start (point) 'claudemacs-agent-tool-face))
+    ;; File path as clickable button
+    (insert-text-button file-path
+                        'action (lambda (_btn)
+                                  (find-file-other-window
+                                   (button-get _btn 'file-path)))
+                        'file-path file-path
+                        'face 'claudemacs-agent-file-link
+                        'help-echo "Click to open file"
+                        'follow-link t)
+    (let ((end-start (point)))
+      (insert ")\n")
+      (claudemacs-agent--apply-face end-start (point) 'claudemacs-agent-tool-face))
+    ;; Update static marker
+    (set-marker claudemacs-agent--static-end-marker (point))
+    ;; Rebuild dynamic section
+    (when claudemacs-agent--has-conversation
+      (claudemacs-agent--insert-status-bar))
+    (setq claudemacs-agent--input-start-marker (point-marker))
+    (insert saved-input)
+    (claudemacs-agent--update-read-only)
+    (claudemacs-agent--update-placeholder)
+    (goto-char (if (and cursor-offset (>= cursor-offset 0))
+                   (min (+ claudemacs-agent--input-start-marker cursor-offset) (point-max))
+                 claudemacs-agent--input-start-marker))))
+
+(defun claudemacs-agent--format-read-line (line)
+  "Format a LINE from Read tool output with prettier line numbers.
+Input format: '     N→content' where N is line number."
+  (if (string-match "^\\( *\\)\\([0-9]+\\)→\\(.*\\)$" line)
+      (let ((line-num (match-string 2 line))
+            (content (match-string 3 line)))
+        (cons (format "%4s│ " line-num) content))
+    ;; Not a numbered line, return as-is
+    (cons nil line)))
+
+(defun claudemacs-agent--insert-read-content (content)
+  "Insert Read tool CONTENT with formatted line numbers.
+Expects content in the format from Claude's Read tool."
+  (let* ((inhibit-read-only t)
+         (saved-input (if (eq claudemacs-agent--input-mode 'text)
+                          (claudemacs-agent--get-input-text)
+                        claudemacs-agent--saved-input))
+         (cursor-offset (when (and (eq claudemacs-agent--input-mode 'text)
+                                   claudemacs-agent--input-start-marker
+                                   (marker-position claudemacs-agent--input-start-marker)
+                                   (>= (point) claudemacs-agent--input-start-marker))
+                          (- (point) claudemacs-agent--input-start-marker)))
+         (lines (split-string content "\n"))
+         ;; Remove trailing empty lines
+         (trimmed-lines (let ((result lines))
+                          (while (and result (string-empty-p (car (last result))))
+                            (setq result (butlast result)))
+                          result)))
+    ;; Delete dynamic section
+    (delete-region claudemacs-agent--static-end-marker (point-max))
+    (goto-char claudemacs-agent--static-end-marker)
+    ;; Insert each line with formatted line numbers
+    (dolist (line trimmed-lines)
+      (let ((parsed (claudemacs-agent--format-read-line line)))
+        (if (car parsed)
+            ;; Line with number
+            (progn
+              (let ((num-start (point)))
+                (insert " " (car parsed))
+                (claudemacs-agent--apply-face num-start (point) 'claudemacs-agent-line-number))
+              (insert (cdr parsed) "\n"))
+          ;; Plain line (no number)
+          (insert " " (cdr parsed) "\n"))))
+    ;; Update static marker
+    (set-marker claudemacs-agent--static-end-marker (point))
+    ;; Rebuild dynamic section
+    (when claudemacs-agent--has-conversation
+      (claudemacs-agent--insert-status-bar))
+    (setq claudemacs-agent--input-start-marker (point-marker))
+    (insert saved-input)
+    (claudemacs-agent--update-read-only)
+    (claudemacs-agent--update-placeholder)
+    (goto-char (if (and cursor-offset (>= cursor-offset 0))
+                   (min (+ claudemacs-agent--input-start-marker cursor-offset) (point-max))
+                 claudemacs-agent--input-start-marker))))
+
+(defun claudemacs-agent--insert-write-tool (file-path)
+  "Insert a Write tool header with FILE-PATH as clickable link.
+Follows same pattern as `claudemacs-agent--insert-read-tool'."
+  (setq claudemacs-agent--current-write-file file-path)
+  (let* ((inhibit-read-only t)
+         (saved-input (if (eq claudemacs-agent--input-mode 'text)
+                          (claudemacs-agent--get-input-text)
+                        claudemacs-agent--saved-input))
+         (cursor-offset (when (and (eq claudemacs-agent--input-mode 'text)
+                                   claudemacs-agent--input-start-marker
+                                   (marker-position claudemacs-agent--input-start-marker)
+                                   (>= (point) claudemacs-agent--input-start-marker))
+                          (- (point) claudemacs-agent--input-start-marker))))
+    ;; Delete dynamic section
+    (delete-region claudemacs-agent--static-end-marker (point-max))
+    (goto-char claudemacs-agent--static-end-marker)
+    ;; Insert header with tool icon
+    (let ((start (point)))
+      (insert "\n ⚙ Write(")
+      (claudemacs-agent--apply-face start (point) 'claudemacs-agent-tool-face))
+    ;; File path as clickable button
+    (insert-text-button file-path
+                        'action (lambda (_btn)
+                                  (find-file-other-window
+                                   (button-get _btn 'file-path)))
+                        'file-path file-path
+                        'face 'claudemacs-agent-file-link
+                        'help-echo "Click to open file"
+                        'follow-link t)
+    (let ((end-start (point)))
+      (insert ")\n")
+      (claudemacs-agent--apply-face end-start (point) 'claudemacs-agent-tool-face))
+    ;; Update static marker
+    (set-marker claudemacs-agent--static-end-marker (point))
+    ;; Rebuild dynamic section
+    (when claudemacs-agent--has-conversation
+      (claudemacs-agent--insert-status-bar))
+    (setq claudemacs-agent--input-start-marker (point-marker))
+    (insert saved-input)
+    (claudemacs-agent--update-read-only)
+    (claudemacs-agent--update-placeholder)
+    (goto-char (if (and cursor-offset (>= cursor-offset 0))
+                   (min (+ claudemacs-agent--input-start-marker cursor-offset) (point-max))
+                 claudemacs-agent--input-start-marker))))
+
+(defun claudemacs-agent--insert-write-content (content)
+  "Insert Write tool CONTENT with line numbers showing additions.
+Follows same pattern as `claudemacs-agent--insert-read-content'."
+  (setq claudemacs-agent--current-write-content content)
+  (let* ((inhibit-read-only t)
+         (saved-input (if (eq claudemacs-agent--input-mode 'text)
+                          (claudemacs-agent--get-input-text)
+                        claudemacs-agent--saved-input))
+         (cursor-offset (when (and (eq claudemacs-agent--input-mode 'text)
+                                   claudemacs-agent--input-start-marker
+                                   (marker-position claudemacs-agent--input-start-marker)
+                                   (>= (point) claudemacs-agent--input-start-marker))
+                          (- (point) claudemacs-agent--input-start-marker)))
+         (lines (split-string content "\n"))
+         ;; Remove trailing empty lines
+         (trimmed-lines (let ((result lines))
+                          (while (and result (string-empty-p (car (last result))))
+                            (setq result (butlast result)))
+                          result))
+         (line-num 0))
+    ;; Delete dynamic section
+    (delete-region claudemacs-agent--static-end-marker (point-max))
+    (goto-char claudemacs-agent--static-end-marker)
+    ;; Insert each line with line numbers and + prefix
+    (dolist (line trimmed-lines)
+      (cl-incf line-num)
+      (let ((num-start (point)))
+        (insert (format " %4d│+ " line-num))
+        (claudemacs-agent--apply-face num-start (point) 'claudemacs-agent-diff-added))
+      (insert line "\n"))
+    ;; Update static marker
+    (set-marker claudemacs-agent--static-end-marker (point))
+    ;; Rebuild dynamic section
+    (when claudemacs-agent--has-conversation
+      (claudemacs-agent--insert-status-bar))
+    (setq claudemacs-agent--input-start-marker (point-marker))
+    (insert saved-input)
+    (claudemacs-agent--update-read-only)
+    (claudemacs-agent--update-placeholder)
+    (goto-char (if (and cursor-offset (>= cursor-offset 0))
+                   (min (+ claudemacs-agent--input-start-marker cursor-offset) (point-max))
+                 claudemacs-agent--input-start-marker))))
+
+(defun claudemacs-agent--append-to-log (text &optional face virtual-indent)
   "Append TEXT to the static section (conversation log).
-FACE and VIRTUAL-INDENT are currently ignored (org fontification handles styling)."
-  (claudemacs-agent--append-to-static text))
+If FACE is non-nil, apply it as an overlay to the inserted text.
+If VIRTUAL-INDENT is non-nil, apply it as line-prefix/wrap-prefix."
+  ;; We need to apply face/indent to the text being inserted.
+  ;; Since append-to-static does complex operations, we'll handle styling here.
+  (let* ((inhibit-read-only t)
+         ;; In permission mode, use saved-input; in text mode, capture current input
+         (saved-input (if (eq claudemacs-agent--input-mode 'text)
+                          (claudemacs-agent--get-input-text)
+                        claudemacs-agent--saved-input))
+         (cursor-offset (when (and (eq claudemacs-agent--input-mode 'text)
+                                   claudemacs-agent--input-start-marker
+                                   (marker-position claudemacs-agent--input-start-marker)
+                                   (>= (point) claudemacs-agent--input-start-marker))
+                          (- (point) claudemacs-agent--input-start-marker))))
+    ;; Delete everything from static-end to end
+    (delete-region claudemacs-agent--static-end-marker (point-max))
+    ;; Insert new static content with styling
+    (goto-char claudemacs-agent--static-end-marker)
+    (let ((start (point)))
+      (insert text)
+      ;; Apply face overlay if specified
+      (when face
+        (claudemacs-agent--apply-face start (point) face))
+      ;; Apply virtual indent if specified
+      (when virtual-indent
+        (put-text-property start (point) 'line-prefix virtual-indent)
+        (put-text-property start (point) 'wrap-prefix virtual-indent)))
+    (set-marker claudemacs-agent--static-end-marker (point))
+    ;; Insert status bar
+    (when claudemacs-agent--has-conversation
+      (claudemacs-agent--insert-status-bar))
+    ;; Set input marker and restore input
+    (setq claudemacs-agent--input-start-marker (point-marker))
+    (insert saved-input)
+    ;; Finalize
+    (claudemacs-agent--update-read-only)
+    (claudemacs-agent--update-placeholder)
+    ;; Restore cursor
+    (goto-char (if (and cursor-offset (>= cursor-offset 0))
+                   (min (+ claudemacs-agent--input-start-marker cursor-offset) (point-max))
+                 claudemacs-agent--input-start-marker))))
 
 ;;;; Process filter - parsing markers
 
@@ -627,13 +983,64 @@ FACE and VIRTUAL-INDENT are currently ignored (org fontification handles styling
         (claudemacs-agent--set-thinking "Awaiting permission...")
         (claudemacs-agent--show-permission-prompt data))))
 
+   ;; Edit tool marker - show fancy diff display
+   ((string-match "^\\[EDIT \\(.*\\)\\]$" line)
+    (let* ((json-str (match-string 1 line))
+           (data (ignore-errors (json-read-from-string json-str))))
+      (when data
+        (let ((file-path (cdr (assq 'file_path data)))
+              (old-string (cdr (assq 'old_string data)))
+              (new-string (cdr (assq 'new_string data))))
+          (setq claudemacs-agent--parse-state 'tool)
+          (claudemacs-agent--set-thinking (format "Editing: %s" (file-name-nondirectory file-path)))
+          ;; Insert the diff display directly into the static section
+          (let* ((inhibit-read-only t)
+                 (saved-input (claudemacs-agent--get-input-text))
+                 (cursor-offset (when (and claudemacs-agent--input-start-marker
+                                           (marker-position claudemacs-agent--input-start-marker)
+                                           (>= (point) claudemacs-agent--input-start-marker))
+                                  (- (point) claudemacs-agent--input-start-marker))))
+            ;; Delete dynamic section
+            (delete-region claudemacs-agent--static-end-marker (point-max))
+            ;; Go to end of static section and insert diff
+            (goto-char claudemacs-agent--static-end-marker)
+            (claudemacs-agent--insert-diff file-path old-string new-string)
+            (set-marker claudemacs-agent--static-end-marker (point))
+            ;; Insert status bar
+            (when claudemacs-agent--has-conversation
+              (claudemacs-agent--insert-status-bar))
+            ;; Set input marker and restore input
+            (setq claudemacs-agent--input-start-marker (point-marker))
+            (insert saved-input)
+            ;; Finalize
+            (claudemacs-agent--update-read-only)
+            (claudemacs-agent--update-placeholder)
+            ;; Restore cursor
+            (goto-char (if (and cursor-offset (>= cursor-offset 0))
+                           (min (+ claudemacs-agent--input-start-marker cursor-offset) (point-max))
+                         claudemacs-agent--input-start-marker)))))))
+
+   ;; Write tool marker - show header then content like Read tool
+   ((string-match "^\\[WRITE \\(.*\\)\\]$" line)
+    (let* ((json-str (match-string 1 line))
+           (data (ignore-errors (json-read-from-string json-str))))
+      (when data
+        (let ((file-path (cdr (assq 'file_path data)))
+              (content (cdr (assq 'content data))))
+          (setq claudemacs-agent--parse-state 'tool)
+          (claudemacs-agent--set-thinking (format "Writing: %s" (file-name-nondirectory file-path)))
+          ;; Insert header first, then content (like Read tool pattern)
+          (claudemacs-agent--insert-write-tool file-path)
+          (claudemacs-agent--insert-write-content content)))))
+
    ;; User message start
    ((string= line "[USER]")
     (setq claudemacs-agent--parse-state 'user)
     ;; Mark conversation as started on first user message
     (setq claudemacs-agent--has-conversation t)
     (claudemacs-agent--append-to-log
-     "\n━━━ You ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"))
+     "\n━━━ You ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+     'claudemacs-agent-user-header-face))
 
    ;; User message end
    ((string= line "[/USER]")
@@ -643,13 +1050,14 @@ FACE and VIRTUAL-INDENT are currently ignored (org fontification handles styling
    ((string= line "[ASSISTANT]")
     (setq claudemacs-agent--parse-state 'assistant)
     (claudemacs-agent--append-to-log
-     "\n━━━ Claude ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"))
+     "\n━━━ Claude ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+     'claudemacs-agent-assistant-header-face))
 
    ;; Assistant message end
    ((string= line "[/ASSISTANT]")
     (setq claudemacs-agent--parse-state nil))
 
-   ;; Tool start - format as org src block for Bash, function-style for others
+   ;; Tool start - format based on tool type
    ((string-match "^\\[TOOL \\(.+\\)\\]$" line)
     (let* ((tool-info (match-string 1 line))
            (tool-name tool-info)
@@ -658,28 +1066,32 @@ FACE and VIRTUAL-INDENT are currently ignored (org fontification handles styling
       (when (string-match "^\\([^ ]+\\) \\(.*\\)$" tool-info)
         (setq tool-name (match-string 1 tool-info)
               tool-args (match-string 2 tool-info)))
-      (setq claudemacs-agent--parse-state 'tool)
+      (setq claudemacs-agent--parse-state (if (string= tool-name "Read") 'read-tool 'tool))
       (claudemacs-agent--set-thinking (format "Running: %s" tool-name))
       ;; Format based on tool type
-      (if (string= tool-name "Bash")
-          ;; Bash commands get org src block formatting
-          (claudemacs-agent--append-to-log
-           (format "\n#+begin_src bash\n%s\n#+end_src\n" tool-args)
-           nil)  ; Let org-mode handle fontification
-        ;; Other tools get function-style display
-        (claudemacs-agent--append-to-log
-         (format "\n⚙ %s(%s)\n" tool-name tool-args)
-         'claudemacs-agent-tool-face))))
+      (cond
+       ((string= tool-name "Bash")
+        (claudemacs-agent--insert-bash-tool tool-args))
+       ((string= tool-name "Read")
+        (claudemacs-agent--insert-read-tool tool-args))
+       (t
+        (claudemacs-agent--insert-tool-call tool-name tool-args)))))
 
-   ;; Tool result start - format as org example block
+   ;; Tool result start - format based on current tool type
    ((string= line "[TOOL_RESULT]")
-    (setq claudemacs-agent--parse-state 'tool-result)
-    (claudemacs-agent--append-to-log "#+begin_example\n" nil))
+    (if (eq claudemacs-agent--parse-state 'read-tool)
+        (setq claudemacs-agent--parse-state 'read-tool-result)
+      (progn
+        (setq claudemacs-agent--parse-state 'tool-result)
+        (claudemacs-agent--insert-tool-result-start))))
 
    ;; Tool result end
    ((string= line "[/TOOL_RESULT]")
-    (claudemacs-agent--append-to-log "#+end_example\n" nil)
-    (setq claudemacs-agent--parse-state 'tool))
+    (if (eq claudemacs-agent--parse-state 'read-tool-result)
+        (setq claudemacs-agent--parse-state 'read-tool)
+      (progn
+        (claudemacs-agent--insert-tool-result-end)
+        (setq claudemacs-agent--parse-state 'tool))))
 
    ;; Tool end
    ((string= line "[/TOOL]")
@@ -707,7 +1119,15 @@ FACE and VIRTUAL-INDENT are currently ignored (org fontification handles styling
    ;; Regular content line
    (t
     ;; Skip session content - it's redundant with our header/status sections
-    (unless (eq claudemacs-agent--parse-state 'session)
+    (cond
+     ;; Session content - skip entirely
+     ((eq claudemacs-agent--parse-state 'session)
+      nil)
+     ;; Read tool result - use special formatted display
+     ((eq claudemacs-agent--parse-state 'read-tool-result)
+      (claudemacs-agent--insert-read-content line))
+     ;; Other content
+     (t
       (let* ((face (pcase claudemacs-agent--parse-state
                      ('user 'claudemacs-agent-user-face)
                      ('assistant nil)  ; Let org fontification handle Claude's output
@@ -719,7 +1139,7 @@ FACE and VIRTUAL-INDENT are currently ignored (org fontification handles styling
                                ('user "  ")
                                ('assistant "  ")
                                (_ nil))))
-        (claudemacs-agent--append-to-log (concat line "\n") face virtual-indent))))))
+        (claudemacs-agent--append-to-log (concat line "\n") face virtual-indent)))))))
 
 ;;;; Permission prompt UI
 
@@ -818,11 +1238,10 @@ FACE and VIRTUAL-INDENT are currently ignored (org fontification handles styling
         (overlay-put ov 'evaporate nil)
         (overlay-put ov 'claudemacs-permission-face t)))))
 
-(defun claudemacs-agent--render-permission-dialog ()
-  "Render the permission dialog with current selection state."
-  (when (and claudemacs-agent--permission-data
-             claudemacs-agent--input-start-marker
-             claudemacs-agent--input-start-marker)
+(defun claudemacs-agent--render-permission-content ()
+  "Insert the permission dialog content at point.
+Called by `render-dynamic-section' when in permission mode."
+  (when claudemacs-agent--permission-data
     (let* ((tool-name (cdr (assq 'tool_name claudemacs-agent--permission-data)))
            (tool-input (cdr (assq 'tool_input claudemacs-agent--permission-data)))
            (input-str (claudemacs-agent--format-tool-input tool-name tool-input))
@@ -830,43 +1249,34 @@ FACE and VIRTUAL-INDENT are currently ignored (org fontification handles styling
            (inhibit-read-only t)
            (options '("Allow once" "Allow for this session" "Always allow" "Deny"))
            (overlay-specs nil))
-      ;; Remove existing permission overlays
-      (dolist (ov (overlays-in (point-min) (point-max)))
-        (when (overlay-get ov 'claudemacs-permission-face)
-          (delete-overlay ov)))
-      ;; Clear from input-start to end of buffer and replace with dialog
-      (save-excursion
-        (delete-region claudemacs-agent--input-start-marker (point-max))
-        (goto-char claudemacs-agent--input-start-marker)
-        ;; Helper to insert and record overlay spec
-        (cl-flet ((insert-styled (text face)
-                    (let ((start (point)))
-                      (insert text)
-                      (push (list start (point) face) overlay-specs))))
-          ;; Header
-          (insert-styled "── Permission Request " 'claudemacs-agent-input-header-face)
-          (insert-styled (make-string 40 ?─) 'claudemacs-agent-input-header-face)
-          (insert "\n")
-          ;; Tool info - now function-style
-          (insert-styled " Claude wants to run:\n" 'claudemacs-agent-session-face)
-          (insert-styled (format " %s(%s)\n\n" tool-name input-str) 'claudemacs-agent-tool-face)
-          ;; Options
-          (dotimes (i 4)
-            (let* ((selected (= i sel))
-                   (checkbox (if selected "[X]" "[ ]"))
-                   (label (nth i options))
-                   (face (if selected
-                             'claudemacs-agent-permission-selected-face
-                           'claudemacs-agent-permission-option-face)))
-              (insert-styled (format " %d. %s %s\n" (1+ i) checkbox label) face)))
-          ;; Footer
-          (insert-styled (make-string 62 ?─) 'claudemacs-agent-input-header-face)
-          (insert "\n")))
-      ;; Save overlay specs
+      ;; Helper to insert and record overlay spec
+      (cl-flet ((insert-styled (text face)
+                  (let ((start (point)))
+                    (insert text)
+                    (push (list start (point) face) overlay-specs))))
+        ;; Header
+        (insert-styled "── Permission Request " 'claudemacs-agent-input-header-face)
+        (insert-styled (make-string 40 ?─) 'claudemacs-agent-input-header-face)
+        (insert "\n")
+        ;; Tool info - now function-style
+        (insert-styled " Claude wants to run:\n" 'claudemacs-agent-session-face)
+        (insert-styled (format " %s(%s)\n\n" tool-name input-str) 'claudemacs-agent-tool-face)
+        ;; Options
+        (dotimes (i 4)
+          (let* ((selected (= i sel))
+                 (checkbox (if selected "[X]" "[ ]"))
+                 (label (nth i options))
+                 (face (if selected
+                           'claudemacs-agent-permission-selected-face
+                         'claudemacs-agent-permission-option-face)))
+            (insert-styled (format " %d. %s %s\n" (1+ i) checkbox label) face)))
+        ;; Footer
+        (insert-styled (make-string 62 ?─) 'claudemacs-agent-input-header-face)
+        (insert "\n"))
+      ;; Save overlay specs and apply
       (setq claudemacs-agent--permission-overlay-specs (nreverse overlay-specs))
-      ;; Apply overlays in this buffer
       (claudemacs-agent--apply-permission-overlays)
-      ;; Apply overlays in all indirect buffers too
+      ;; Apply in indirect buffers too
       (let ((base (current-buffer)))
         (dolist (buf (buffer-list))
           (when (and (buffer-live-p buf)
@@ -874,15 +1284,24 @@ FACE and VIRTUAL-INDENT are currently ignored (org fontification handles styling
             (with-current-buffer buf
               (setq claudemacs-agent--permission-overlay-specs
                     (buffer-local-value 'claudemacs-agent--permission-overlay-specs base))
-              (claudemacs-agent--apply-permission-overlays)))))
-      ;; Update prompt marker to end
-      (set-marker claudemacs-agent--input-start-marker (point-max)))))
+              (claudemacs-agent--apply-permission-overlays))))))))
+
+(defun claudemacs-agent--render-permission-dialog ()
+  "Re-render the permission dialog (updates selection state).
+This is called when the user navigates options."
+  (claudemacs-agent--render-dynamic-section))
 
 (defun claudemacs-agent--show-permission-prompt (data)
-  "Show permission prompt for DATA in the input area."
+  "Show permission prompt for DATA in the input area.
+Saves current input text and switches to permission mode."
+  ;; Save current input text before switching modes
+  (setq claudemacs-agent--saved-input (claudemacs-agent--get-input-text))
+  ;; Set permission state
   (setq claudemacs-agent--permission-data data)
   (setq claudemacs-agent--permission-selection 0)
-  ;; Render the dialog
+  ;; Switch to permission mode
+  (setq claudemacs-agent--input-mode 'permission)
+  ;; Render the dialog (which now uses render-dynamic-section)
   (claudemacs-agent--render-permission-dialog)
   ;; Set up keyboard navigation
   (claudemacs-agent--setup-permission-keymap))
@@ -972,7 +1391,8 @@ Takes precedence over evil-mode keybindings."
           (claudemacs-agent-permission-mode 1))))))
 
 (defun claudemacs-agent--send-permission-response (action)
-  "Send permission response with ACTION to the agent process."
+  "Send permission response with ACTION to the agent process.
+Restores text input mode and any saved input."
   (claudemacs-agent--in-base-buffer
    (when claudemacs-agent--permission-data
      (let* ((tool-name (cdr (assq 'tool_name claudemacs-agent--permission-data)))
@@ -986,7 +1406,8 @@ Takes precedence over evil-mode keybindings."
                        (claudemacs-agent--generate-permission-pattern
                         tool-name tool-input scope)))
             (response (json-encode `((action . ,action)
-                                     (pattern . ,pattern)))))
+                                     (pattern . ,pattern))))
+            (saved-input claudemacs-agent--saved-input))
        ;; Clear permission state and disable minor mode in all related buffers
        (setq claudemacs-agent--permission-data nil)
        (setq claudemacs-agent--permission-overlay-specs nil)
@@ -1006,7 +1427,9 @@ Takes precedence over evil-mode keybindings."
        (dolist (ov (overlays-in (point-min) (point-max)))
          (when (overlay-get ov 'claudemacs-permission-face)
            (delete-overlay ov)))
-       ;; Show thinking status (this rebuilds dynamic section)
+       ;; Switch to empty mode (clears input area completely)
+       (setq claudemacs-agent--input-mode 'empty)
+       ;; Show thinking status (this rebuilds dynamic section with empty input)
        (claudemacs-agent--set-thinking "Processing...")
        ;; Send response to process
        (when (and claudemacs-agent--process
