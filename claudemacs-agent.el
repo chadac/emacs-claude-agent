@@ -90,21 +90,31 @@
 
 
 ;;;; Buffer-local variables - Section markers
+;;
+;; Buffer has 3 zones with different update semantics:
+;;
+;;   [STATIC]  - Header + completed conversation turns
+;;               Append-only, never modified after written
+;;               Ends at `static-end-marker`
+;;
+;;   [DYNAMIC] - Current in-progress turn + status bar
+;;               Fully deleted and rebuilt on each update
+;;               Content stored in variables, rendered fresh each time
+;;
+;;   [INPUT]   - User typing area
+;;               Preserved across dynamic rebuilds
+;;               Starts at `input-start-marker` (set after each rebuild)
 
 (defvar-local claudemacs-agent--process nil
   "The agent process for this session.")
 
-(defvar-local claudemacs-agent--header-end-marker nil
-  "Marker for end of header section.")
+(defvar-local claudemacs-agent--static-end-marker nil
+  "Marker for end of static section (start of dynamic section).
+Everything before this is completed content that never changes.")
 
-(defvar-local claudemacs-agent--log-end-marker nil
-  "Marker for end of log section (start of status section).")
-
-(defvar-local claudemacs-agent--status-end-marker nil
-  "Marker for end of status section (start of input section).")
-
-(defvar-local claudemacs-agent--prompt-marker nil
-  "Marker for after the input header (where user types).")
+(defvar-local claudemacs-agent--input-start-marker nil
+  "Marker for start of input section (where user types).
+Set fresh after each dynamic section rebuild.")
 
 ;;;; Buffer-local variables - State
 
@@ -162,6 +172,22 @@
   "Face for placeholder text in empty input area."
   :group 'claudemacs-agent)
 
+;;;; Buffer-local variables - Message queue
+
+(defvar-local claudemacs-agent--message-queue nil
+  "List of messages queued while agent is busy. Each is a string.")
+
+
+(defface claudemacs-agent-queued-face
+  '((t :foreground "#5c6370" :slant italic))
+  "Face for queued messages (grayed out)."
+  :group 'claudemacs-agent)
+
+(defface claudemacs-agent-queued-header-face
+  '((t :foreground "#5c6370" :slant italic))
+  "Face for queued message headers."
+  :group 'claudemacs-agent)
+
 ;;;; Mode definition
 
 (defvar claudemacs-agent-mode-map
@@ -203,8 +229,8 @@ Uses org-mode fontification without org-mode keybindings."
 
 (defun claudemacs-agent--in-input-area-p ()
   "Return t if point is in the input area."
-  (and claudemacs-agent--prompt-marker
-       (>= (point) claudemacs-agent--prompt-marker)))
+  (and claudemacs-agent--input-start-marker
+       (>= (point) claudemacs-agent--input-start-marker)))
 
 (defmacro claudemacs-agent--in-base-buffer (&rest body)
   "Execute BODY in the base buffer (for polymode compatibility)."
@@ -216,27 +242,30 @@ Uses org-mode fontification without org-mode keybindings."
 
 (defun claudemacs-agent--input-empty-p ()
   "Return t if the input area is empty (only whitespace)."
-  (and claudemacs-agent--prompt-marker
+  (and claudemacs-agent--input-start-marker
        ;; string-blank-p returns match position (0) for empty, so convert to t
        (not (null (string-blank-p (buffer-substring-no-properties
-                                   claudemacs-agent--prompt-marker (point-max)))))))
+                                   claudemacs-agent--input-start-marker (point-max)))))))
 
 (defun claudemacs-agent--update-placeholder ()
   "Show or hide placeholder based on input area content."
-  (when (and claudemacs-agent--prompt-marker
-             (marker-position claudemacs-agent--prompt-marker))
+  (when (and claudemacs-agent--input-start-marker
+             (marker-position claudemacs-agent--input-start-marker))
     (if (claudemacs-agent--input-empty-p)
-        ;; Show placeholder - use before-string so cursor appears after it
-        (unless (and claudemacs-agent--placeholder-overlay
-                     (overlay-buffer claudemacs-agent--placeholder-overlay))
-          (setq claudemacs-agent--placeholder-overlay
-                (make-overlay claudemacs-agent--prompt-marker
-                              claudemacs-agent--prompt-marker))
-          (overlay-put claudemacs-agent--placeholder-overlay 'before-string
-                       (propertize claudemacs-agent--placeholder-text
-                                   'face 'claudemacs-agent-placeholder-face
-                                   'cursor t))  ; Allow cursor to appear in string
-          (overlay-put claudemacs-agent--placeholder-overlay 'evaporate nil))
+        ;; Show placeholder at current input-start position
+        (let ((pos (marker-position claudemacs-agent--input-start-marker)))
+          ;; Move existing overlay or create new one
+          (if (and claudemacs-agent--placeholder-overlay
+                   (overlay-buffer claudemacs-agent--placeholder-overlay))
+              ;; Move to new position
+              (move-overlay claudemacs-agent--placeholder-overlay pos pos)
+            ;; Create new overlay
+            (setq claudemacs-agent--placeholder-overlay (make-overlay pos pos))
+            (overlay-put claudemacs-agent--placeholder-overlay 'before-string
+                         (propertize claudemacs-agent--placeholder-text
+                                     'face 'claudemacs-agent-placeholder-face
+                                     'cursor t))
+            (overlay-put claudemacs-agent--placeholder-overlay 'evaporate nil)))
       ;; Hide placeholder
       (when (and claudemacs-agent--placeholder-overlay
                  (overlay-buffer claudemacs-agent--placeholder-overlay))
@@ -250,47 +279,43 @@ Also moves point to prompt marker when input area is empty."
   ;; If input is empty and we're in the input area, keep cursor at prompt
   (when (and (claudemacs-agent--input-empty-p)
              (claudemacs-agent--in-input-area-p)
-             claudemacs-agent--prompt-marker)
-    (goto-char claudemacs-agent--prompt-marker)))
+             claudemacs-agent--input-start-marker)
+    (goto-char claudemacs-agent--input-start-marker)))
 
 ;;;; Section management
+;;
+;; Two-zone architecture:
+;; - Static section: Append-only (header + conversation log)
+;; - Dynamic section: Re-rendered from state (status bar + input area)
 
 (defun claudemacs-agent--init-buffer (session-name)
   "Initialize buffer with section structure for SESSION-NAME."
   (let ((inhibit-read-only t))
     (erase-buffer)
 
-    ;; === HEADER SECTION ===
+    ;; === HEADER (part of static section) ===
     (let ((start (point)))
       (insert "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
       (insert (format " Claude Session: %s\n" session-name))
       (insert "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
       (claudemacs-agent--apply-face start (point) 'claudemacs-agent-header-face))
 
-    ;; Header end marker
-    (setq claudemacs-agent--header-end-marker (point-marker))
-    (set-marker-insertion-type claudemacs-agent--header-end-marker nil)
+    ;; === STATIC END MARKER ===
+    ;; Everything before this is committed content that never changes
+    (setq claudemacs-agent--static-end-marker (point-marker))
+    (set-marker-insertion-type claudemacs-agent--static-end-marker nil)
 
-    ;; === LOG SECTION === (starts empty, content appended here)
-    ;; Log end marker (also start of status section)
-    (setq claudemacs-agent--log-end-marker (point-marker))
-    (set-marker-insertion-type claudemacs-agent--log-end-marker nil)
+    ;; === INPUT START MARKER ===
+    ;; Set initially at same position, will be updated by rebuild
+    (setq claudemacs-agent--input-start-marker (point-marker))
+    (set-marker-insertion-type claudemacs-agent--input-start-marker nil)
 
-    ;; === STATUS SECTION === (empty until conversation starts)
-    ;; Status end marker (also start of input section) - same as log-end initially
-    (setq claudemacs-agent--status-end-marker (point-marker))
-    (set-marker-insertion-type claudemacs-agent--status-end-marker nil)
+    ;; Show placeholder and position cursor
+    (claudemacs-agent--update-placeholder)
+    (goto-char claudemacs-agent--input-start-marker)
 
-    ;; === INPUT SECTION === (no header - status bar serves as separator once conversation starts)
-    ;; Prompt marker (where user types)
-    (setq claudemacs-agent--prompt-marker (point-marker))
-    (set-marker-insertion-type claudemacs-agent--prompt-marker nil)
-
-    ;; Make everything before prompt marker read-only
-    (claudemacs-agent--update-read-only)
-
-    ;; Position cursor
-    (goto-char claudemacs-agent--prompt-marker)))
+    ;; Make everything before input read-only
+    (claudemacs-agent--update-read-only)))
 
 (defun claudemacs-agent--apply-face (start end face)
   "Apply FACE to region from START to END using overlay."
@@ -314,18 +339,107 @@ Also moves point to prompt marker when input area is empty."
 (defun claudemacs-agent--update-read-only ()
   "Update read-only text property to cover everything before prompt marker."
   ;; Use text properties for read-only (overlays don't enforce read-only)
-  (when (and claudemacs-agent--prompt-marker
-             (> (marker-position claudemacs-agent--prompt-marker) (point-min)))
+  (when (and claudemacs-agent--input-start-marker
+             (> (marker-position claudemacs-agent--input-start-marker) (point-min)))
     ;; Remove read-only from entire buffer first (property list needs property names only)
     (remove-list-of-text-properties (point-min) (point-max) '(read-only rear-nonsticky))
     ;; Apply read-only to everything before prompt, with rear-nonsticky
     ;; so text inserted at the boundary is NOT read-only
-    (add-text-properties (point-min) claudemacs-agent--prompt-marker
+    (add-text-properties (point-min) claudemacs-agent--input-start-marker
                          '(read-only t rear-nonsticky (read-only)))))
 
+;;;; Dynamic section management
+;;
+;; Two-zone architecture:
+;; - Static section: Append-only log content (header + conversation)
+;; - Dynamic section: Re-rendered from state (status bar + input area)
+;;
+;; `append-to-static` appends to the static section directly.
+;; `render-dynamic-section` clears and re-renders dynamic section from state.
 
+(defun claudemacs-agent--get-input-text ()
+  "Get the current text in the input area."
+  (if (and claudemacs-agent--input-start-marker
+           (marker-position claudemacs-agent--input-start-marker))
+      (buffer-substring-no-properties
+       claudemacs-agent--input-start-marker (point-max))
+    ""))
 
-;;;; Status section rendering
+(defun claudemacs-agent--append-to-static (text)
+  "Append TEXT to the static section and re-render dynamic section."
+  ;; Save input and cursor BEFORE any modifications
+  (let* ((saved-input (claudemacs-agent--get-input-text))
+         (cursor-offset (when (and claudemacs-agent--input-start-marker
+                                   (marker-position claudemacs-agent--input-start-marker)
+                                   (>= (point) claudemacs-agent--input-start-marker))
+                          (- (point) claudemacs-agent--input-start-marker)))
+         (inhibit-read-only t))
+    ;; Delete everything from static-end to end
+    (delete-region claudemacs-agent--static-end-marker (point-max))
+    ;; Insert new static content
+    (goto-char claudemacs-agent--static-end-marker)
+    (insert text)
+    (set-marker claudemacs-agent--static-end-marker (point))
+    ;; Insert status bar
+    (when claudemacs-agent--has-conversation
+      (claudemacs-agent--insert-status-bar))
+    ;; Set input marker and restore input
+    (setq claudemacs-agent--input-start-marker (point-marker))
+    (insert saved-input)
+    ;; Finalize
+    (claudemacs-agent--update-read-only)
+    (claudemacs-agent--update-placeholder)
+    ;; Restore cursor
+    (goto-char (if (and cursor-offset (>= cursor-offset 0))
+                   (min (+ claudemacs-agent--input-start-marker cursor-offset) (point-max))
+                 claudemacs-agent--input-start-marker))))
+
+(defun claudemacs-agent--render-dynamic-section ()
+  "Render the dynamic section (status bar + input area).
+Clears everything after static-end-marker and re-renders from state.
+Preserves any text in the input area and cursor position."
+  (let* ((inhibit-read-only t)
+         ;; Save cursor position relative to input-start (offset into input text)
+         (cursor-offset (when (and claudemacs-agent--input-start-marker
+                                   (marker-position claudemacs-agent--input-start-marker)
+                                   (>= (point) claudemacs-agent--input-start-marker))
+                          (- (point) claudemacs-agent--input-start-marker)))
+         (input-to-restore (claudemacs-agent--get-input-text)))
+    ;; Clear overlays in dynamic section
+    (when (and claudemacs-agent--static-end-marker
+               (marker-position claudemacs-agent--static-end-marker))
+      (dolist (ov (overlays-in claudemacs-agent--static-end-marker (point-max)))
+        (when (overlay-get ov 'claudemacs-agent-styled)
+          (delete-overlay ov)))
+      ;; Delete everything from static-end to end of buffer
+      (delete-region claudemacs-agent--static-end-marker (point-max)))
+
+    ;; Position at start of dynamic section
+    (goto-char (or claudemacs-agent--static-end-marker (point-max)))
+
+    ;; === INSERT STATUS BAR ===
+    (when claudemacs-agent--has-conversation
+      (claudemacs-agent--insert-status-bar))
+
+    ;; === SET INPUT MARKER AND RESTORE INPUT ===
+    (setq claudemacs-agent--input-start-marker (point-marker))
+    (set-marker-insertion-type claudemacs-agent--input-start-marker nil)
+    (unless (string-empty-p input-to-restore)
+      (insert input-to-restore))
+
+    ;; Update read-only and placeholder
+    (claudemacs-agent--update-read-only)
+    (claudemacs-agent--update-placeholder)
+
+    ;; Restore cursor position within input area
+    (if (and cursor-offset (>= cursor-offset 0))
+        ;; Restore to saved position (clamped to input length)
+        (goto-char (min (+ claudemacs-agent--input-start-marker cursor-offset)
+                        (point-max)))
+      ;; Otherwise position at start of input
+      (goto-char claudemacs-agent--input-start-marker))))
+
+;;;; Status bar rendering
 
 (defun claudemacs-agent--format-elapsed-time (start-time)
   "Format elapsed time since START-TIME as Xm Ys."
@@ -336,96 +450,66 @@ Also moves point to prompt marker when input area is empty."
         (format "%dm%ds" minutes seconds)
       (format "%ds" seconds))))
 
-(defun claudemacs-agent--render-status-section ()
-  "Render the status section (replaces content between log-end and status-end markers).
-Only renders if conversation has started (first message sent).
-Layout: Thinking indicator (if active) -> Status info line."
-  (let ((inhibit-read-only t))
-    (save-excursion
-      ;; First, clean up any stale thinking-face overlays in the entire buffer
-      ;; These can get orphaned when log content is appended during thinking
-      (dolist (ov (overlays-in (point-min) (point-max)))
-        (when (and (overlay-get ov 'claudemacs-agent-styled)
-                   (eq (overlay-get ov 'face) 'claudemacs-agent-thinking-face))
-          (delete-overlay ov)))
+(defun claudemacs-agent--insert-status-bar ()
+  "Insert the status bar content at point.
+Called by `render-dynamic-section'. Assumes point is positioned correctly."
+  ;; === Thinking indicator (if active) ===
+  (when claudemacs-agent--thinking-status
+    (let ((start (point))
+          (spinner (nth claudemacs-agent--spinner-index
+                        claudemacs-agent--spinner-frames))
+          (elapsed (if claudemacs-agent--thinking-start-time
+                       (claudemacs-agent--format-elapsed-time
+                        claudemacs-agent--thinking-start-time)
+                     "0s"))
+          (tokens (format "(+%d/-%d)"
+                          claudemacs-agent--input-tokens
+                          claudemacs-agent--output-tokens)))
+      (insert (format "\n%s %s %s %s (C-c C-k to interrupt)\n"
+                      spinner
+                      claudemacs-agent--thinking-status
+                      elapsed
+                      tokens))
+      (claudemacs-agent--apply-face start (point) 'claudemacs-agent-thinking-face)))
 
-      ;; Ensure markers are valid and in correct order
-      (when (and claudemacs-agent--log-end-marker
-                 claudemacs-agent--status-end-marker
-                 (marker-position claudemacs-agent--log-end-marker)
-                 (marker-position claudemacs-agent--status-end-marker))
-        ;; If status-end is behind log-end, move it forward
-        (when (< (marker-position claudemacs-agent--status-end-marker)
-                 (marker-position claudemacs-agent--log-end-marker))
-          (set-marker claudemacs-agent--status-end-marker
-                      (marker-position claudemacs-agent--log-end-marker)))
-        ;; Clear styled overlays in status section before re-rendering
-        (dolist (ov (overlays-in claudemacs-agent--log-end-marker
-                                 claudemacs-agent--status-end-marker))
-          (when (overlay-get ov 'claudemacs-agent-styled)
-            (delete-overlay ov)))
-        ;; Delete existing status section content (only if there's something to delete)
-        (when (> (marker-position claudemacs-agent--status-end-marker)
-                 (marker-position claudemacs-agent--log-end-marker))
-          (delete-region claudemacs-agent--log-end-marker
-                         claudemacs-agent--status-end-marker)))
+  ;; === Queued messages (if any) ===
+  (when claudemacs-agent--message-queue
+    (dolist (msg (reverse claudemacs-agent--message-queue))
+      (let ((msg-start (point)))
+        (insert "\n┄┄┄ Queued ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n")
+        (claudemacs-agent--apply-face msg-start (point) 'claudemacs-agent-queued-header-face)
+        (setq msg-start (point))
+        (let ((lines (split-string msg "\n")))
+          (dolist (line lines)
+            (insert "  " line "\n")))
+        (claudemacs-agent--apply-face msg-start (point) 'claudemacs-agent-queued-face))))
 
-      ;; Insert at log-end marker
-      (goto-char (or claudemacs-agent--log-end-marker (point-max)))
-
-      ;; Only show status section after conversation has started
-      (when claudemacs-agent--has-conversation
-        ;; === Thinking indicator (if active) - shown right after log ===
-        (when claudemacs-agent--thinking-status
-          (let ((start (point))
-                (spinner (nth claudemacs-agent--spinner-index
-                              claudemacs-agent--spinner-frames))
-                (elapsed (if claudemacs-agent--thinking-start-time
-                             (claudemacs-agent--format-elapsed-time
-                              claudemacs-agent--thinking-start-time)
-                           "0s"))
-                (tokens (format "(+%d/-%d)"
-                                claudemacs-agent--input-tokens
-                                claudemacs-agent--output-tokens)))
-            (insert (format "\n%s %s %s %s (C-c C-k to interrupt)\n"
-                            spinner
-                            claudemacs-agent--thinking-status
-                            elapsed
-                            tokens))
-            (claudemacs-agent--apply-face start (point) 'claudemacs-agent-thinking-face)))
-
-        ;; === Status info line - right above input ===
-        (let* ((model (or (plist-get claudemacs-agent--session-info :model) "..."))
-               (cost (or (plist-get claudemacs-agent--session-info :cost) 0))
-               (session-id (or (plist-get claudemacs-agent--session-info :session-id) "..."))
-               (status-text (format " Model: %s  |  Cost: $%.4f  |  Session: %s "
-                                    model cost
-                                    (if (> (length session-id) 8)
-                                        (substring session-id 0 8)
-                                      session-id)))
-               (bar-length (length status-text))
-               (bar (make-string bar-length ?━))
-               (start (point)))
-          (insert "\n")  ; Space above status
-          (insert bar "\n")
-          (insert status-text "\n")
-          (insert bar "\n")
-          (insert "\n")  ; Space below status
-          (claudemacs-agent--apply-face start (point) 'claudemacs-agent-header-face)))
-
-      ;; Update status-end marker
-      (when claudemacs-agent--status-end-marker
-        (set-marker claudemacs-agent--status-end-marker (point))))))
+  ;; === Status info line ===
+  (let* ((model (or (plist-get claudemacs-agent--session-info :model) "..."))
+         (cost (or (plist-get claudemacs-agent--session-info :cost) 0))
+         (session-id (or (plist-get claudemacs-agent--session-info :session-id) "..."))
+         (status-text (format " Model: %s  |  Cost: $%.4f  |  Session: %s "
+                              model cost
+                              (if (> (length session-id) 8)
+                                  (substring session-id 0 8)
+                                session-id)))
+         (bar-length (length status-text))
+         (bar (make-string bar-length ?━))
+         (start (point)))
+    (insert "\n")
+    (insert bar "\n")
+    (insert status-text "\n")
+    (insert bar "\n")
+    (insert "\n")
+    (claudemacs-agent--apply-face start (point) 'claudemacs-agent-header-face)))
 
 (defun claudemacs-agent--spinner-tick ()
-  "Advance spinner and re-render status section."
+  "Advance spinner and rebuild dynamic section."
   (when claudemacs-agent--thinking-status
-    (let ((inhibit-read-only t))
-      (setq claudemacs-agent--spinner-index
-            (mod (1+ claudemacs-agent--spinner-index)
-                 (length claudemacs-agent--spinner-frames)))
-      (claudemacs-agent--render-status-section)
-      (claudemacs-agent--update-read-only))))
+    (setq claudemacs-agent--spinner-index
+          (mod (1+ claudemacs-agent--spinner-index)
+               (length claudemacs-agent--spinner-frames)))
+    (claudemacs-agent--render-dynamic-section)))
 
 (defun claudemacs-agent--set-thinking (status)
   "Set thinking STATUS, or clear if nil."
@@ -447,41 +531,20 @@ Layout: Thinking indicator (if active) -> Status info line."
     ;; Clear timing when done
     (setq claudemacs-agent--thinking-start-time nil))
 
-  ;; Re-render status section (with inhibit-read-only)
-  (let ((inhibit-read-only t))
-    (claudemacs-agent--render-status-section)
-    (claudemacs-agent--update-read-only)))
+  ;; Rebuild dynamic section (handles cursor positioning)
+  (claudemacs-agent--render-dynamic-section))
 
-;;;; Log section - appending content
+;;;; Content helpers
 
-(defun claudemacs-agent--append-to-log (text &optional face virtual-indent)
-  "Append TEXT to the log section with optional FACE and VIRTUAL-INDENT.
-VIRTUAL-INDENT uses line-prefix/wrap-prefix text properties for indentation
-that doesn't break org syntax (like org-indent-mode)."
-  (message "[claudemacs-agent] append-to-log: %S (log-end=%s)"
-           (substring text 0 (min 50 (length text)))
-           (marker-position claudemacs-agent--log-end-marker))
-  (let ((inhibit-read-only t))
-    (save-excursion
-      ;; Insert at log-end marker (before status section)
-      (goto-char (or claudemacs-agent--log-end-marker (point-max)))
-      (let ((start (point)))
-        (insert text)
-        (when face
-          (claudemacs-agent--apply-face start (point) face))
-        ;; Apply virtual indentation via text properties
-        (when virtual-indent
-          (add-text-properties start (point)
-                               `(line-prefix ,virtual-indent
-                                 wrap-prefix ,virtual-indent)))
-        ;; Update log-end marker
-        (set-marker claudemacs-agent--log-end-marker (point))))))
+(defun claudemacs-agent--append-to-log (text &optional _face _virtual-indent)
+  "Append TEXT to the static section (conversation log).
+FACE and VIRTUAL-INDENT are currently ignored (org fontification handles styling)."
+  (claudemacs-agent--append-to-static text))
 
 ;;;; Process filter - parsing markers
 
 (defun claudemacs-agent--process-filter (proc output)
   "Process filter for agent PROC handling OUTPUT."
-  (message "[claudemacs-agent] filter received: %S" (substring output 0 (min 100 (length output))))
   (let ((buf (process-buffer proc)))
     (when (buffer-live-p buf)
       (with-current-buffer buf
@@ -507,12 +570,13 @@ that doesn't break org syntax (like org-indent-mode)."
 
 (defun claudemacs-agent--process-line (line)
   "Process a single LINE of output, handling markers."
-  (message "[claudemacs-agent] processing line: %S (state=%s)" line claudemacs-agent--parse-state)
   (cond
-   ;; Ready marker - clear thinking, refresh input
+   ;; Ready marker - clear thinking, send queued messages
    ((string= line "[READY]")
     (claudemacs-agent--set-thinking nil)
-    (claudemacs-agent--setup-input-area))
+    ;; If there are queued messages, send the next one
+    (when claudemacs-agent--message-queue
+      (claudemacs-agent--send-next-queued)))
 
    ;; Thinking marker - show thinking indicator
    ((string= line "[THINKING]")
@@ -531,7 +595,7 @@ that doesn't break org syntax (like org-indent-mode)."
         (when-let ((output (cdr (assq 'output_tokens data))))
           (setq claudemacs-agent--output-tokens output)))))
 
-   ;; Result marker - update cost, show stats
+   ;; Result marker - update cost
    ((string-match "^\\[RESULT \\(.*\\)\\]$" line)
     (let* ((json-str (match-string 1 line))
            (data (ignore-errors (json-read-from-string json-str))))
@@ -540,9 +604,7 @@ that doesn't break org syntax (like org-indent-mode)."
           (when cost
             (setq claudemacs-agent--session-info
                   (plist-put claudemacs-agent--session-info :cost cost))))
-        (let ((inhibit-read-only t))
-          (claudemacs-agent--render-status-section)
-          (claudemacs-agent--update-read-only)))))
+        (claudemacs-agent--render-dynamic-section))))
 
    ;; Session info marker - update model/session-id
    ((string-match "^\\[SESSION_INFO \\(.*\\)\\]$" line)
@@ -555,9 +617,7 @@ that doesn't break org syntax (like org-indent-mode)."
         (when-let ((session-id (cdr (assq 'session_id data))))
           (setq claudemacs-agent--session-info
                 (plist-put claudemacs-agent--session-info :session-id session-id)))
-        (let ((inhibit-read-only t))
-          (claudemacs-agent--render-status-section)
-          (claudemacs-agent--update-read-only)))))
+        (claudemacs-agent--render-dynamic-section))))
 
    ;; Permission request marker - show permission UI
    ((string-match "^\\[PERMISSION_REQUEST \\(.*\\)\\]$" line)
@@ -573,8 +633,7 @@ that doesn't break org syntax (like org-indent-mode)."
     ;; Mark conversation as started on first user message
     (setq claudemacs-agent--has-conversation t)
     (claudemacs-agent--append-to-log
-     "\n━━━ You ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-     'claudemacs-agent-user-header-face))
+     "\n━━━ You ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"))
 
    ;; User message end
    ((string= line "[/USER]")
@@ -584,8 +643,7 @@ that doesn't break org syntax (like org-indent-mode)."
    ((string= line "[ASSISTANT]")
     (setq claudemacs-agent--parse-state 'assistant)
     (claudemacs-agent--append-to-log
-     "\n━━━ Claude ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-     'claudemacs-agent-assistant-header-face))
+     "\n━━━ Claude ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"))
 
    ;; Assistant message end
    ((string= line "[/ASSISTANT]")
@@ -662,62 +720,6 @@ that doesn't break org syntax (like org-indent-mode)."
                                ('assistant "  ")
                                (_ nil))))
         (claudemacs-agent--append-to-log (concat line "\n") face virtual-indent))))))
-
-
-(defun claudemacs-agent--setup-input-area ()
-  "Set up or refresh the input area at the bottom of the buffer."
-  (message "[claudemacs-agent] setup-input-area: prompt=%s status-end=%s point-max=%s"
-           (marker-position claudemacs-agent--prompt-marker)
-           (marker-position claudemacs-agent--status-end-marker)
-           (point-max))
-  (let ((inhibit-read-only t)
-        (saved-input ""))
-    ;; Save any existing input - but only if prompt marker is AFTER status-end marker
-    ;; (otherwise the "input" is actually stale content from a re-render)
-    (when (and claudemacs-agent--prompt-marker
-               claudemacs-agent--status-end-marker
-               (marker-position claudemacs-agent--prompt-marker)
-               (marker-position claudemacs-agent--status-end-marker)
-               (>= (marker-position claudemacs-agent--prompt-marker)
-                   (marker-position claudemacs-agent--status-end-marker)))
-      (setq saved-input (buffer-substring-no-properties
-                         claudemacs-agent--prompt-marker (point-max)))
-      (message "[claudemacs-agent] saved-input: %S" saved-input))
-
-    ;; Clear styled overlays in input section before re-creating
-    (when claudemacs-agent--status-end-marker
-      (dolist (ov (overlays-in claudemacs-agent--status-end-marker (point-max)))
-        (when (overlay-get ov 'claudemacs-agent-styled)
-          (delete-overlay ov)))
-      ;; Delete from status-end to end of buffer
-      (delete-region claudemacs-agent--status-end-marker (point-max)))
-
-    ;; Position at end of status section (no input header - status bar serves as separator)
-    (goto-char (or claudemacs-agent--status-end-marker (point-max)))
-
-    ;; Set prompt marker where user types
-    (setq claudemacs-agent--prompt-marker (point-marker))
-    (set-marker-insertion-type claudemacs-agent--prompt-marker nil)
-
-    ;; Restore any saved input
-    (unless (string-empty-p saved-input)
-      (insert saved-input))
-
-    ;; Update read-only protection
-    (claudemacs-agent--update-read-only)
-
-    ;; Show placeholder if input is empty
-    (claudemacs-agent--update-placeholder)
-
-    ;; Move point to input area
-    (goto-char claudemacs-agent--prompt-marker)
-
-    ;; Scroll to show input area
-    (let ((win (get-buffer-window (current-buffer))))
-      (when win
-        (with-selected-window win
-          (goto-char (point-max))
-          (recenter -2))))))
 
 ;;;; Permission prompt UI
 
@@ -819,8 +821,8 @@ that doesn't break org syntax (like org-indent-mode)."
 (defun claudemacs-agent--render-permission-dialog ()
   "Render the permission dialog with current selection state."
   (when (and claudemacs-agent--permission-data
-             claudemacs-agent--status-end-marker
-             claudemacs-agent--prompt-marker)
+             claudemacs-agent--input-start-marker
+             claudemacs-agent--input-start-marker)
     (let* ((tool-name (cdr (assq 'tool_name claudemacs-agent--permission-data)))
            (tool-input (cdr (assq 'tool_input claudemacs-agent--permission-data)))
            (input-str (claudemacs-agent--format-tool-input tool-name tool-input))
@@ -832,10 +834,10 @@ that doesn't break org syntax (like org-indent-mode)."
       (dolist (ov (overlays-in (point-min) (point-max)))
         (when (overlay-get ov 'claudemacs-permission-face)
           (delete-overlay ov)))
-      ;; Clear from status-end to end of buffer and replace with dialog
+      ;; Clear from input-start to end of buffer and replace with dialog
       (save-excursion
-        (delete-region claudemacs-agent--status-end-marker (point-max))
-        (goto-char claudemacs-agent--status-end-marker)
+        (delete-region claudemacs-agent--input-start-marker (point-max))
+        (goto-char claudemacs-agent--input-start-marker)
         ;; Helper to insert and record overlay spec
         (cl-flet ((insert-styled (text face)
                     (let ((start (point)))
@@ -874,7 +876,7 @@ that doesn't break org syntax (like org-indent-mode)."
                     (buffer-local-value 'claudemacs-agent--permission-overlay-specs base))
               (claudemacs-agent--apply-permission-overlays)))))
       ;; Update prompt marker to end
-      (set-marker claudemacs-agent--prompt-marker (point-max)))))
+      (set-marker claudemacs-agent--input-start-marker (point-max)))))
 
 (defun claudemacs-agent--show-permission-prompt (data)
   "Show permission prompt for DATA in the input area."
@@ -1004,8 +1006,7 @@ Takes precedence over evil-mode keybindings."
        (dolist (ov (overlays-in (point-min) (point-max)))
          (when (overlay-get ov 'claudemacs-permission-face)
            (delete-overlay ov)))
-       ;; Restore input area and show thinking status
-       (claudemacs-agent--setup-input-area)
+       ;; Show thinking status (this rebuilds dynamic section)
        (claudemacs-agent--set-thinking "Processing...")
        ;; Send response to process
        (when (and claudemacs-agent--process
@@ -1078,26 +1079,53 @@ Takes precedence over evil-mode keybindings."
 
 ;;;; User commands
 
+(defun claudemacs-agent--is-busy-p ()
+  "Return t if the agent is currently busy (thinking)."
+  claudemacs-agent--thinking-status)
+
+(defun claudemacs-agent--render-queue ()
+  "Render queued messages by rebuilding the dynamic section."
+  (claudemacs-agent--render-dynamic-section))
+
+(defun claudemacs-agent--send-next-queued ()
+  "Send the next queued message if any and not busy."
+  (when (and claudemacs-agent--message-queue
+             (not (claudemacs-agent--is-busy-p))
+             claudemacs-agent--process
+             (process-live-p claudemacs-agent--process))
+    (let ((msg (pop claudemacs-agent--message-queue)))
+      ;; Send to process
+      (process-send-string claudemacs-agent--process
+                           (concat "[INPUT]\n" msg "\n[/INPUT]\n")))))
+
 (defun claudemacs-agent-send ()
-  "Send the current input to Claude."
+  "Send the current input to Claude, or queue if busy."
   (interactive)
   (claudemacs-agent--in-base-buffer
-   (when (and claudemacs-agent--prompt-marker
+   (when (and claudemacs-agent--input-start-marker
               claudemacs-agent--process
               (process-live-p claudemacs-agent--process))
      (let* ((input (string-trim (buffer-substring-no-properties
-                                  claudemacs-agent--prompt-marker (point-max)))))
+                                  claudemacs-agent--input-start-marker (point-max)))))
        ;; Ignore if empty
        (unless (string-empty-p input)
+         ;; Clear the input area first
+         (let ((inhibit-read-only t))
+           (delete-region claudemacs-agent--input-start-marker (point-max)))
          ;; Add to history
          (push input claudemacs-agent--input-history)
          (setq claudemacs-agent--input-history-index 0)
-         ;; Clear input area
-         (let ((inhibit-read-only t))
-           (delete-region claudemacs-agent--prompt-marker (point-max)))
-         ;; Send to process - wrap in [INPUT]...[/INPUT] for multi-line support
-         (process-send-string claudemacs-agent--process
-                              (concat "[INPUT]\n" input "\n[/INPUT]\n")))))))
+         ;; If busy, queue the message; otherwise send directly
+         (if (claudemacs-agent--is-busy-p)
+             (progn
+               (push input claudemacs-agent--message-queue)
+               (claudemacs-agent--render-dynamic-section)
+               (message "Message queued (agent is busy)"))
+           ;; Send to process - wrap in [INPUT]...[/INPUT] for multi-line support
+           (process-send-string claudemacs-agent--process
+                                (concat "[INPUT]\n" input "\n[/INPUT]\n"))
+           ;; Re-render dynamic section (input already cleared)
+           (claudemacs-agent--render-dynamic-section)))))))
 
 (defun claudemacs-agent-send-or-newline ()
   "Send input if on last line, otherwise insert newline."
@@ -1133,8 +1161,8 @@ Takes precedence over evil-mode keybindings."
               (< claudemacs-agent--input-history-index
                  (length claudemacs-agent--input-history)))
      (let ((inhibit-read-only t))
-       (delete-region claudemacs-agent--prompt-marker (point-max))
-       (goto-char claudemacs-agent--prompt-marker)
+       (delete-region claudemacs-agent--input-start-marker (point-max))
+       (goto-char claudemacs-agent--input-start-marker)
        (insert (nth claudemacs-agent--input-history-index
                     claudemacs-agent--input-history))
        (cl-incf claudemacs-agent--input-history-index)))))
@@ -1146,8 +1174,8 @@ Takes precedence over evil-mode keybindings."
    (when (> claudemacs-agent--input-history-index 0)
      (cl-decf claudemacs-agent--input-history-index)
      (let ((inhibit-read-only t))
-       (delete-region claudemacs-agent--prompt-marker (point-max))
-       (goto-char claudemacs-agent--prompt-marker)
+       (delete-region claudemacs-agent--input-start-marker (point-max))
+       (goto-char claudemacs-agent--input-start-marker)
        (when (> claudemacs-agent--input-history-index 0)
          (insert (nth (1- claudemacs-agent--input-history-index)
                       claudemacs-agent--input-history)))))))
