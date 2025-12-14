@@ -1,4 +1,4 @@
-;;; claudemacs-agent.el --- Claude interaction buffer -*- lexical-binding: t; -*-
+;;; claude-agent.el --- Claude interaction buffer -*- lexical-binding: t; -*-
 
 ;; This file is part of claudemacs.
 ;; Package-Requires: ((emacs "28.1"))
@@ -151,6 +151,10 @@ Set fresh after each dynamic section rebuild.")
 
 (defvar-local claudemacs-agent--session-info nil
   "Plist with session info: :model :session-id :cost.")
+
+(defvar-local claudemacs-agent--mcp-server-status nil
+  "List of MCP server status objects from the agent.
+Each element is an alist with keys: name, status.")
 
 (defvar-local claudemacs-agent--input-history nil
   "History of inputs sent to Claude.")
@@ -975,6 +979,25 @@ If VIRTUAL-INDENT is non-nil, apply it as line-prefix/wrap-prefix."
                 (plist-put claudemacs-agent--session-info :session-id session-id)))
         (claudemacs-agent--render-dynamic-section))))
 
+   ;; MCP server status marker - update MCP status
+   ((string-match "^\\[MCP_STATUS \\(.*\\)\\]$" line)
+    (let* ((json-str (match-string 1 line))
+           (data (ignore-errors (json-read-from-string json-str))))
+      (when data
+        (setq claudemacs-agent--mcp-server-status data)
+        ;; Log any failed servers
+        (let ((failed (seq-filter (lambda (s) (not (equal (cdr (assq 'status s)) "connected")))
+                                  data)))
+          (when failed
+            (claudemacs-agent--append-to-log
+             (format "\n⚠ MCP server issue: %s\n"
+                     (mapconcat (lambda (s)
+                                  (format "%s (%s)"
+                                          (cdr (assq 'name s))
+                                          (cdr (assq 'status s))))
+                                failed ", "))
+             'claudemacs-agent-error-face))))))
+
    ;; Permission request marker - show permission UI
    ((string-match "^\\[PERMISSION_REQUEST \\(.*\\)\\]$" line)
     (let* ((json-str (match-string 1 line))
@@ -1603,6 +1626,33 @@ Restores text input mode and any saved input."
          (insert (nth (1- claudemacs-agent--input-history-index)
                       claudemacs-agent--input-history)))))))
 
+;;;; MCP status functions
+
+(defun claudemacs-agent-mcp-server-status ()
+  "Return list of MCP server statuses for current session.
+Each element is an alist with keys: name, status."
+  (claudemacs-agent--in-base-buffer
+   claudemacs-agent--mcp-server-status))
+
+;;;###autoload
+(defun claudemacs-agent-show-mcp-status ()
+  "Display MCP server connection status for current Claude session."
+  (interactive)
+  (claudemacs-agent--in-base-buffer
+   (let ((status claudemacs-agent--mcp-server-status))
+     (if status
+         (let ((msg (mapconcat
+                     (lambda (s)
+                       (let ((name (cdr (assq 'name s)))
+                             (st (cdr (assq 'status s))))
+                         (format "%s: %s" name
+                                 (if (equal st "connected")
+                                     (propertize st 'face 'success)
+                                   (propertize st 'face 'error)))))
+                     status "\n")))
+           (message "MCP Servers:\n%s" msg))
+       (message "No MCP status available (send a message first to initialize)")))))
+
 ;;;; Entry point
 
 ;;;###autoload
@@ -1636,5 +1686,5 @@ Restores text input mode and any saved input."
     (pop-to-buffer buf)
     buf))
 
-(provide 'claudemacs-agent)
-;;; claudemacs-agent.el ends here
+(provide 'claude-agent)
+;;; claude-agent.el ends here

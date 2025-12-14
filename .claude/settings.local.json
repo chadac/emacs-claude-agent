@@ -9,7 +9,11 @@
       "Bash(claudemacs-cli get-region:*)",
       "Bash(claudemacs-cli list-buffers:*)",
       "Bash(claudemacs-cli buffer-info:*)",
-      "mcp__claudemacs__eval_elisp"
+      "mcp__claudemacs__eval_elisp",
+      "Bash(cat:*)",
+      "Bash(git mv:*)",
+      "mcp__claudemacs__reload_file",
+      "Bash(uv run:*)"
     ],
     "deny": [],
     "ask": []

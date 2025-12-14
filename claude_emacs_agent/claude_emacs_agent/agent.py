@@ -49,6 +49,7 @@ MARKER_RESULT = "[RESULT "  # followed by JSON and ]
 MARKER_PERMISSION_REQUEST = "[PERMISSION_REQUEST "  # followed by JSON and ]
 MARKER_EDIT = "[EDIT "  # followed by JSON with file_path, old_string, new_string
 MARKER_WRITE = "[WRITE "  # followed by JSON with file_path, content
+MARKER_MCP_STATUS = "[MCP_STATUS "  # followed by JSON array of {name, status} and ]
 
 
 def _format_traceback() -> str:
@@ -421,6 +422,11 @@ class ClaudeEmacsAgent:
                     session_id = data.get("session_id")
                     if model or session_id:
                         self._emit_session_info(model=model, session_id=session_id)
+
+                    # Emit MCP server status if available
+                    mcp_servers = data.get("mcp_servers", [])
+                    if mcp_servers:
+                        self._emit(f"{MARKER_MCP_STATUS}{json.dumps(mcp_servers)}]")
 
                 elif msg_type == "AssistantMessage":
                     # Extract model if available

@@ -1,4 +1,4 @@
-;;; claudemacs-ai.el --- AI helper functions for Claude integration -*- lexical-binding: t; -*-
+;;; claudemacs-mcp.el --- MCP integration for Claude -*- lexical-binding: t; -*-
 ;; Author: Christopher Poile <cpoile@gmail.com>
 ;; Version: 0.1.0
 ;; Package-Requires: ((emacs "28.1"))
@@ -806,5 +806,5 @@ Designed to be called via MCP by Claude AI."
                 buffer-name original-size new-size (- original-size new-size))
       (format "Buffer %s is only %d chars, no truncation needed" buffer-name original-size))))
 
-(provide 'claudemacs-ai)
-;;; claudemacs-ai.el ends here
+(provide 'claudemacs-mcp)
+;;; claudemacs-mcp.el ends here

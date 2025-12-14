@@ -18,6 +18,13 @@
 
 ;;; Code:
 
+;;;; Directory Detection
+(defvar claudemacs--package-dir
+  (when load-file-name
+    (file-name-directory load-file-name))
+  "Directory where claudemacs.el is located.
+Set at load time to avoid issues with locate-library finding wrong version.")
+
 ;;;; Dependencies
 (require 'cl-lib)
 (require 'json)
@@ -26,7 +33,7 @@
 (require 'vc-git)
 (require 'eat nil 'noerror)
 (require 'claudemacs-comment)
-(require 'claudemacs-ai)
+(require 'claudemacs-mcp)
 (require 'claudemacs-sessions)
 (require 'claudemacs-ai-notes-todo)
 
@@ -560,9 +567,11 @@ Includes both CLI commands (if enabled) and safe MCP tools."
 WORK-DIR is the session's working directory, used to isolate memory buffers.
 BUFFER-NAME is the claudemacs buffer name for this session.
 Returns the path to the generated config file."
-  (let* ((this-file (or load-file-name buffer-file-name
-                        (locate-library "claudemacs")))
-         (this-dir (when this-file (file-name-directory this-file)))
+  (let* ((this-dir (or claudemacs--package-dir
+                       (when-let ((f (or load-file-name buffer-file-name)))
+                         (file-name-directory f))
+                       (when-let ((f (locate-library "claudemacs")))
+                         (file-name-directory f))))
          (mcp-dir (when this-dir
                     (expand-file-name "claudemacs_mcp" this-dir)))
          (expanded-work-dir (expand-file-name work-dir))
@@ -608,9 +617,11 @@ WORK-DIR is the session's working directory for memory buffer isolation.
 BUFFER-NAME is the claudemacs buffer name for this session.
 Returns nil if `claudemacs-use-mcp' is nil."
   (when claudemacs-use-mcp
-    (let* ((this-file (or load-file-name buffer-file-name
-                          (locate-library "claudemacs")))
-           (this-dir (when this-file (file-name-directory this-file)))
+    (let* ((this-dir (or claudemacs--package-dir
+                         (when-let ((f (or load-file-name buffer-file-name)))
+                           (file-name-directory f))
+                         (when-let ((f (locate-library "claudemacs")))
+                           (file-name-directory f))))
            (mcp-dir (when this-dir
                       (expand-file-name "claudemacs_mcp" this-dir))))
       (when (and mcp-dir (file-directory-p mcp-dir))
