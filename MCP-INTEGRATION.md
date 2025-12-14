@@ -88,7 +88,7 @@ Common patterns:
 Use special parameters to force context:
 
 ```python
-mcp__claudemacs__eval_elisp(
+mcp__emacs__eval_elisp(
     expression="major-mode",
     __file="/path/to/file.el"  # Force file context
 )

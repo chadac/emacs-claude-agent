@@ -1,4 +1,4 @@
-;;; claudemacs-actions-test.el --- Tests for claudemacs actions -*- lexical-binding: t; -*-
+;;; claude-actions-test.el --- Tests for claude actions -*- lexical-binding: t; -*-
 
 ;; Author: Christopher Poile
 ;; Version: 0.1.0
@@ -24,7 +24,7 @@
 
 ;; Add parent directory to load path to find claudemacs
 (add-to-list 'load-path (file-name-directory (directory-file-name (file-name-directory load-file-name))))
-(require 'claudemacs)
+(require 'claude)
 
 ;;; Test Utilities
 
@@ -186,7 +186,7 @@ This test should FAIL initially, then we make it pass."
   ;; Step 2: Check that buffer name generation works
   (let ((buffer-name (claudemacs--get-buffer-name)))
     (should buffer-name)
-    (should (string-match-p "\\*claudemacs:" buffer-name)))
+    (should (string-match-p "\\*claude:" buffer-name)))
   
   ;; Step 3: Check that project root detection works
   (let ((project-root (claudemacs--project-root)))
@@ -946,5 +946,5 @@ Tests real menu integration without mocking:
       (should (string-match-p "\"X\"" layout-str))
       (should (string-match-p "claudemacs-ask-without-context" layout-str)))))
 
-(provide 'claudemacs-actions-test)
-;;; claudemacs-actions-test.el ends here
+(provide 'claude-actions-test)
+;;; claude-actions-test.el ends here

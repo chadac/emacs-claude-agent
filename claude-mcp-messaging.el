@@ -1,18 +1,18 @@
-;;; claudemacs-ai-messaging.el --- Multi-agent messaging system for claudemacs -*- lexical-binding: t; -*-
+;;; claude-mcp-messaging.el --- Multi-agent messaging system for Claude -*- lexical-binding: t; -*-
 
-;; This file is part of claudemacs.
+;; This file is part of Claude.
 
 ;;; Commentary:
 
-;; This module provides multi-agent support for claudemacs, allowing:
-;; - Spawning multiple claudemacs agents per project
+;; This module provides multi-agent support for Claude, allowing:
+;; - Spawning multiple Claude agents per project
 ;; - Listing all running agents
 ;; - Sending messages between agents
 ;; - Queuing messages for agents that are busy (thinking/waiting for permissions)
 ;;
 ;; Agents are identified by unique buffer names:
-;; - Primary agent: *claudemacs:<directory>*
-;; - Additional agents: *claudemacs:<directory>:<agent-name>*
+;; - Primary agent: *claude:<directory>*
+;; - Additional agents: *claude:<directory>:<agent-name>*
 
 ;;; Code:
 
@@ -20,42 +20,42 @@
 
 ;;;; Message Queue System
 
-(defvar claudemacs-ai-message-queues (make-hash-table :test 'equal)
+(defvar claude-mcp-message-queues (make-hash-table :test 'equal)
   "Hash table mapping buffer names to message queues.
 Each queue is a list of plists with keys: :message, :sender, :timestamp.")
 
-(defun claudemacs-ai-message-queue-add (buffer-name message sender)
+(defun claude-mcp-message-queue-add (buffer-name message sender)
   "Add MESSAGE from SENDER to the queue for BUFFER-NAME.
 Returns the number of messages now in the queue."
-  (let* ((queue (gethash buffer-name claudemacs-ai-message-queues '()))
+  (let* ((queue (gethash buffer-name claude-mcp-message-queues '()))
          (entry (list :message message
                       :sender sender
                       :timestamp (current-time))))
-    (puthash buffer-name (append queue (list entry)) claudemacs-ai-message-queues)
-    (length (gethash buffer-name claudemacs-ai-message-queues))))
+    (puthash buffer-name (append queue (list entry)) claude-mcp-message-queues)
+    (length (gethash buffer-name claude-mcp-message-queues))))
 
-(defun claudemacs-ai-message-queue-get (buffer-name &optional clear)
+(defun claude-mcp-message-queue-get (buffer-name &optional clear)
   "Get all queued messages for BUFFER-NAME.
 Returns a list of plists with keys: :message, :sender, :timestamp.
 If CLEAR is non-nil, removes the messages from the queue after retrieving them."
-  (let ((queue (gethash buffer-name claudemacs-ai-message-queues '())))
+  (let ((queue (gethash buffer-name claude-mcp-message-queues '())))
     (when clear
-      (remhash buffer-name claudemacs-ai-message-queues))
+      (remhash buffer-name claude-mcp-message-queues))
     queue))
 
-(defun claudemacs-ai-message-queue-peek (buffer-name)
+(defun claude-mcp-message-queue-peek (buffer-name)
   "Check if there are queued messages for BUFFER-NAME.
 Returns the count of messages without removing them."
-  (length (gethash buffer-name claudemacs-ai-message-queues '())))
+  (length (gethash buffer-name claude-mcp-message-queues '())))
 
-(defun claudemacs-ai-message-queue-clear (buffer-name)
+(defun claude-mcp-message-queue-clear (buffer-name)
   "Clear all queued messages for BUFFER-NAME."
-  (remhash buffer-name claudemacs-ai-message-queues))
+  (remhash buffer-name claude-mcp-message-queues))
 
-(defun claudemacs-ai-message-queue-format (buffer-name)
+(defun claude-mcp-message-queue-format (buffer-name)
   "Format queued messages for BUFFER-NAME as a human-readable string.
 Designed to be shown to Claude AI agents."
-  (let ((queue (gethash buffer-name claudemacs-ai-message-queues '())))
+  (let ((queue (gethash buffer-name claude-mcp-message-queues '())))
     (if (null queue)
         "No queued messages."
       (with-temp-buffer
@@ -74,25 +74,25 @@ Designed to be shown to Claude AI agents."
             (insert "\n\n")))
         (insert (format "═══════════════════════════════════════════════════════\n\n"))
         (insert "To respond to a message, use the MCP tool:\n")
-        (insert "  mcp__claudemacs__message_agent\n")
+        (insert "  mcp__emacs__message_agent\n")
         (insert "with parameters:\n")
         (insert "  buffer_name: <sender's buffer name>\n")
         (insert "  message: <your response>\n\n")
         (insert "To clear these messages after reading, use:\n")
-        (insert "  mcp__claudemacs__check_messages with clear=true\n")
+        (insert "  mcp__emacs__check_messages with clear=true\n")
         (buffer-string)))))
 
-(defun claudemacs-ai-spawn-agent (directory &optional agent-name initial-prompt)
-  "Spawn a new claudemacs agent in DIRECTORY.
+(defun claude-mcp-spawn-agent (directory &optional agent-name initial-prompt)
+  "Spawn a new Claude agent in DIRECTORY.
 AGENT-NAME is an optional identifier for the agent (auto-generated if not provided).
 INITIAL-PROMPT is an optional message to send after the agent starts.
 Returns the buffer name of the new agent.
 Designed to be called via MCP by Claude AI."
-  (require 'claudemacs)
+  (require 'claude)
   (let* ((expanded-dir (expand-file-name directory))
          ;; Auto-generate agent name if not provided
          (agent-id (or agent-name
-                      (let ((existing-agents (claudemacs-ai-list-agents)))
+                      (let ((existing-agents (claude-mcp-list-agents)))
                         ;; Find all agents for this directory
                         ;; existing-agents is a vector of vectors
                         (let* ((same-dir-agents (seq-filter
@@ -105,9 +105,9 @@ Designed to be called via MCP by Claude AI."
                             (format "agent-%d" count))))))
          ;; Generate buffer name
          (buffer-name (if agent-id
-                         (format "*claudemacs:%s:%s*" expanded-dir agent-id)
-                       (format "*claudemacs:%s*" expanded-dir)))
-         (claudemacs-switch-to-buffer-on-create nil))
+                         (format "*claude:%s:%s*" expanded-dir agent-id)
+                       (format "*claude:%s*" expanded-dir)))
+         (claude-switch-to-buffer-on-create nil))
 
     ;; Check if buffer already exists
     (when (get-buffer buffer-name)
@@ -119,37 +119,37 @@ Designed to be called via MCP by Claude AI."
 
     ;; Spawn the agent
     (let ((default-directory expanded-dir))
-      ;; Temporarily override claudemacs--get-buffer-name to return our custom name
-      (cl-letf (((symbol-function 'claudemacs--get-buffer-name)
+      ;; Temporarily override claude--get-buffer-name to return our custom name
+      (cl-letf (((symbol-function 'claude--get-buffer-name)
                  (lambda () buffer-name)))
-        (claudemacs--start expanded-dir)))
+        (claude--start expanded-dir)))
 
     ;; Send initial prompt if provided
     (when initial-prompt
-      (claudemacs-ai-message-agent buffer-name initial-prompt))
+      (claude-mcp-message-agent buffer-name initial-prompt))
 
     buffer-name))
 
-(defun claudemacs-ai-list-agents ()
-  "List all running claudemacs agent sessions.
+(defun claude-mcp-list-agents ()
+  "List all running Claude agent sessions.
 Returns a list of (buffer-name directory) tuples.
 Designed to be called via MCP by Claude AI."
   (let ((agents '()))
     (dolist (buffer (buffer-list))
       (let ((name (buffer-name buffer)))
-        (when (string-match "^\\*claudemacs:\\([^:]+\\)\\(?::\\(.+\\)\\)?\\*$" name)
+        (when (string-match "^\\*claude:\\([^:]+\\)\\(?::\\(.+\\)\\)?\\*$" name)
           (let ((directory (match-string 1 name)))
             ;; Use vectors so json-encode treats them as arrays, not objects
             (push (vector name directory) agents)))))
     (vconcat (nreverse agents))))
 
-(defun claudemacs-ai-find-agent-by-cwd (cwd)
-  "Find the claudemacs agent buffer for CWD.
+(defun claude-mcp-find-agent-by-cwd (cwd)
+  "Find the Claude agent buffer for CWD.
 Returns the buffer name, or nil if not found.
 Prefers the primary agent (without agent-name suffix) if multiple exist.
 Designed to be called via MCP by Claude AI."
   (let* ((expanded-cwd (expand-file-name cwd))
-         (primary-buffer (format "*claudemacs:%s*" expanded-cwd))
+         (primary-buffer (format "*claude:%s*" expanded-cwd))
          (agents '()))
     ;; First check if primary agent exists
     (if (get-buffer primary-buffer)
@@ -157,7 +157,7 @@ Designed to be called via MCP by Claude AI."
       ;; Otherwise find any agent for this directory
       (dolist (buffer (buffer-list))
         (let ((name (buffer-name buffer)))
-          (when (string-match (concat "^\\*claudemacs:"
+          (when (string-match (concat "^\\*claude:"
                                      (regexp-quote expanded-cwd)
                                      "\\(?::\\(.+\\)\\)?\\*$")
                              name)
@@ -165,20 +165,20 @@ Designed to be called via MCP by Claude AI."
       ;; Return the first match, or nil
       (car agents))))
 
-(defun claudemacs-ai-check-messages (buffer-name &optional clear)
+(defun claude-mcp-check-messages (buffer-name &optional clear)
   "Check queued messages for BUFFER-NAME.
 If CLEAR is non-nil, messages are removed from the queue after retrieval.
 Returns a formatted string with all queued messages and instructions on how to respond.
 Designed to be called via MCP by Claude AI agents to check their inbox."
   (unless (get-buffer buffer-name)
     (error "Buffer '%s' does not exist" buffer-name))
-  (claudemacs-ai-message-queue-format buffer-name)
+  (claude-mcp-message-queue-format buffer-name)
   (when clear
-    (claudemacs-ai-message-queue-clear buffer-name))
-  (claudemacs-ai-message-queue-format buffer-name))
+    (claude-mcp-message-queue-clear buffer-name))
+  (claude-mcp-message-queue-format buffer-name))
 
-(defun claudemacs-ai-agent-ready-p (buffer-name)
-  "Check if the claudemacs agent in BUFFER-NAME is ready to receive messages.
+(defun claude-mcp-agent-ready-p (buffer-name)
+  "Check if the Claude agent in BUFFER-NAME is ready to receive messages.
 Returns t if the agent has a prompt visible and is not busy thinking.
 Returns nil if the agent is busy, waiting for input, or not ready.
 Designed to be called via MCP by Claude AI."
@@ -197,8 +197,8 @@ Designed to be called via MCP by Claude AI."
                (not (string-match-p "Thought for\\|Thinking on\\|Slithering\\|Flummoxing" tail-content))))))))
 
 
-(defun claudemacs-ai-send-message-now (buffer-name message &optional from-buffer)
-  "Send MESSAGE directly to the claudemacs agent in BUFFER-NAME.
+(defun claude-mcp-send-message-now (buffer-name message &optional from-buffer)
+  "Send MESSAGE directly to the Claude agent in BUFFER-NAME.
 FROM-BUFFER is the sender's buffer name for logging purposes.
 This function sends immediately via process-send-string, bypassing any readiness checks.
 The message will be queued by Claude Code if it's currently busy.
@@ -211,14 +211,14 @@ Designed to be called via MCP by Claude AI."
 
     (with-current-buffer buffer-name
       (unless (and (boundp 'eat-terminal) eat-terminal)
-        (error "Buffer '%s' is not a claudemacs buffer (no eat-terminal)" buffer-name))
+        (error "Buffer '%s' is not a Claude buffer (no eat-terminal)" buffer-name))
 
       (let ((process (eat-term-parameter eat-terminal 'eat--process)))
         (unless (and process (process-live-p process))
           (error "Claudemacs agent in '%s' is not running" buffer-name))
 
         ;; Log to message board
-        (claudemacs-ai-message-board-log sender buffer-name message)
+        (claude-mcp-message-board-log sender buffer-name message)
 
         ;; Send the message directly to the process, then submit with just carriage return
         (process-send-string process formatted-message)
@@ -227,11 +227,11 @@ Designed to be called via MCP by Claude AI."
 
     (format "Message sent to %s from %s" buffer-name sender)))
 
-(defun claudemacs-ai-message-agent (buffer-name message &optional from-buffer)
-  "Queue MESSAGE for the claudemacs agent in BUFFER-NAME.
-FROM-BUFFER is the sender's buffer name (defaults to current buffer if it's a claudemacs buffer).
+(defun claude-mcp-message-agent (buffer-name message &optional from-buffer)
+  "Queue MESSAGE for the Claude agent in BUFFER-NAME.
+FROM-BUFFER is the sender's buffer name (defaults to current buffer if it's a Claude buffer).
 The message is added to the recipient's queue and logged to the message board.
-The recipient can check their messages using mcp__claudemacs__check_messages.
+The recipient can check their messages using mcp__emacs__check_messages.
 Designed to be called via MCP by Claude AI."
   (unless (get-buffer buffer-name)
     (error "Buffer '%s' does not exist" buffer-name))
@@ -239,35 +239,35 @@ Designed to be called via MCP by Claude AI."
   ;; Determine sender
   (let ((sender (or from-buffer
                     (when (and (buffer-name)
-                              (string-match-p "^\\*claudemacs:" (buffer-name)))
+                              (string-match-p "^\\*claude:" (buffer-name)))
                       (buffer-name))
                     "unknown")))
 
-    ;; Verify it's a claudemacs buffer
+    ;; Verify it's a Claude buffer
     (with-current-buffer buffer-name
       (unless (and (boundp 'eat-terminal) eat-terminal)
-        (error "Buffer '%s' is not a claudemacs buffer (no eat-terminal)" buffer-name))
+        (error "Buffer '%s' is not a Claude buffer (no eat-terminal)" buffer-name))
 
       (let ((process (eat-term-parameter eat-terminal 'eat--process)))
         (unless (and process (process-live-p process))
           (error "Claudemacs agent in '%s' is not running" buffer-name))))
 
     ;; Add to queue
-    (let ((queue-size (claudemacs-ai-message-queue-add buffer-name message sender)))
+    (let ((queue-size (claude-mcp-message-queue-add buffer-name message sender)))
       ;; Log to message board
-      (claudemacs-ai-message-board-log sender buffer-name message)
+      (claude-mcp-message-board-log sender buffer-name message)
 
-      (format "Message queued for %s from %s (%d message%s in queue). The recipient can check messages using mcp__claudemacs__check_messages."
+      (format "Message queued for %s from %s (%d message%s in queue). The recipient can check messages using mcp__emacs__check_messages."
               buffer-name sender queue-size (if (> queue-size 1) "s" "")))))
 
 ;;;; Message Board (Org-Mode Buffer)
 
-(defconst claudemacs-ai-message-board-buffer "*claudemacs:message-board*"
+(defconst claude-mcp-message-board-buffer "*claude:message-board*"
   "Buffer name for the message board.")
 
-(defun claudemacs-ai-message-board-get-buffer ()
+(defun claude-mcp-message-board-get-buffer ()
   "Get or create the message board buffer."
-  (let ((buf (get-buffer-create claudemacs-ai-message-board-buffer)))
+  (let ((buf (get-buffer-create claude-mcp-message-board-buffer)))
     (with-current-buffer buf
       (unless (eq major-mode 'org-mode)
         (org-mode)
@@ -276,10 +276,10 @@ Designed to be called via MCP by Claude AI."
         (insert "* Log\n\n")))
     buf))
 
-(defun claudemacs-ai-message-board-log (sender recipient message)
+(defun claude-mcp-message-board-log (sender recipient message)
   "Log a message from SENDER to RECIPIENT on the message board.
 Creates an org hierarchy: * Log -> ** Recipient -> *** Sender -> **** Message."
-  (with-current-buffer (claudemacs-ai-message-board-get-buffer)
+  (with-current-buffer (claude-mcp-message-board-get-buffer)
     (let ((timestamp (format-time-string "[%Y-%m-%d %a %H:%M]")))
       ;; Find or create recipient heading
       (goto-char (point-min))
@@ -308,21 +308,21 @@ Creates an org hierarchy: * Log -> ** Recipient -> *** Sender -> **** Message."
         (goto-char sender-end)
         (insert (format "**** %s\n%s\n\n" timestamp message))))))
 
-(defun claudemacs-ai-message-board-get ()
+(defun claude-mcp-message-board-get ()
   "Get the message board buffer content as a string."
-  (with-current-buffer (claudemacs-ai-message-board-get-buffer)
+  (with-current-buffer (claude-mcp-message-board-get-buffer)
     (buffer-string)))
 
-(defun claudemacs-ai-message-board-clear ()
+(defun claude-mcp-message-board-clear ()
   "Clear the message board."
-  (when-let ((buf (get-buffer claudemacs-ai-message-board-buffer)))
+  (when-let ((buf (get-buffer claude-mcp-message-board-buffer)))
     (kill-buffer buf)))
 
-(defun claudemacs-ai-message-board-summary ()
+(defun claude-mcp-message-board-summary ()
   "Get a human-readable summary of the message board.
 Counts messages by sender/recipient pairs."
   (let ((counts (make-hash-table :test 'equal)))
-    (with-current-buffer (claudemacs-ai-message-board-get-buffer)
+    (with-current-buffer (claude-mcp-message-board-get-buffer)
       (save-excursion
         (goto-char (point-min))
         ;; Parse org hierarchy: ** recipient, *** sender, **** message
@@ -373,5 +373,5 @@ Counts messages by sender/recipient pairs."
                    by-sender))
         (buffer-string)))))
 
-(provide 'claudemacs-ai-messaging)
-;;; claudemacs-ai-messaging.el ends here
+(provide 'claude-mcp-messaging)
+;;; claude-mcp-messaging.el ends here

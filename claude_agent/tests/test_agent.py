@@ -1,9 +1,9 @@
-"""Tests for claude_emacs_agent."""
+"""Tests for claude_agent."""
 
 import json
 import pytest
-from claude_emacs_agent.agent import (
-    ClaudeEmacsAgent,
+from claude_agent.agent import (
+    ClaudeAgent,
     AgentState,
     MARKER_READY,
     MARKER_ASSISTANT_START,
@@ -25,26 +25,26 @@ class TestAgentState:
         assert state.pending_tool_calls == {}
 
 
-class TestClaudeEmacsAgent:
-    """Tests for ClaudeEmacsAgent."""
+class TestClaudeAgent:
+    """Tests for ClaudeAgent."""
 
     def test_init(self):
         """Test agent initialization."""
-        agent = ClaudeEmacsAgent("/tmp/test", mcp_config="/tmp/config.json")
+        agent = ClaudeAgent("/tmp/test", mcp_config="/tmp/config.json")
         assert agent.work_dir == "/tmp/test"
         assert agent.mcp_config == "/tmp/config.json"
         assert agent.state.status == "initializing"
 
     def test_emit(self, capsys):
         """Test that _emit writes to stdout."""
-        agent = ClaudeEmacsAgent("/tmp/test")
+        agent = ClaudeAgent("/tmp/test")
         agent._emit("TEST message")
         captured = capsys.readouterr()
         assert captured.out == "TEST message\n"
 
     def test_emit_ready(self, capsys):
         """Test ready marker emission."""
-        agent = ClaudeEmacsAgent("/tmp/test")
+        agent = ClaudeAgent("/tmp/test")
         agent._emit_ready()
         captured = capsys.readouterr()
         assert MARKER_READY in captured.out
@@ -55,7 +55,7 @@ class TestMessageParsing:
     @pytest.mark.asyncio
     async def test_handle_init_message(self, capsys):
         """Test handling of init message."""
-        agent = ClaudeEmacsAgent("/tmp/test")
+        agent = ClaudeAgent("/tmp/test")
         init_msg = {
             "type": "system",
             "subtype": "init",
@@ -72,7 +72,7 @@ class TestMessageParsing:
     @pytest.mark.asyncio
     async def test_handle_assistant_text(self, capsys):
         """Test handling of assistant text message."""
-        agent = ClaudeEmacsAgent("/tmp/test")
+        agent = ClaudeAgent("/tmp/test")
         assistant_msg = {
             "type": "assistant",
             "message": {
@@ -89,7 +89,7 @@ class TestMessageParsing:
     @pytest.mark.asyncio
     async def test_handle_tool_call(self, capsys):
         """Test handling of tool call message."""
-        agent = ClaudeEmacsAgent("/tmp/test")
+        agent = ClaudeAgent("/tmp/test")
         tool_msg = {
             "type": "assistant",
             "message": {
@@ -112,7 +112,7 @@ class TestMessageParsing:
     @pytest.mark.asyncio
     async def test_handle_result(self, capsys):
         """Test handling of result message."""
-        agent = ClaudeEmacsAgent("/tmp/test")
+        agent = ClaudeAgent("/tmp/test")
         result_msg = {
             "type": "result",
             "usage": {"input_tokens": 100, "output_tokens": 50},
@@ -128,7 +128,7 @@ class TestMessageParsing:
     @pytest.mark.asyncio
     async def test_handle_result_with_permission_denial(self, capsys):
         """Test handling of result with permission denial."""
-        agent = ClaudeEmacsAgent("/tmp/test")
+        agent = ClaudeAgent("/tmp/test")
         result_msg = {
             "type": "result",
             "permission_denials": [
@@ -150,7 +150,7 @@ class TestMessageParsing:
     @pytest.mark.asyncio
     async def test_permission_response_deny(self, capsys):
         """Test denying a permission request."""
-        agent = ClaudeEmacsAgent("/tmp/test")
+        agent = ClaudeAgent("/tmp/test")
         agent.state.pending_permission = {
             "tool_name": "Read",
             "tool_input": {"file_path": "/etc/passwd"},

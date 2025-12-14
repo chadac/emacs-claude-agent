@@ -1,4 +1,4 @@
-;;; claudemacs-projectile-integration-test.el --- Real projectile integration tests -*- lexical-binding: t; -*-
+;;; claude-projectile-integration-test.el --- Real projectile integration tests -*- lexical-binding: t; -*-
 
 ;; Author: Claude Code
 ;; Version: 0.1.0
@@ -23,7 +23,7 @@
 
 ;; Add parent directory to load path to find claudemacs
 (add-to-list 'load-path (file-name-directory (directory-file-name (file-name-directory load-file-name))))
-(require 'claudemacs)
+(require 'claude)
 
 ;; Smart projectile loading - try to find projectile in user's installation
 (defun claudemacs-test--try-load-projectile ()
@@ -374,5 +374,5 @@ project/
       (when (file-exists-p test-dir)
         (delete-directory test-dir t)))))
 
-(provide 'claudemacs-projectile-integration-test)
-;;; claudemacs-projectile-integration-test.el ends here
+(provide 'claude-projectile-integration-test)
+;;; claude-projectile-integration-test.el ends here

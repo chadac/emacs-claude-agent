@@ -106,22 +106,22 @@ http_server_port: int | None = None
 def get_session_cwd() -> str | None:
     """Get the claudemacs session's working directory.
 
-    This is set by claudemacs.el via the CLAUDEMACS_CWD env var in the MCP config.
+    This is set by claudemacs.el via the CLAUDE_AGENT_CWD env var in the MCP config.
     Returns None if not set.
     """
-    return os.environ.get('CLAUDEMACS_CWD')
+    return os.environ.get('CLAUDE_AGENT_CWD')
 
 
 def get_socket_path() -> str:
     """Determine the Emacs server socket path.
 
     Checks in order:
-    1. CLAUDEMACS_SOCKET env var (set by claudemacs.el)
+    1. CLAUDE_AGENT_SOCKET env var (set by claudemacs.el)
     2. EMACS_SERVER_FILE env var
     3. XDG runtime dir: /run/user/$UID/emacs/server
     4. Legacy: ~/.emacs.d/server/server
     """
-    if socket := os.environ.get('CLAUDEMACS_SOCKET'):
+    if socket := os.environ.get('CLAUDE_AGENT_SOCKET'):
         return socket
     if server_file := os.environ.get('EMACS_SERVER_FILE'):
         return server_file
@@ -1226,7 +1226,7 @@ async def spawn_agent_async(directory: str, agent_name: str | None = None) -> st
     Args:
         directory: Directory path where the agent should work (will be expanded)
         agent_name: Optional identifier for the agent. If not provided, buffer will be
-                   named *claudemacs:/path*. If provided, buffer will be *claudemacs:/path:agent-name*.
+                   named *claude:/path*. If provided, buffer will be *claude:/path:agent-name*.
 
     Returns:
         Buffer name of the spawned agent
@@ -1236,12 +1236,12 @@ async def spawn_agent_async(directory: str, agent_name: str | None = None) -> st
     """
     escaped_dir = escape_elisp_string(directory)
 
-    # Build elisp call - now calls claudemacs-spawn-agent directly
+    # Build elisp call - now calls claude-spawn-agent directly
     if agent_name:
         escaped_name = escape_elisp_string(agent_name)
-        elisp = f'(claudemacs-spawn-agent "{escaped_dir}" "{escaped_name}")'
+        elisp = f'(claude-spawn-agent "{escaped_dir}" "{escaped_name}")'
     else:
-        elisp = f'(claudemacs-spawn-agent "{escaped_dir}")'
+        elisp = f'(claude-spawn-agent "{escaped_dir}")'
 
     result = await call_emacs_async(elisp, timeout=30)
 

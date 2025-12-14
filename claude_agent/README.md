@@ -1,4 +1,4 @@
-# Claude Emacs Agent
+# Claude Agent
 
 Python wrapper for Claude CLI that provides a clean line-based protocol for Emacs integration.
 
@@ -39,16 +39,16 @@ ERROR:<message>          # Error occurred
 
 ```bash
 # Start agent for a directory
-uv run python -m claude_emacs_agent --work-dir /path/to/project
+uv run python -m claude_agent --work-dir /path/to/project
 
 # Resume a specific session
-uv run python -m claude_emacs_agent --work-dir /path/to/project --resume <session-id>
+uv run python -m claude_agent --work-dir /path/to/project --resume <session-id>
 
 # Continue most recent session
-uv run python -m claude_emacs_agent --work-dir /path/to/project --continue
+uv run python -m claude_agent --work-dir /path/to/project --continue
 
 # With MCP config
-uv run python -m claude_emacs_agent --work-dir /path/to/project --mcp-config /path/to/config.json
+uv run python -m claude_agent --work-dir /path/to/project --mcp-config /path/to/config.json
 ```
 
 ## Development
@@ -58,5 +58,5 @@ uv run python -m claude_emacs_agent --work-dir /path/to/project --mcp-config /pa
 uv run pytest
 
 # Type checking
-uv run mypy claude_emacs_agent
+uv run mypy claude_agent
 ```

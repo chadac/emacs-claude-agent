@@ -10,15 +10,15 @@
 ;;; Code:
 
 (require 'claude-agent)
-(require 'claudemacs-mcp)  ; Will be renamed from claudemacs-ai.el
-(require 'claudemacs-sessions)
+(require 'claude-mcp)  ; Will be renamed from claude-ai.el
+(require 'claude-sessions)
 
-;; Declare functions from claudemacs-mcp (MCP config generation)
-(declare-function claudemacs--generate-mcp-config "claudemacs-mcp")
-(declare-function claudemacs-ai-setup-claude-environment "claudemacs-mcp")
+;; Declare functions from claude-mcp (MCP config generation)
+(declare-function claude--generate-mcp-config "claude-mcp")
+(declare-function claude-mcp-setup-claude-environment "claude-mcp")
 
-;; Declare variable from claudemacs.el
-(defvar claudemacs--package-dir)
+;; Declare variable from Claude.el
+(defvar claude--package-dir)
 
 ;;;; Customization
 
@@ -27,21 +27,21 @@
 If non-nil, automatically switch to the Claude buffer after starting.
 If nil, create the session but don't switch focus to it."
   :type 'boolean
-  :group 'claudemacs)
+  :group 'claude-agent)
 
 (defcustom claude-mcp-switch-to-buffer-on-toggle t
   "Whether to switch to the Claude buffer when toggling to show it.
 If non-nil, switch to the Claude buffer when toggling from hidden to visible.
 If nil, show the buffer but don't switch focus to it."
   :type 'boolean
-  :group 'claudemacs)
+  :group 'claude-agent)
 
 (defcustom claude-mcp-notify-on-await t
   "Whether to show a system notification when Claude is awaiting the user.
 When non-nil, display an OS notification popup when Claude completes a task.
 When nil, no notification is shown (silent operation)."
   :type 'boolean
-  :group 'claudemacs)
+  :group 'claude-agent)
 
 (defcustom claude-mcp-notification-sound-mac "Submarine"
   "The sound to use when displaying system notifications on macOS.
@@ -50,7 +50,7 @@ System sounds include: `Basso', `Blow', `Bottle', `Frog', `Funk',
 `Glass', `Hero', `Morse', `Ping', `Pop', `Purr', `Sosumi', `Submarine',
 `Tink'. Or put more sounds in the `/Library/Sound' folder and use those."
   :type 'string
-  :group 'claudemacs)
+  :group 'claude-agent)
 
 (defcustom claude-mcp-notification-auto-dismiss-linux t
   "Whether to auto-dismiss notifications on Linux (don't persist to system tray).
@@ -58,7 +58,7 @@ When non-nil, notifications will automatically disappear and not stay in the tra
 When nil, notifications will persist in the system tray according to system defaults.
 This setting only affects Linux systems using notify-send."
   :type 'boolean
-  :group 'claudemacs)
+  :group 'claude-agent)
 
 (defcustom claude-mcp-notification-sound-linux "bell"
   "The sound to use when displaying system notifications on Linux.
@@ -66,7 +66,7 @@ Uses canberra-gtk-play if available.  Common sound IDs include:
 `message-new-instant', `bell', `dialog-error', `dialog-warning'.
 When empty string, no sound is played."
   :type 'string
-  :group 'claudemacs)
+  :group 'claude-agent)
 
 (defcustom claude-mcp-startup-hook nil
   "Hook run after a claude-mcp session has finished starting up.
@@ -74,7 +74,7 @@ This hook is called after the agent buffer is initialized and the
 process is spawned. The hook functions are executed with the
 claude buffer as the current buffer."
   :type 'hook
-  :group 'claudemacs)
+  :group 'claude-agent)
 
 ;;;; Buffer-local Variables
 
@@ -137,7 +137,7 @@ Returns t if switched successfully, nil if no buffer exists."
   (if-let* ((buffer (claude-mcp--get-buffer)))
       (progn
         (with-current-buffer buffer
-          (unless (and claudemacs-agent--process (process-live-p claudemacs-agent--process))
+          (unless (and claude-agent--process (process-live-p claude-agent--process))
             (error "Claude session exists but process is not running. Please kill *claude:...* buffer and re-start")))
         ;; we have a running agent process
         (display-buffer buffer)
@@ -151,8 +151,8 @@ Returns t if switched successfully, nil if no buffer exists."
     (unless buffer
       (error "No Claude MCP session is active"))
     (with-current-buffer buffer
-      (unless (and claudemacs-agent--process
-                   (process-live-p claudemacs-agent--process))
+      (unless (and claude-agent--process
+                   (process-live-p claude-agent--process))
         (error "Claude agent process is not running"))))
   t)
 
@@ -222,13 +222,13 @@ This works across macOS, Linux, and Windows platforms."
   "Start agent process with custom ARGS for BUFFER in WORK-DIR.
 This is a wrapper that allows passing custom arguments to the Python wrapper
 (for MCP config, resume, etc.)."
-  (let* ((this-dir (or claudemacs--package-dir
+  (let* ((this-dir (or claude--package-dir
                        (when-let ((f (or load-file-name buffer-file-name)))
                          (file-name-directory f))
-                       (when-let ((f (locate-library "claudemacs")))
+                       (when-let ((f (locate-library "Claude")))
                          (file-name-directory f))))
          (agent-dir (when this-dir
-                      (expand-file-name "claude_emacs_agent" this-dir)))
+                      (expand-file-name "claude_agent" this-dir)))
          (process-connection-type t)
          (process-environment (cons "PYTHONUNBUFFERED=1" process-environment))
          (proc (apply #'start-process
@@ -236,11 +236,11 @@ This is a wrapper that allows passing custom arguments to the Python wrapper
                       buffer
                       "uv"
                       "run" "--directory" agent-dir
-                      "python" "-m" "claude_emacs_agent"
+                      "python" "-m" "claude_agent"
                       args)))
     (set-process-coding-system proc 'utf-8 'utf-8)
-    (set-process-filter proc #'claudemacs-agent--process-filter)
-    (set-process-sentinel proc #'claudemacs-agent--process-sentinel)
+    (set-process-filter proc #'claude-agent--process-filter)
+    (set-process-sentinel proc #'claude-agent--process-sentinel)
     proc))
 
 (defun claude-mcp--start (work-dir &rest args)
@@ -249,7 +249,7 @@ WORK-DIR can be either:
   - A string: \"/path\" creates buffer *claude:name*
   - A list: '(\"/path\" \"agent-name\") creates *claude:name:agent-name*"
   ;; Set up environment variables BEFORE spawning the Claude process
-  (claudemacs-ai-setup-claude-environment)
+  (claude-mcp-setup-claude-environment)
 
   ;; Parse work-dir - it can be a string or (dir agent-name) list
   (let* ((dir-string (if (listp work-dir) (car work-dir) work-dir))
@@ -264,7 +264,7 @@ WORK-DIR can be either:
                                (file-name-nondirectory (directory-file-name expanded-dir)))))
          (short-name (file-name-nondirectory (directory-file-name expanded-dir)))
          (buf (get-buffer-create buffer-name))
-         (mcp-config (claudemacs--generate-mcp-config expanded-dir buffer-name))
+         (mcp-config (claude--generate-mcp-config expanded-dir buffer-name))
          (agent-args (list "--work-dir" expanded-dir
                           "--mcp-config" mcp-config
                           "--log-file" (expand-file-name "claude-agent.log" expanded-dir))))
@@ -275,14 +275,14 @@ WORK-DIR can be either:
     (when (member "--continue" args)
       (setq agent-args (append agent-args (list "--continue"))))
 
-    ;; Initialize buffer with claudemacs-agent-mode
+    ;; Initialize buffer with claude-agent-mode
     (with-current-buffer buf
-      (claudemacs-agent-mode)
-      (claudemacs-agent--init-buffer short-name)
+      (claude-agent-mode)
+      (claude-agent--init-buffer short-name)
       (setq-local claude-mcp--cwd expanded-dir)
       ;; Start the agent process
       (let ((proc (claude-agent--start-process-with-args expanded-dir buf agent-args)))
-        (setq claudemacs-agent--process proc))
+        (setq claude-agent--process proc))
       ;; Run startup hook
       (run-hooks 'claude-mcp-startup-hook))
 
@@ -302,7 +302,7 @@ If CLEAR-FIRST is non-nil, clear the input area before inserting."
       (when clear-first
         ;; Clear input area (agent buffer specific)
         (let ((inhibit-read-only t))
-          (delete-region claudemacs-agent--input-start-marker (point-max))))
+          (delete-region claude-agent--input-start-marker (point-max))))
 
       (if no-return
           ;; Insert without sending (add to input area)
@@ -311,7 +311,7 @@ If CLEAR-FIRST is non-nil, clear the input area before inserting."
             (let ((inhibit-read-only t))
               (insert message)))
         ;; Send message with [INPUT] framing
-        (process-send-string claudemacs-agent--process
+        (process-send-string claude-agent--process
                            (format "[INPUT]\n%s\n[/INPUT]\n" message))))
 
     (unless no-switch
@@ -355,10 +355,10 @@ TARGET-BUFFER-NAME is the exact buffer name to use (optional)."
          (if (and buffer
                   (buffer-live-p buffer)
                   (with-current-buffer buffer
-                    (and claudemacs-agent--process (process-live-p claudemacs-agent--process))))
+                    (and claude-agent--process (process-live-p claude-agent--process))))
              ;; Send the message
              (with-current-buffer buffer
-               (process-send-string claudemacs-agent--process
+               (process-send-string claude-agent--process
                                   (format "[INPUT]\n%s\n[/INPUT]\n" msg))
                (message "Continuation message sent to Claude"))
            (message "Warning: Buffer %s not ready to receive message" buf-name))))
@@ -396,8 +396,8 @@ With prefix ARG, prompt for the project directory."
   (if-let* ((claude-buffer (claude-mcp--get-buffer)))
       (progn
         (with-current-buffer claude-buffer
-          (when (and claudemacs-agent--process (process-live-p claudemacs-agent--process))
-            (delete-process claudemacs-agent--process))
+          (when (and claude-agent--process (process-live-p claude-agent--process))
+            (delete-process claude-agent--process))
           (kill-buffer claude-buffer))
         (message "Claude MCP session killed"))
     (error "There is no Claude MCP session in this workspace or project")))
@@ -476,7 +476,7 @@ Hide if current, focus if visible elsewhere, show if hidden."
             (set-window-point (get-buffer-window claude-buffer) (point-max)))))))))
 
 ;; Hook up ready handler
-(add-hook 'claudemacs-agent-ready-hook #'claude-mcp--ready-handler)
+(add-hook 'claude-agent-ready-hook #'claude-mcp--ready-handler)
 
 (provide 'claude-mcp-process)
 ;;; claude-mcp-process.el ends here

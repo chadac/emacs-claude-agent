@@ -1,10 +1,10 @@
-# Claudemacs Integration
+# Claude.el Integration
 
-You are running inside Emacs via claudemacs. The MCP server provides enhanced Emacs integration.
+You are running inside Emacs via claude.el. The MCP server provides enhanced Emacs integration.
 
 ## Bash Execution
 
-**Prefer `mcp__claudemacs__bash` over the standard Bash tool** for running shell commands. Benefits:
+**Prefer `mcp__emacs__bash` over the standard Bash tool** for running shell commands. Benefits:
 - Output is visible in Emacs (in an eat terminal buffer)
 - User can see command execution in real-time
 - Better integration with Emacs workflow
@@ -15,7 +15,7 @@ Use the standard Bash tool only when:
 
 ## Notes System (Org-Mode)
 
-The notes MCP tools store persistent notes in `.claude/claudemacs-notes.org` (org-mode format). Use these tools to:
+The notes MCP tools store persistent notes in `.claude/claude.el-notes.org` (org-mode format). Use these tools to:
 
 - **Track context and progress**: Record what you've learned about the codebase, decisions made, and work completed
 - **Organize TODOs**: Create structured task lists with `notes_add_todo_item`
@@ -66,19 +66,19 @@ notes_add_documentation(
 )
 ```
 
-For this project (claudemacs), key files to document:
-- `claudemacs.el` - Main entry point, session management
-- `claudemacs-ai.el` - MCP tool implementations (buffer ops, watching, agents)
-- `claudemacs-ai-notes.el` - Structured org-mode notes system
-- `claudemacs-ai-messaging.el` - Inter-agent messaging
-- `claudemacs-ai-magit.el` - Magit section querying
-- `claudemacs_mcp/` - Python MCP server
+For this project (claude.el), key files to document:
+- `claude.el.el` - Main entry point, session management
+- `claude.el-ai.el` - MCP tool implementations (buffer ops, watching, agents)
+- `claude.el-ai-notes.el` - Structured org-mode notes system
+- `claude.el-ai-messaging.el` - Inter-agent messaging
+- `claude.el-ai-magit.el` - Magit section querying
+- `claude.el_mcp/` - Python MCP server
 
 ### Tag Guidelines
 
 - Tags must match `[[:alnum:]_@#%]+` (no hyphens allowed)
 - Use underscores instead: `:package_manager:` not `:package-manager:`
-- Common tags: `:bug:`, `:enhancement:`, `:elisp:`, `:python:`, `:claudemacs:`
+- Common tags: `:bug:`, `:enhancement:`, `:elisp:`, `:python:`, `:claude.el:`
 - Require 2+ spaces before tags in org headings for recognition
 
 ### Org-Mode Formatting Tips

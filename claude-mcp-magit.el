@@ -1,6 +1,6 @@
-;;; claudemacs-ai-magit.el --- Magit section querying for claudemacs -*- lexical-binding: t; -*-
+;;; claude-mcp-magit.el --- Magit section querying for Claude -*- lexical-binding: t; -*-
 
-;; This file is part of claudemacs.
+;; This file is part of Claude.
 
 ;;; Commentary:
 
@@ -9,16 +9,16 @@
 ;; to display structured, collapsible content.
 ;;
 ;; Main functions:
-;; - claudemacs-ai-magit-section-query-find: Find sections by criteria
-;; - claudemacs-ai-magit-section-query-content: Extract section content
-;; - claudemacs-ai-magit-section-query-get: Get section metadata
-;; - claudemacs-ai-magit-section-query-children: Get child sections
+;; - claude-mcp-magit-section-query-find: Find sections by criteria
+;; - claude-mcp-magit-section-query-content: Extract section content
+;; - claude-mcp-magit-section-query-get: Get section metadata
+;; - claude-mcp-magit-section-query-children: Get child sections
 
 ;;; Code:
 
 (require 'magit-section nil t)
 
-(defun claudemacs-ai-magit-section-query--strip-indent (text)
+(defun claude-mcp-magit-section-query--strip-indent (text)
   "Remove common leading whitespace from TEXT.
 Designed to be called via emacsclient by Claude AI."
   (let* ((lines (split-string text "\n"))
@@ -31,15 +31,15 @@ Designed to be called via emacsclient by Claude AI."
                    line))
                lines "\n")))
 
-(defun claudemacs-ai-magit-section-query--walk (section fn)
+(defun claude-mcp-magit-section-query--walk (section fn)
   "Walk SECTION tree applying FN to each section.
 FN should accept a section and return non-nil to continue walking.
 Designed to be called via emacsclient by Claude AI."
   (when (funcall fn section)
     (dolist (child (eieio-oref section 'children))
-      (claudemacs-ai-magit-section-query--walk child fn))))
+      (claude-mcp-magit-section-query--walk child fn))))
 
-(defun claudemacs-ai-magit-section-query--matches-p (section criteria)
+(defun claude-mcp-magit-section-query--matches-p (section criteria)
   "Check if SECTION matches CRITERIA (a plist).
 Supported criteria: :type, :heading (regex), :hidden, :value
 Designed to be called via emacsclient by Claude AI."
@@ -65,7 +65,7 @@ Designed to be called via emacsclient by Claude AI."
           (setq matches nil))))
     matches))
 
-(defun claudemacs-ai-magit-section-query-content (buffer-name section-position &optional strip-indent)
+(defun claude-mcp-magit-section-query-content (buffer-name section-position &optional strip-indent)
   "Extract content of magit section at SECTION-POSITION in BUFFER-NAME as string.
 SECTION-POSITION should be a buffer position (integer) within the section.
 If STRIP-INDENT is non-nil, remove common leading whitespace.
@@ -82,10 +82,10 @@ Designed to be called via emacsclient by Claude AI."
                (end (marker-position (eieio-oref section 'end)))
                (content (buffer-substring-no-properties start end)))
           (if strip-indent
-              (claudemacs-ai-magit-section-query--strip-indent content)
+              (claude-mcp-magit-section-query--strip-indent content)
             content))))))
 
-(defun claudemacs-ai-magit-section-query-find (buffer-name &rest criteria)
+(defun claude-mcp-magit-section-query-find (buffer-name &rest criteria)
   "Find magit sections in BUFFER-NAME matching CRITERIA.
 CRITERIA is a plist that can include:
   :type TYPE - section type symbol
@@ -105,15 +105,15 @@ Designed to be called via emacsclient by Claude AI."
         (goto-char (point-min))
         (setq root (magit-current-section))
         (when root
-          (claudemacs-ai-magit-section-query--walk
+          (claude-mcp-magit-section-query--walk
            root
            (lambda (section)
-             (when (claudemacs-ai-magit-section-query--matches-p section criteria)
+             (when (claude-mcp-magit-section-query--matches-p section criteria)
                (push (marker-position (eieio-oref section 'start)) results))
              t))))
       (nreverse results))))
 
-(defun claudemacs-ai-magit-section-query-children (buffer-name section-position &rest criteria)
+(defun claude-mcp-magit-section-query-children (buffer-name section-position &rest criteria)
   "Get child sections of section at SECTION-POSITION in BUFFER-NAME matching CRITERIA.
 SECTION-POSITION should be a buffer position (integer) within the parent section.
 CRITERIA is a plist (same format as magit-section-query-find).
@@ -129,11 +129,11 @@ Designed to be called via emacsclient by Claude AI."
         (unless section
           (error "No magit section found at position %d" section-position))
         (dolist (child (eieio-oref section 'children))
-          (when (claudemacs-ai-magit-section-query--matches-p child criteria)
+          (when (claude-mcp-magit-section-query--matches-p child criteria)
             (push (marker-position (eieio-oref child 'start)) results)))
         (nreverse results)))))
 
-(defun claudemacs-ai-magit-section-query-get (buffer-name section-position &optional include-content)
+(defun claude-mcp-magit-section-query-get (buffer-name section-position &optional include-content)
   "Get metadata for magit section at SECTION-POSITION in BUFFER-NAME.
 SECTION-POSITION should be a buffer position (integer) within the section.
 Returns a list with metadata: (type heading hidden start end [content])
@@ -159,5 +159,5 @@ Designed to be called via emacsclient by Claude AI."
             (setq result (append result (list (buffer-substring-no-properties start-pos end-pos)))))
           result)))))
 
-(provide 'claudemacs-ai-magit)
-;;; claudemacs-ai-magit.el ends here
+(provide 'claude-mcp-magit)
+;;; claude-mcp-magit.el ends here

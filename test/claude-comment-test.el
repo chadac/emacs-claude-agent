@@ -1,4 +1,4 @@
-;;; claudemacs-comment-test.el --- Tests for claudemacs comment functionality -*- lexical-binding: t; -*-
+;;; claude-comment-test.el --- Tests for claude comment functionality -*- lexical-binding: t; -*-
 
 ;; Author: Claude Code (extracted from claudemacs-test.el)
 ;; Version: 0.1.0
@@ -19,7 +19,7 @@
 
 ;; Add parent directory to load path to find claudemacs-comment
 (add-to-list 'load-path (file-name-directory (directory-file-name (file-name-directory load-file-name))))
-(require 'claudemacs-comment)
+(require 'claude-comment)
 
 ;;; Test Utilities
 
@@ -539,5 +539,5 @@ This provides a clean environment for testing without side effects."
       (should-not (string-match-p "\\*/" text)))))
 
 ;;;; Module Conclusion
-(provide 'claudemacs-comment-test)
-;;; claudemacs-comment-test.el ends here
+(provide 'claude-comment-test)
+;;; claude-comment-test.el ends here

@@ -74,7 +74,7 @@ Add to your project's `.dir-locals.el`:
 ### Step 3: Restart Claudemacs
 
 Tools are loaded when the MCP server starts. After adding/modifying tools:
-- Use `mcp__claudemacs__restart_and_resume` to reload
+- Use `mcp__emacs__restart_and_resume` to reload
 - Or start a fresh claudemacs session
 
 ## Tool Definition Formats

@@ -24,7 +24,7 @@ from . import lib
 app = Server("claudemacs")
 
 # Store the buffer identity for this MCP server instance
-# This is set during server initialization from CLAUDEMACS_BUFFER_NAME env var
+# This is set during server initialization from CLAUDE_AGENT_BUFFER_NAME env var
 SESSION_BUFFER_NAME: str | None = None
 
 # Load tool definitions from YAML
@@ -146,7 +146,7 @@ def load_tools() -> dict:
     TOOL_DEFS = data.get("tools", {})
 
     # Check for default .claude/claudemacs-tools.yaml in session directory
-    session_cwd = os.environ.get("CLAUDEMACS_CWD")
+    session_cwd = os.environ.get("CLAUDE_AGENT_CWD")
     if session_cwd:
         default_tools_file = os.path.join(session_cwd, ".claude", "claudemacs-tools.yaml")
         if os.path.exists(default_tools_file):
@@ -161,7 +161,7 @@ def load_tools() -> dict:
                 print(f"Warning: Failed to load default tools from {default_tools_file}: {e}", file=sys.stderr)
 
     # Load additional tools files from environment variable
-    additional_files = os.environ.get("CLAUDEMACS_ADDITIONAL_TOOLS_FILES", "")
+    additional_files = os.environ.get("CLAUDE_MCP_ADDITIONAL_TOOLS_FILES", "")
     if additional_files:
         for tools_file in additional_files.split(":"):
             tools_file = tools_file.strip()
@@ -493,7 +493,7 @@ async def handle_native_tool(name: str, arguments: dict) -> str:
         # Use provided directory or fall back to session cwd
         directory = arguments.get("directory") or lib.get_session_cwd()
         if not directory:
-            raise ValueError("No directory specified and CLAUDEMACS_CWD not set")
+            raise ValueError("No directory specified and CLAUDE_AGENT_CWD not set")
         timeout = float(arguments.get("timeout", 120))
         bash_result = await lib.bash_async(command, directory, timeout)
         # Format output similar to Claude Code's Bash tool
@@ -551,7 +551,7 @@ async def handle_native_tool(name: str, arguments: dict) -> str:
 
     elif name == "whoami":
         if not SESSION_BUFFER_NAME:
-            raise ValueError("Buffer name not configured - CLAUDEMACS_BUFFER_NAME environment variable is not set")
+            raise ValueError("Buffer name not configured - CLAUDE_AGENT_BUFFER_NAME environment variable is not set")
         return SESSION_BUFFER_NAME
 
     else:
@@ -637,7 +637,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
         # Determine the context to use
         session_cwd = lib.get_session_cwd()
-        session_buffer = os.environ.get("CLAUDEMACS_BUFFER_NAME")
+        session_buffer = os.environ.get("CLAUDE_AGENT_BUFFER_NAME")
 
         # Apply context wrapping based on priority: file > buffer > dir > session
         if context_file:
@@ -709,7 +709,7 @@ async def start_http_server():
     port = site._server.sockets[0].getsockname()[1]
 
     # Print port to stderr for Emacs to capture
-    print(f"CLAUDEMACS_MCP_HTTP_PORT={port}", file=sys.stderr, flush=True)
+    print(f"CLAUDE_MCP_HTTP_PORT={port}", file=sys.stderr, flush=True)
 
     return port, runner
 
@@ -719,7 +719,7 @@ async def main():
     global SESSION_BUFFER_NAME
 
     # Initialize session buffer name from environment
-    SESSION_BUFFER_NAME = os.environ.get("CLAUDEMACS_BUFFER_NAME")
+    SESSION_BUFFER_NAME = os.environ.get("CLAUDE_AGENT_BUFFER_NAME")
 
     # Load tools on startup
     load_tools()

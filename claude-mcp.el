@@ -1,4 +1,4 @@
-;;; claudemacs-mcp.el --- MCP integration for Claude -*- lexical-binding: t; -*-
+;;; claude-mcp.el --- MCP integration for Claude -*- lexical-binding: t; -*-
 ;; Author: Christopher Poile <cpoile@gmail.com>
 ;; Version: 0.1.0
 ;; Package-Requires: ((emacs "28.1"))
@@ -22,19 +22,19 @@
 ;;; Code:
 
 (require 'comint nil 'noerror)
-(require 'claudemacs-ai-messaging)
-(require 'claudemacs-ai-magit)
-(require 'claudemacs-ai-notes)
+(require 'claude-mcp-messaging)
+(require 'claude-mcp-magit)
+(require 'claude-mcp-notes)
 
 ;; Dynamic variable for session context (set by MCP server via let binding)
-(defvar claudemacs-session-cwd nil
-  "The working directory for the current claudemacs session.
+(defvar claude-session-cwd nil
+  "The working directory for the current Claude session.
 Set by the MCP server via a let binding to provide session context.
 This must be defvar'd to be dynamically scoped in lexical-binding mode.")
 
 ;;;; Buffer Content Operations
 
-(defun claudemacs-ai-insert-in-buffer (buffer-name text)
+(defun claude-mcp-insert-in-buffer (buffer-name text)
   "Insert TEXT into BUFFER-NAME at point.
 Designed to be called via emacsclient by Claude AI."
   (if (get-buffer buffer-name)
@@ -44,7 +44,7 @@ Designed to be called via emacsclient by Claude AI."
         (format "Inserted %d characters into buffer '%s'" (length text) buffer-name))
     (error "Buffer '%s' does not exist" buffer-name)))
 
-(defun claudemacs-ai-get-buffer-content (buffer-name &optional tail-lines head-lines start-line end-line)
+(defun claude-mcp-get-buffer-content (buffer-name &optional tail-lines head-lines start-line end-line)
   "Return the content of BUFFER-NAME.
 If TAIL-LINES is provided, return only the last TAIL-LINES lines.
 If HEAD-LINES is provided, return only the first HEAD-LINES lines.
@@ -79,7 +79,7 @@ Designed to be called via emacsclient by Claude AI."
           (buffer-substring-no-properties (point-min) (point-max)))))
     (error "Buffer '%s' does not exist" buffer-name)))
 
-(defun claudemacs-ai-get-region (buffer-name start end)
+(defun claude-mcp-get-region (buffer-name start end)
   "Return content of BUFFER-NAME from START to END.
 Designed to be called via emacsclient by Claude AI."
   (if (get-buffer buffer-name)
@@ -87,7 +87,7 @@ Designed to be called via emacsclient by Claude AI."
         (buffer-substring-no-properties start end))
     (error "Buffer '%s' does not exist" buffer-name)))
 
-(defun claudemacs-ai-search-buffer (buffer-name pattern &optional context-before context-after case-insensitive limit)
+(defun claude-mcp-search-buffer (buffer-name pattern &optional context-before context-after case-insensitive limit)
   "Search for PATTERN in BUFFER-NAME and return matches with context.
 CONTEXT-BEFORE: number of lines to show before each match (default 0)
 CONTEXT-AFTER: number of lines to show after each match (default 0)
@@ -165,7 +165,7 @@ Designed to be called via emacsclient by Claude AI."
       ;; Return as newline-separated string
       (mapconcat 'identity output "\n"))))
 
-(defun claudemacs-ai-replace-region (buffer-name start end text)
+(defun claude-mcp-replace-region (buffer-name start end text)
   "Replace content in BUFFER-NAME from START to END with TEXT.
 Designed to be called via emacsclient by Claude AI."
   (if (get-buffer buffer-name)
@@ -180,7 +180,7 @@ Designed to be called via emacsclient by Claude AI."
 
 ;;;; Buffer Navigation
 
-(defun claudemacs-ai-goto-point (buffer-name position)
+(defun claude-mcp-goto-point (buffer-name position)
   "Move point to POSITION in BUFFER-NAME.
 Designed to be called via emacsclient by Claude AI."
   (if (get-buffer buffer-name)
@@ -192,12 +192,12 @@ Designed to be called via emacsclient by Claude AI."
 
 ;;;; Buffer Information
 
-(defun claudemacs-ai-list-buffers ()
+(defun claude-mcp-list-buffers ()
   "Return a list of buffer names.
 Designed to be called via emacsclient by Claude AI."
   (mapcar #'buffer-name (buffer-list)))
 
-(defun claudemacs-ai-buffer-info (buffer-name)
+(defun claude-mcp-buffer-info (buffer-name)
   "Return information about BUFFER-NAME as a property list.
 Designed to be called via emacsclient by Claude AI."
   (if (get-buffer buffer-name)
@@ -214,9 +214,9 @@ Designed to be called via emacsclient by Claude AI."
 
 ;;;; REPL Integration
 
-(defun claudemacs-ai-send-to-eat-terminal (buffer-name text)
+(defun claude-mcp-send-to-eat-terminal (buffer-name text)
   "Send TEXT to eat terminal in BUFFER-NAME and submit with return.
-Designed for eat-mode terminals like claudemacs buffers.
+Designed for eat-mode terminals like Claude buffers.
 Designed to be called via emacsclient by Claude AI."
   (if (get-buffer buffer-name)
       (with-current-buffer buffer-name
@@ -228,7 +228,7 @@ Designed to be called via emacsclient by Claude AI."
           (error "Buffer '%s' is not an eat terminal" buffer-name)))
     (error "Buffer '%s' does not exist" buffer-name)))
 
-(defun claudemacs-ai-send-input (buffer-name text)
+(defun claude-mcp-send-input (buffer-name text)
   "Insert TEXT into BUFFER-NAME and send input (useful for REPL buffers).
 Tries eat-terminal, comint-send-input, eshell-send-input, or just inserts with newline.
 Designed to be called via emacsclient by Claude AI."
@@ -262,7 +262,7 @@ Designed to be called via emacsclient by Claude AI."
           (format "Inserted text with newline to buffer '%s'" buffer-name))))
     (error "Buffer '%s' does not exist" buffer-name)))
 
-(defun claudemacs-ai-exec-in-eat-terminal (buffer-name command &optional timeout)
+(defun claude-mcp-exec-in-eat-terminal (buffer-name command &optional timeout)
   "Execute COMMAND in eat terminal BUFFER-NAME and wait for completion.
 Returns the output of the command. TIMEOUT defaults to 30 seconds.
 Designed to be called via emacsclient by Claude AI.
@@ -332,13 +332,13 @@ Note: This function blocks but uses non-blocking waits to avoid freezing Emacs."
           (error "Buffer '%s' is not an eat terminal" buffer-name)))
     (error "Buffer '%s' does not exist" buffer-name)))
 
-;;;; Notes - See claudemacs-ai-notes.el for all notes functionality
-;; All notes functions have been moved to claudemacs-ai-notes.el
+;;;; Notes - See claude-mcp-notes.el for all notes functionality
+;; All notes functions have been moved to claude-mcp-notes.el
 ;; They are re-exported from that module for backward compatibility
 
 ;;;; Buffer Watching and Streaming
 
-(defun claudemacs-ai-watch-buffer (buffer-name &optional timeout stable-time)
+(defun claude-mcp-watch-buffer (buffer-name &optional timeout stable-time)
   "Watch BUFFER-NAME until content stabilizes or TIMEOUT seconds.
 Returns buffer content after no changes for STABLE-TIME seconds (default 0.5).
 TIMEOUT defaults to 30 seconds.
@@ -366,7 +366,7 @@ Designed to be called via emacsclient by Claude AI."
           (buffer-substring-no-properties (point-min) (point-max))))
     (error "Buffer '%s' does not exist" buffer-name)))
 
-(defun claudemacs-ai-watch-for-pattern (buffer-name pattern &optional timeout)
+(defun claude-mcp-watch-for-pattern (buffer-name pattern &optional timeout)
   "Watch BUFFER-NAME until PATTERN appears or TIMEOUT seconds.
 Returns plist with :match, :line, and :pos, or nil if timeout.
 Designed to be called via emacsclient by Claude AI."
@@ -386,7 +386,7 @@ Designed to be called via emacsclient by Claude AI."
           nil))
     (error "Buffer '%s' does not exist" buffer-name)))
 
-(defun claudemacs-ai-send-and-watch (buffer-name input &optional done-pattern timeout)
+(defun claude-mcp-send-and-watch (buffer-name input &optional done-pattern timeout)
   "Send INPUT to BUFFER-NAME and watch until DONE-PATTERN or stable.
 If DONE-PATTERN is provided, wait for it. Otherwise wait for stability.
 Returns new content added after sending input.
@@ -408,16 +408,16 @@ Designed to be called via emacsclient by Claude AI."
             (insert input "\n"))))
         ;; Watch for completion
         (if done-pattern
-            (claudemacs-ai-watch-for-pattern buffer-name done-pattern timeout)
+            (claude-mcp-watch-for-pattern buffer-name done-pattern timeout)
           ;; Return new content after stabilization
-          (claudemacs-ai-watch-buffer buffer-name timeout 1.0)
+          (claude-mcp-watch-buffer buffer-name timeout 1.0)
           (with-current-buffer buffer-name
             (buffer-substring-no-properties start-pos (point-max)))))
     (error "Buffer '%s' does not exist" buffer-name)))
 
 ;;;; Agent Spawning
 
-(defun claudemacs-ai--send-to-agent-when-ready (buffer-name prompt &optional attempt)
+(defun claude-mcp--send-to-agent-when-ready (buffer-name prompt &optional attempt)
   "Send PROMPT to BUFFER-NAME when eat-terminal is ready.
 ATTEMPT is the retry count (max 20 attempts, ~10 seconds total)."
   (let ((attempt (or attempt 0)))
@@ -440,43 +440,43 @@ ATTEMPT is the retry count (max 20 attempts, ~10 seconds total)."
                     (message "Sent initial prompt to %s" buffer-name))
                 ;; Not ready yet - retry
                 (run-at-time 0.5 nil
-                             #'claudemacs-ai--send-to-agent-when-ready
+                             #'claude-mcp--send-to-agent-when-ready
                              buffer-name prompt (1+ attempt))))
           ;; Buffer doesn't exist yet - retry
           (run-at-time 0.5 nil
-                       #'claudemacs-ai--send-to-agent-when-ready
+                       #'claude-mcp--send-to-agent-when-ready
                        buffer-name prompt (1+ attempt)))))))
 
-(defun claudemacs-ai-spawn-agent (directory &optional initial-prompt)
+(defun claude-mcp-spawn-agent (directory &optional initial-prompt)
   "Spawn a new Claude agent in DIRECTORY.
 If INITIAL-PROMPT is provided, send it to the agent after startup.
 Returns the buffer name of the new agent.
 Designed to be called via emacsclient by Claude AI."
   (require 'claudemacs)
   (let* ((work-dir (expand-file-name directory))
-         (buffer-name (format "*claudemacs:%s*" work-dir)))
+         (buffer-name (format "*claude:%s*" work-dir)))
     ;; Check if session already exists
     (if (get-buffer buffer-name)
         (format "Agent already running in %s (buffer: %s)" work-dir buffer-name)
       ;; Start new session
-      (claudemacs--start work-dir)
+      (claude--start work-dir)
       ;; Send initial prompt when terminal is ready
       (when initial-prompt
-        (claudemacs-ai--send-to-agent-when-ready buffer-name initial-prompt))
+        (claude-mcp--send-to-agent-when-ready buffer-name initial-prompt))
       (format "Spawned agent in %s (buffer: %s)" work-dir buffer-name))))
 
-(defun claudemacs-ai-list-agents ()
-  "List all running claudemacs agent sessions.
+(defun claude-mcp-list-agents ()
+  "List all running Claude agent sessions.
 Returns a list of (buffer-name directory) pairs.
 Designed to be called via emacsclient by Claude AI."
   (let (agents)
     (dolist (buf (buffer-list))
       (let ((name (buffer-name buf)))
-        (when (string-match "^\\*claudemacs:\\(.*\\)\\*$" name)
+        (when (string-match "^\\*claude:\\(.*\\)\\*$" name)
           (push (list name (match-string 1 name)) agents))))
     (or agents "No agents running")))
 
-(defun claudemacs-ai-message-agent (buffer-name message)
+(defun claude-mcp-message-agent (buffer-name message)
   "Send MESSAGE to the agent in BUFFER-NAME.
 This sends the message as user input to the Claude session.
 Designed to be called via emacsclient by Claude AI."
@@ -494,66 +494,66 @@ Designed to be called via emacsclient by Claude AI."
                                    (eat-term-input-event eat-terminal 1 'return)))))
                            buf)
               (format "Sent message to %s" buffer-name))
-          (error "Buffer '%s' is not a claudemacs terminal" buffer-name)))
+          (error "Buffer '%s' is not a Claude terminal" buffer-name)))
     (error "Buffer '%s' does not exist" buffer-name)))
 
 ;;;; Session Management
 
-(defun claudemacs-ai-restart-and-resume (&optional buffer-name)
-  "Restart the claudemacs session in BUFFER-NAME and resume the conversation.
-If BUFFER-NAME is not provided, uses `claudemacs-session-cwd' (set by MCP server).
+(defun claude-mcp-restart-and-resume (&optional buffer-name)
+  "Restart the Claude session in BUFFER-NAME and resume the conversation.
+If BUFFER-NAME is not provided, uses `claude-session-cwd' (set by MCP server).
 This reloads elisp files and restarts the MCP server with any code changes.
 Designed to be called via emacsclient by Claude AI."
-  (require 'claudemacs-ai-messaging)
+  (require 'claude-mcp-messaging)
   (let* ((target-buffer (or buffer-name
                             ;; Find the agent buffer from MCP session cwd
-                            (when (and (boundp 'claudemacs-session-cwd) claudemacs-session-cwd)
-                              (claudemacs-ai-find-agent-by-cwd claudemacs-session-cwd))
+                            (when (and (boundp 'claude-session-cwd) claude-session-cwd)
+                              (claude-mcp-find-agent-by-cwd claude-session-cwd))
                             ;; Error if we can't determine the session
-                            (error "Cannot determine claudemacs session - claudemacs-session-cwd not set"))))
-    ;; Check if this is a claudemacs buffer
+                            (error "Cannot determine Claude session - claude-session-cwd not set"))))
+    ;; Check if this is a Claude buffer
     (if (and (get-buffer target-buffer)
-             (string-match-p "^\\*claudemacs:" target-buffer))
+             (string-match-p "^\\*claude:" target-buffer))
         (let ((work-dir (with-current-buffer target-buffer
-                         (or claudemacs--cwd
+                         (or claude--cwd
                              ;; Fallback: extract directory from buffer name
-                             ;; *claudemacs:/path/to/dir/* or *claudemacs:/path/to/dir:agent-name*
-                             (when (string-match "^\\*claudemacs:\\([^:]+\\)" target-buffer)
+                             ;; *claude:/path/to/dir/* or *claude:/path/to/dir:agent-name*
+                             (when (string-match "^\\*claude:\\([^:]+\\)" target-buffer)
                                (match-string 1 target-buffer))))))
           (unless work-dir
             (error "Cannot determine working directory for buffer '%s'" target-buffer))
           ;; Use run-at-time to defer execution so we can return a response first
-          ;; Pass work-dir and buffer name to claudemacs-restart to target the correct session
+          ;; Pass work-dir and buffer name to claude-restart to target the correct session
           (run-at-time 0.5 nil
                        (lambda (dir buf)
                          (require 'claudemacs)
-                         ;; Call claudemacs-restart with both work-dir and buffer-name
-                         (claudemacs-restart dir buf))
+                         ;; Call claude-restart with both work-dir and buffer-name
+                         (claude-restart dir buf))
                        work-dir target-buffer)
           (format "Restart scheduled for %s (buffer: %s) - session will reload elisp files, restart MCP server, and resume shortly"
                   work-dir target-buffer))
-      (error "Buffer '%s' is not a claudemacs buffer" target-buffer))))
+      (error "Buffer '%s' is not a Claude buffer" target-buffer))))
 
 ;;;; Project Shell for Bash Execution
 
 
-(defun claudemacs-ai-bash-hook-script ()
+(defun claude-mcp-bash-hook-script ()
   "Generate shell hook script for bash/zsh command completion callbacks.
 Returns a string containing the hook setup script."
   "
-__claudemacs_post_command() {
+__claude_post_command() {
     local exit_code=$?
     # Run in subshell to hide job control messages
     if command -v curl >/dev/null 2>&1; then
         (curl -X POST -H 'Content-Type: application/json' \\
-             -d '{\"shell_id\":\"'$CLAUDEMACS_SHELL_ID'\",\"exit_code\":'$exit_code'}' \\
-             \"http://localhost:$CLAUDEMACS_MCP_PORT/bash-command\" >/dev/null 2>&1 &)
+             -d '{\"shell_id\":\"'$CLAUDE_MCP_SHELL_ID'\",\"exit_code\":'$exit_code'}' \\
+             \"http://localhost:$CLAUDE_MCP_PORT/bash-command\" >/dev/null 2>&1 &)
     elif command -v python3 >/dev/null 2>&1; then
         (python3 -c \"
 import urllib.request, json
 try:
-    data = json.dumps({'shell_id':'$CLAUDEMACS_SHELL_ID','exit_code':$exit_code}).encode()
-    req = urllib.request.Request('http://localhost:$CLAUDEMACS_MCP_PORT/bash-command', data=data, headers={'Content-Type':'application/json'})
+    data = json.dumps({'shell_id':'$CLAUDE_MCP_SHELL_ID','exit_code':$exit_code}).encode()
+    req = urllib.request.Request('http://localhost:$CLAUDE_MCP_PORT/bash-command', data=data, headers={'Content-Type':'application/json'})
     urllib.request.urlopen(req, timeout=1)
 except: pass
 \" &)
@@ -563,26 +563,26 @@ except: pass
 
 if [ -n \"$BASH_VERSION\" ]; then
     if [ -n \"$PROMPT_COMMAND\" ]; then
-        PROMPT_COMMAND=\"__claudemacs_post_command; $PROMPT_COMMAND\"
+        PROMPT_COMMAND=\"__claude_post_command; $PROMPT_COMMAND\"
     else
-        PROMPT_COMMAND=\"__claudemacs_post_command\"
+        PROMPT_COMMAND=\"__claude_post_command\"
     fi
 elif [ -n \"$ZSH_VERSION\" ]; then
-    if ! (( \${precmd_functions[(I)__claudemacs_post_command]} )); then
-        precmd_functions+=(__claudemacs_post_command)
+    if ! (( \${precmd_functions[(I)__claude_post_command]} )); then
+        precmd_functions+=(__claude_post_command)
     fi
 fi
 ")
 
-(defun claudemacs-ai-inject-bash-hooks (buffer-name)
+(defun claude-mcp-inject-bash-hooks (buffer-name)
   "Inject bash/zsh completion hooks into shell BUFFER-NAME.
 This sets up PROMPT_COMMAND/precmd_functions to call back to MCP server."
   (when-let ((buf (get-buffer buffer-name)))
     (with-current-buffer buf
       (when (and (boundp 'eat-terminal) eat-terminal)
         ;; Write hook script to a temp file and source it
-        (let* ((temp-file (make-temp-file "claudemacs-hooks-" nil ".sh"))
-               (hook-script (claudemacs-ai-bash-hook-script)))
+        (let* ((temp-file (make-temp-file "claude-hooks-" nil ".sh"))
+               (hook-script (claude-mcp-bash-hook-script)))
           (with-temp-file temp-file
             (insert hook-script))
           ;; Source the file in the shell
@@ -590,7 +590,7 @@ This sets up PROMPT_COMMAND/precmd_functions to call back to MCP server."
           (eat-term-input-event eat-terminal 1 'return)
           (message "Injected bash hooks into %s via %s" buffer-name temp-file))))))
 
-(defun claudemacs-ai-get-project-shell (directory &optional mcp-port)
+(defun claude-mcp-get-project-shell (directory &optional mcp-port)
   "Get or create an eat shell for DIRECTORY with optional MCP-PORT.
 Returns the buffer name. Creates the shell if it doesn't exist.
 If MCP-PORT is provided, sets up bash/zsh hooks for event-driven command completion.
@@ -611,8 +611,8 @@ Designed to be called via emacsclient by Claude AI."
              (process-environment
               (if mcp-port
                   (append process-environment
-                         (list (format "CLAUDEMACS_MCP_PORT=%d" mcp-port)
-                               (format "CLAUDEMACS_SHELL_ID=%s" buffer-name)))
+                         (list (format "CLAUDE_MCP_PORT=%d" mcp-port)
+                               (format "CLAUDE_MCP_SHELL_ID=%s" buffer-name)))
                 process-environment)))
         (with-current-buffer (eat-make shell-name
                                        (or (getenv "SHELL") "/bin/bash")
@@ -621,18 +621,18 @@ Designed to be called via emacsclient by Claude AI."
 
         ;; Inject hooks asynchronously after shell is ready
         (when mcp-port
-          (run-at-time 2.0 nil #'claudemacs-ai-inject-bash-hooks buffer-name))
+          (run-at-time 2.0 nil #'claude-mcp-inject-bash-hooks buffer-name))
 
         buffer-name))))
 
-(defun claudemacs-ai-project-shell-ready-p (buffer-name)
+(defun claude-mcp-project-shell-ready-p (buffer-name)
   "Check if project shell BUFFER-NAME has an active eat terminal.
 Returns t if ready, nil otherwise."
   (when-let ((buf (get-buffer buffer-name)))
     (with-current-buffer buf
       (and (boundp 'eat-terminal) eat-terminal t))))
 
-(defun claudemacs-ai-interrupt-shell (buffer-name)
+(defun claude-mcp-interrupt-shell (buffer-name)
   "Send interrupt signal (Ctrl+C) to shell BUFFER-NAME.
 This kills the currently running command and returns to the prompt.
 Designed to be called via emacsclient by Claude AI."
@@ -648,7 +648,7 @@ Designed to be called via emacsclient by Claude AI."
 
 ;;;; Elisp Debugging and Formatting
 
-(defun claudemacs-ai-elisp-check-parens (file-path)
+(defun claude-mcp-elisp-check-parens (file-path)
   "Check FILE-PATH for unbalanced parentheses in elisp.
 Analyzes top-level forms and reports which ones have unbalanced parens.
 Returns a structured report with line numbers and error descriptions.
@@ -729,7 +729,7 @@ Designed to be called via emacsclient by Claude AI."
     (error
      (format "Error checking parens: %s" (error-message-string err)))))
 
-(defun claudemacs-ai-elisp-format (file-path)
+(defun claude-mcp-elisp-format (file-path)
   "Format FILE-PATH using elisp-format if available.
 Returns formatted content if elisp-format is available, or error message.
 Designed to be called via emacsclient by Claude AI."
@@ -749,32 +749,32 @@ Designed to be called via emacsclient by Claude AI."
 
 ;;;; Setup and Integration
 
-(defun claudemacs-ai-get-cli-path ()
-  "Get the path to the claudemacs-cli executable.
+(defun claude-mcp-get-cli-path ()
+  "Get the path to the claude-cli executable.
 Assumes it's in the same directory as this file."
   (let* ((this-file (or load-file-name
                         buffer-file-name
-                        (locate-library "claudemacs-ai")))
+                        (locate-library "claude-ai")))
          (this-dir (when this-file (file-name-directory this-file))))
     (if this-dir
-        (expand-file-name "claudemacs-cli" this-dir)
-      (error "Cannot determine claudemacs-ai.el location"))))
+        (expand-file-name "claude-cli" this-dir)
+      (error "Cannot determine claude-ai.el location"))))
 
-(defun claudemacs-ai-setup-claude-environment ()
-  "Add claudemacs-cli to PATH and set up environment for Claude.
-This should be called during claudemacs startup to expose the CLI to Claude."
-  (let ((cli-dir (file-name-directory (claudemacs-ai-get-cli-path))))
+(defun claude-mcp-setup-claude-environment ()
+  "Add claude-cli to PATH and set up environment for Claude.
+This should be called during Claude startup to expose the CLI to Claude."
+  (let ((cli-dir (file-name-directory (claude-mcp-get-cli-path))))
     ;; Add to PATH via setenv (affects child processes)
     (setenv "PATH" (concat cli-dir ":" (getenv "PATH")))
-    ;; Set CLAUDEMACS_SOCKET using the actual server-socket-dir
+    ;; Set CLAUDE_AGENT_SOCKET using the actual server-socket-dir
     (when (and (boundp 'server-socket-dir)
                server-socket-dir
                (server-running-p))
       (let ((socket-file (expand-file-name "server" server-socket-dir)))
         (when (file-exists-p socket-file)
-          (setenv "CLAUDEMACS_SOCKET" socket-file))))))
+          (setenv "CLAUDE_AGENT_SOCKET" socket-file))))))
 
-(defun claudemacs-ai-clear-buffer (buffer-name)
+(defun claude-mcp-clear-buffer (buffer-name)
   "Clear the terminal content in BUFFER-NAME by truncating the buffer.
 This removes accumulated history to improve performance.
 Designed to be called via MCP by Claude AI."
@@ -785,11 +785,11 @@ Designed to be called via MCP by Claude AI."
         (new-size 0))
     (with-current-buffer buffer-name
       (unless (and (boundp 'eat-terminal) eat-terminal)
-        (error "Buffer '%s' is not a claudemacs buffer (no eat-terminal)" buffer-name))
+        (error "Buffer '%s' is not a Claude buffer (no eat-terminal)" buffer-name))
 
       (let ((process (eat-term-parameter eat-terminal 'eat--process)))
         (unless (and process (process-live-p process))
-          (error "Claudemacs agent in '%s' is not running" buffer-name))
+          (error "Claude agent in '%s' is not running" buffer-name))
 
         ;; Capture original size
         (setq original-size (buffer-size))
@@ -806,5 +806,5 @@ Designed to be called via MCP by Claude AI."
                 buffer-name original-size new-size (- original-size new-size))
       (format "Buffer %s is only %d chars, no truncation needed" buffer-name original-size))))
 
-(provide 'claudemacs-mcp)
-;;; claudemacs-mcp.el ends here
+(provide 'claude-mcp)
+;;; claude-mcp.el ends here

@@ -1,4 +1,4 @@
-"""Claude Emacs Agent - Wrapper using Claude Agent SDK with dynamic permissions.
+"""Claude Agent - Wrapper using Claude Agent SDK with dynamic permissions.
 
 Outputs structured markers that Emacs can parse to format the conversation nicely:
 - [USER] ... [/USER] for echoing user input
@@ -82,7 +82,7 @@ class AgentState:
     message_count: int = 0
 
 
-class ClaudeEmacsAgent:
+class ClaudeAgent:
     """Wrapper that bridges Emacs and Claude using the SDK.
 
     Uses claude-agent-sdk for programmatic access with dynamic permission
@@ -582,7 +582,7 @@ async def run_agent(
     log_file: Optional[str] = None,
 ) -> None:
     """Run the agent, reading commands from stdin."""
-    agent = ClaudeEmacsAgent(
+    agent = ClaudeAgent(
         work_dir=work_dir,
         mcp_config=mcp_config,
         allowed_tools=allowed_tools,
@@ -702,7 +702,7 @@ def main() -> None:
     _make_stdout_blocking()
 
     parser = argparse.ArgumentParser(
-        description="Claude Emacs Agent - Using Claude Agent SDK"
+        description="Claude Agent - Using Claude Agent SDK"
     )
     parser.add_argument(
         "--work-dir",

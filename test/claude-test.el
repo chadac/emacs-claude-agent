@@ -1,4 +1,4 @@
-;;; claudemacs-test.el --- Tests for claudemacs -*- lexical-binding: t; -*-
+;;; claude-test.el --- Tests for claude -*- lexical-binding: t; -*-
 
 ;; Author: Claude Code
 ;; Version: 0.1.0
@@ -20,7 +20,7 @@
 
 ;; Add parent directory to load path to find claudemacs
 (add-to-list 'load-path (file-name-directory (directory-file-name (file-name-directory load-file-name))))
-(require 'claudemacs)
+(require 'claude)
 
 ;;; Test Utilities
 
@@ -47,7 +47,7 @@ The file is automatically cleaned up after BODY executes."
 (defun claudemacs-test-cleanup-buffers ()
   "Clean up any claudemacs test buffers."
   (dolist (buffer (buffer-list))
-    (when (string-match-p "^\\*claudemacs:.*test\\*" (buffer-name buffer))
+    (when (string-match-p "^\\*claude:.*test\\*" (buffer-name buffer))
       (kill-buffer buffer))))
 
 ;;; Basic Sanity Tests
@@ -288,14 +288,14 @@ The file is automatically cleaned up after BODY executes."
   "Test buffer name generation from session ID."
   :tags '(:unit :session)
   (cl-letf (((symbol-function 'claudemacs--session-id) (lambda () "test-session")))
-    (should (string= (claudemacs--get-buffer-name) "*claudemacs:test-session*"))))
+    (should (string= (claudemacs--get-buffer-name) "*claude:test-session*"))))
 
 (ert-deftest claudemacs-test-buffer-name-with-special-chars ()
   "Test buffer name generation with special characters in session ID."
   :tags '(:unit :session)
   (cl-letf (((symbol-function 'claudemacs--session-id) 
              (lambda () "/path/with/slashes")))
-    (should (string= (claudemacs--get-buffer-name) "*claudemacs:/path/with/slashes*"))))
+    (should (string= (claudemacs--get-buffer-name) "*claude:/path/with/slashes*"))))
 
 (ert-deftest claudemacs-test-buffer-detection ()
   "Test claudemacs buffer detection."
@@ -305,13 +305,13 @@ The file is automatically cleaned up after BODY executes."
     (should-not (claudemacs--is-claudemacs-buffer-p))
     
     ;; Test claudemacs buffer
-    (rename-buffer "*claudemacs:test*")
+    (rename-buffer "*claude:test*")
     (should (claudemacs--is-claudemacs-buffer-p))
     
     ;; Test with specific buffer argument
     (with-temp-buffer
       (should-not (claudemacs--is-claudemacs-buffer-p (current-buffer)))
-      (rename-buffer "*claudemacs:another*")
+      (rename-buffer "*claude:another*")
       (should (claudemacs--is-claudemacs-buffer-p (current-buffer)))))
   
   ;; Test with non-live buffer
@@ -362,7 +362,7 @@ The file is automatically cleaned up after BODY executes."
       (unwind-protect
           (progn
             ;; Create a buffer that looks like a claudemacs buffer
-            (setq test-buffer (get-buffer-create "*claudemacs:test-hook*"))
+            (setq test-buffer (get-buffer-create "*claude:test-hook*"))
             (with-current-buffer test-buffer
               ;; Set up minimal fake eat-terminal
               (setq-local eat-terminal 'fake-terminal))
@@ -401,7 +401,7 @@ The file is automatically cleaned up after BODY executes."
       (unwind-protect
           (progn
             ;; Create a buffer that looks like a claudemacs buffer
-            (setq test-buffer (get-buffer-create "*claudemacs:test-multiple*"))
+            (setq test-buffer (get-buffer-create "*claude:test-multiple*"))
             (with-current-buffer test-buffer
               ;; Set up minimal fake eat-terminal
               (setq-local eat-terminal 'fake-terminal))
@@ -439,7 +439,7 @@ The file is automatically cleaned up after BODY executes."
       (unwind-protect
           (progn
             ;; Create a buffer that looks like a claudemacs buffer
-            (setq test-buffer (get-buffer-create "*claudemacs:test-context*"))
+            (setq test-buffer (get-buffer-create "*claude:test-context*"))
             (with-current-buffer test-buffer
               ;; Set up minimal fake environment
               (setq-local eat-terminal 'fake-terminal)
@@ -450,7 +450,7 @@ The file is automatically cleaned up after BODY executes."
             
             ;; Verify hook ran in correct buffer context
             (should captured-buffer-name)
-            (should (string= captured-buffer-name "*claudemacs:test-context*"))
+            (should (string= captured-buffer-name "*claude:test-context*"))
             (should captured-cwd)
             (should (string= captured-cwd "/test/directory")))
         
@@ -482,7 +482,7 @@ The file is automatically cleaned up after BODY executes."
       (unwind-protect
           (progn
             ;; Create a buffer that looks like a claudemacs buffer
-            (setq test-buffer (get-buffer-create "*claudemacs:test-error*"))
+            (setq test-buffer (get-buffer-create "*claude:test-error*"))
             (with-current-buffer test-buffer
               ;; Set up minimal fake eat-terminal
               (setq-local eat-terminal 'fake-terminal))
@@ -609,7 +609,7 @@ The file is automatically cleaned up after BODY executes."
                (lambda (buffer &optional all-frames) 'fake-window)))
       
       ;; Test switch-to-buffer-on-create behavior
-      (let ((test-buffer (get-buffer-create "*claudemacs:switch-test*")))
+      (let ((test-buffer (get-buffer-create "*claude:switch-test*")))
         (unwind-protect
             (progn
               ;; Test with switching enabled
@@ -634,5 +634,5 @@ The file is automatically cleaned up after BODY executes."
           (when (buffer-live-p test-buffer)
             (kill-buffer test-buffer)))))))
 
-(provide 'claudemacs-test)
-;;; claudemacs-test.el ends here
+(provide 'claude-test)
+;;; claude-test.el ends here

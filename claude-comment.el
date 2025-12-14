@@ -1,10 +1,10 @@
-;;; claudemacs-comment.el --- Comment parsing and handling for claudemacs -*- lexical-binding: t; -*-
+;;; claude-comment.el --- Comment parsing and handling for Claude -*- lexical-binding: t; -*-
 
-;; Author: Christopher Poile (extracted from claudemacs.el)
+;; Author: Christopher Poile (extracted from Claude.el)
 ;; Version: 0.1.0
 ;; Package-Requires: ((emacs "28.1"))
 ;; Keywords: comments parsing text-manipulation
-;; URL: https://github.com/cpoile/claudemacs
+;; URL: https://github.com/cpoile/Claude
 
 ;; This file is not part of GNU Emacs.
 
@@ -24,7 +24,7 @@
 
 ;;;; Comment Detection and Parsing Functions
 
-(defun claudemacs--comment-syntax-info ()
+(defun claude--comment-syntax-info ()
   "Get comment syntax information for the current buffer.
 Returns a plist with :start, :end, :start-skip, :end-skip, and :multi-line-p."
   (list :start comment-start
@@ -33,7 +33,7 @@ Returns a plist with :start, :end, :start-skip, :end-skip, and :multi-line-p."
         :end-skip comment-end-skip
         :multi-line-p (and comment-end (not (string-empty-p comment-end)))))
 
-(defun claudemacs--point-in-comment-p ()
+(defun claude--point-in-comment-p ()
   "Return non-nil if point is inside or before a comment.
 This includes:
 - Being inside a comment
@@ -51,11 +51,11 @@ This includes:
        (forward-char (min 2 (- (line-end-position) (point)))))
      (nth 4 (syntax-ppss)))))
 
-(defun claudemacs--find-comment-start ()
+(defun claude--find-comment-start ()
   "Find the start of the comment block containing point.
 Returns the position of the comment start, or nil if not in a comment."
   (save-excursion
-    (let ((syntax-info (claudemacs--comment-syntax-info)))
+    (let ((syntax-info (claude--comment-syntax-info)))
       (cond
        ;; Multi-line comment (/* ... */) - use syntax-ppss to find bounds
        ((plist-get syntax-info :multi-line-p)
@@ -105,11 +105,11 @@ Returns the position of the comment start, or nil if not in a comment."
                ;; Case 3: No comment found
                (t nil))))))))))
 
-(defun claudemacs--find-comment-end ()
+(defun claude--find-comment-end ()
   "Find the end of the comment block containing point.
 Returns the position of the comment end, or nil if not in a comment."
   (save-excursion
-    (let ((syntax-info (claudemacs--comment-syntax-info)))
+    (let ((syntax-info (claude--comment-syntax-info)))
       (cond
        ;; Multi-line comment (/* ... */) - use syntax-ppss to find end
        ((plist-get syntax-info :multi-line-p)
@@ -160,25 +160,25 @@ Returns the position of the comment end, or nil if not in a comment."
                ;; Case 3: No comment found
                (t nil))))))))))
 
-(defun claudemacs--get-comment-bounds ()
+(defun claude--get-comment-bounds ()
   "Get the bounds of the comment block at point.
 Returns (START . END) if point is in a comment, nil otherwise."
-  (when (claudemacs--point-in-comment-p)
+  (when (claude--point-in-comment-p)
     (save-excursion
       ;; If we're before a comment on the same line, move to the comment
       (unless (nth 4 (syntax-ppss))
         (skip-chars-forward " \t"))
       
-      (let ((start (claudemacs--find-comment-start))
-            (end (claudemacs--find-comment-end)))
+      (let ((start (claude--find-comment-start))
+            (end (claude--find-comment-end)))
         (when (and start end)
           (cons start end))))))
 
-(defun claudemacs--extract-comment-text (start end)
+(defun claude--extract-comment-text (start end)
   "Extract and clean comment text between START and END positions.
 Removes comment markers and normalizes whitespace."
   (let* ((raw-text (buffer-substring-no-properties start end))
-         (syntax-info (claudemacs--comment-syntax-info))
+         (syntax-info (claude--comment-syntax-info))
          (comment-start (plist-get syntax-info :start))
          (comment-end (plist-get syntax-info :end))
          (cleaned-text raw-text))
@@ -220,5 +220,5 @@ Removes comment markers and normalizes whitespace."
     cleaned-text))
 
 ;;;; Module Conclusion
-(provide 'claudemacs-comment)
-;;; claudemacs-comment.el ends here
+(provide 'claude-comment)
+;;; claude-comment.el ends here

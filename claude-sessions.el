@@ -1,11 +1,11 @@
-;;; claudemacs-sessions.el --- Session monitoring for claudemacs -*- lexical-binding: t; -*-
+;;; claude-sessions.el --- Session monitoring for Claude -*- lexical-binding: t; -*-
 
-;; This file is part of claudemacs.
+;; This file is part of Claude.
 
 ;;; Commentary:
 
-;; This module provides a session monitoring buffer for claudemacs, allowing:
-;; - View all running claudemacs sessions in a table
+;; This module provides a session monitoring buffer for Claude, allowing:
+;; - View all running Claude sessions in a table
 ;; - See session status (alive, thinking, waiting for input)
 ;; - Open/switch to sessions with RET
 ;; - Kill or restart sessions from the list
@@ -18,74 +18,74 @@
 
 ;;;; Customization
 
-(defgroup claudemacs-sessions nil
-  "Session monitoring for claudemacs."
-  :group 'claudemacs)
+(defgroup claude-sessions nil
+  "Session monitoring for Claude."
+  :group 'claude-agent)
 
-(defcustom claudemacs-sessions-refresh-interval 2.0
+(defcustom claude-sessions-refresh-interval 2.0
   "Interval in seconds between automatic refreshes of the sessions buffer."
   :type 'number
-  :group 'claudemacs-sessions)
+  :group 'claude-agent-sessions)
 
-(defcustom claudemacs-sessions-buffer-name "*claudemacs-sessions*"
+(defcustom claude-sessions-buffer-name "*claude-sessions*"
   "Name of the sessions monitoring buffer."
   :type 'string
-  :group 'claudemacs-sessions)
+  :group 'claude-agent-sessions)
 
 ;;;; Faces
 
-(defface claudemacs-sessions-status-ready
+(defface claude-sessions-status-ready
   '((t :foreground "#00ff00" :weight bold))
   "Face for sessions that are ready for input."
-  :group 'claudemacs-sessions)
+  :group 'claude-agent-sessions)
 
-(defface claudemacs-sessions-status-thinking
+(defface claude-sessions-status-thinking
   '((t :foreground "#ffaa00" :weight bold))
   "Face for sessions that are thinking/processing."
-  :group 'claudemacs-sessions)
+  :group 'claude-agent-sessions)
 
-(defface claudemacs-sessions-status-typing
+(defface claude-sessions-status-typing
   '((t :foreground "#66ccff" :weight bold))
   "Face for sessions where user is typing."
-  :group 'claudemacs-sessions)
+  :group 'claude-agent-sessions)
 
-(defface claudemacs-sessions-status-waiting
+(defface claude-sessions-status-waiting
   '((t :foreground "#ff66ff" :weight bold))
   "Face for sessions waiting for user input."
-  :group 'claudemacs-sessions)
+  :group 'claude-agent-sessions)
 
-(defface claudemacs-sessions-status-dead
+(defface claude-sessions-status-dead
   '((t :foreground "#ff0000" :weight bold))
   "Face for sessions that are dead/not running."
-  :group 'claudemacs-sessions)
+  :group 'claude-agent-sessions)
 
-(defface claudemacs-sessions-project
+(defface claude-sessions-project
   '((t :foreground "#88aaff"))
   "Face for project directory column."
-  :group 'claudemacs-sessions)
+  :group 'claude-agent-sessions)
 
-(defface claudemacs-sessions-buffer
+(defface claude-sessions-buffer
   '((t :foreground "#aaaaff"))
   "Face for buffer name column."
-  :group 'claudemacs-sessions)
+  :group 'claude-agent-sessions)
 
-(defface claudemacs-sessions-label
+(defface claude-sessions-label
   '((t :foreground "#aaffaa"))
   "Face for session label column."
-  :group 'claudemacs-sessions)
+  :group 'claude-agent-sessions)
 
 ;;;; Internal Variables
 
-(defvar claudemacs-sessions--refresh-timer nil
+(defvar claude-sessions--refresh-timer nil
   "Timer for automatic refresh of the sessions buffer.")
 
 ;;;; Status Detection Functions
 
-(defun claudemacs-sessions--get-session-status (buffer)
-  "Get the status of a claudemacs session BUFFER.
+(defun claude-sessions--get-session-status (buffer)
+  "Get the status of a Claude session BUFFER.
 Returns one of: `ready', `thinking', `waiting', or `dead'."
   (unless (buffer-live-p buffer)
-    (cl-return-from claudemacs-sessions--get-session-status 'dead))
+    (cl-return-from claude-sessions--get-session-status 'dead))
 
   (with-current-buffer buffer
     (if (not (and (boundp 'eat-terminal) eat-terminal))
@@ -110,20 +110,20 @@ Returns one of: `ready', `thinking', `waiting', or `dead'."
              ;; Otherwise waiting for user input (edit approval, multi-select, etc.)
              (t 'waiting))))))))
 
-(defun claudemacs-sessions--format-status (status)
+(defun claude-sessions--format-status (status)
   "Format STATUS symbol into a display string with appropriate face."
   (pcase status
-    ('ready (propertize "Ready" 'face 'claudemacs-sessions-status-ready))
-    ('thinking (propertize "Thinking" 'face 'claudemacs-sessions-status-thinking))
-    ('typing (propertize "Typing" 'face 'claudemacs-sessions-status-typing))
-    ('waiting (propertize "Waiting" 'face 'claudemacs-sessions-status-waiting))
-    ('dead (propertize "Dead" 'face 'claudemacs-sessions-status-dead))
+    ('ready (propertize "Ready" 'face 'claude-sessions-status-ready))
+    ('thinking (propertize "Thinking" 'face 'claude-sessions-status-thinking))
+    ('typing (propertize "Typing" 'face 'claude-sessions-status-typing))
+    ('waiting (propertize "Waiting" 'face 'claude-sessions-status-waiting))
+    ('dead (propertize "Dead" 'face 'claude-sessions-status-dead))
     (_ (propertize "Unknown" 'face 'font-lock-comment-face))))
 
-(defun claudemacs-sessions--parse-buffer-name (buffer-name)
-  "Parse claudemacs buffer name into components.
+(defun claude-sessions--parse-buffer-name (buffer-name)
+  "Parse Claude buffer name into components.
 Returns plist with :directory, :label, and :project."
-  (when (string-match "^\\*claudemacs:\\([^:*]+\\)\\(?::\\([^*]+\\)\\)?\\*$" buffer-name)
+  (when (string-match "^\\*claude:\\([^:*]+\\)\\(?::\\([^*]+\\)\\)?\\*$" buffer-name)
     (let* ((directory (match-string 1 buffer-name))
            (label (match-string 2 buffer-name))
            (project (file-name-nondirectory (directory-file-name directory))))
@@ -131,15 +131,15 @@ Returns plist with :directory, :label, and :project."
             :label (or label "main")
             :project project))))
 
-(defun claudemacs-sessions--get-all-sessions ()
-  "Get list of all claudemacs session buffers with their info.
+(defun claude-sessions--get-all-sessions ()
+  "Get list of all Claude session buffers with their info.
 Returns a list of plists with session information."
   (let (sessions)
     (dolist (buffer (buffer-list))
       (let ((name (buffer-name buffer)))
-        (when (string-match-p "^\\*claudemacs:" name)
-          (let* ((parsed (claudemacs-sessions--parse-buffer-name name))
-                 (status (claudemacs-sessions--get-session-status buffer)))
+        (when (string-match-p "^\\*claude:" name)
+          (let* ((parsed (claude-sessions--parse-buffer-name name))
+                 (status (claude-sessions--get-session-status buffer)))
             (when parsed
               (push (append parsed
                            (list :buffer-name name
@@ -150,8 +150,8 @@ Returns a list of plists with session information."
 
 ;;;; Tabulated List Mode Implementation
 
-(defun claudemacs-sessions--get-entries ()
-  "Get tabulated list entries for all claudemacs sessions."
+(defun claude-sessions--get-entries ()
+  "Get tabulated list entries for all Claude sessions."
   (mapcar
    (lambda (session)
      (let* ((buffer-name (plist-get session :buffer-name))
@@ -161,14 +161,14 @@ Returns a list of plists with session information."
             (status (plist-get session :status)))
        (list buffer-name
              (vector
-              (propertize project 'face 'claudemacs-sessions-project)
-              (propertize buffer-name 'face 'claudemacs-sessions-buffer)
-              (propertize label 'face 'claudemacs-sessions-label)
-              (claudemacs-sessions--format-status status)
+              (propertize project 'face 'claude-sessions-project)
+              (propertize buffer-name 'face 'claude-sessions-buffer)
+              (propertize label 'face 'claude-sessions-label)
+              (claude-sessions--format-status status)
               directory))))
-   (claudemacs-sessions--get-all-sessions)))
+   (claude-sessions--get-all-sessions)))
 
-(defun claudemacs-sessions--get-marked-ids ()
+(defun claude-sessions--get-marked-ids ()
   "Get list of buffer IDs that are marked with D."
   (let (marked)
     (save-excursion
@@ -179,7 +179,7 @@ Returns a list of plists with session information."
         (forward-line 1)))
     marked))
 
-(defun claudemacs-sessions--restore-marks (marked-ids)
+(defun claude-sessions--restore-marks (marked-ids)
   "Restore D marks on entries with IDs in MARKED-IDS."
   (save-excursion
     (goto-char (point-min))
@@ -188,42 +188,42 @@ Returns a list of plists with session information."
         (tabulated-list-put-tag "D"))
       (forward-line 1))))
 
-(defun claudemacs-sessions-refresh ()
+(defun claude-sessions-refresh ()
   "Refresh the sessions buffer content, preserving marks."
   (interactive)
-  (when-let ((buffer (get-buffer claudemacs-sessions-buffer-name)))
+  (when-let ((buffer (get-buffer claude-sessions-buffer-name)))
     (with-current-buffer buffer
       (let ((pos (point))
-            (marked (claudemacs-sessions--get-marked-ids)))
+            (marked (claude-sessions--get-marked-ids)))
         (tabulated-list-revert)
-        (claudemacs-sessions--restore-marks marked)
+        (claude-sessions--restore-marks marked)
         (goto-char (min pos (point-max)))))))
 
-(defun claudemacs-sessions--start-auto-refresh ()
+(defun claude-sessions--start-auto-refresh ()
   "Start the auto-refresh timer for the sessions buffer."
-  (claudemacs-sessions--stop-auto-refresh)
-  (setq claudemacs-sessions--refresh-timer
-        (run-with-timer claudemacs-sessions-refresh-interval
-                        claudemacs-sessions-refresh-interval
-                        #'claudemacs-sessions--auto-refresh)))
+  (claude-sessions--stop-auto-refresh)
+  (setq claude-sessions--refresh-timer
+        (run-with-timer claude-sessions-refresh-interval
+                        claude-sessions-refresh-interval
+                        #'claude-sessions--auto-refresh)))
 
-(defun claudemacs-sessions--stop-auto-refresh ()
+(defun claude-sessions--stop-auto-refresh ()
   "Stop the auto-refresh timer."
-  (when claudemacs-sessions--refresh-timer
-    (cancel-timer claudemacs-sessions--refresh-timer)
-    (setq claudemacs-sessions--refresh-timer nil)))
+  (when claude-sessions--refresh-timer
+    (cancel-timer claude-sessions--refresh-timer)
+    (setq claude-sessions--refresh-timer nil)))
 
-(defun claudemacs-sessions--auto-refresh ()
+(defun claude-sessions--auto-refresh ()
   "Auto-refresh callback that only refreshes if buffer is visible."
-  (let ((buffer (get-buffer claudemacs-sessions-buffer-name)))
+  (let ((buffer (get-buffer claude-sessions-buffer-name)))
     (if (and buffer (get-buffer-window buffer 'visible))
-        (claudemacs-sessions-refresh)
+        (claude-sessions-refresh)
       ;; Buffer not visible, stop the timer
-      (claudemacs-sessions--stop-auto-refresh))))
+      (claude-sessions--stop-auto-refresh))))
 
 ;;;; Interactive Commands
 
-(defun claudemacs-sessions-open-session ()
+(defun claude-sessions-open-session ()
   "Open the session at point."
   (interactive)
   (when-let ((buffer-name (tabulated-list-get-id)))
@@ -233,7 +233,7 @@ Returns a list of plists with session information."
           (select-window (get-buffer-window buffer)))
       (message "Buffer %s no longer exists" buffer-name))))
 
-(defun claudemacs-sessions-kill-session ()
+(defun claude-sessions-kill-session ()
   "Kill the session at point."
   (interactive)
   (when-let ((buffer-name (tabulated-list-get-id)))
@@ -245,38 +245,38 @@ Returns a list of plists with session information."
                 (when (and process (process-live-p process))
                   (kill-process process)))))
           (kill-buffer buffer)
-          (claudemacs-sessions-refresh)
+          (claude-sessions-refresh)
           (message "Killed session %s" buffer-name))
       (message "Buffer %s no longer exists" buffer-name))))
 
-(defun claudemacs-sessions-restart-session ()
+(defun claude-sessions-restart-session ()
   "Restart the session at point."
   (interactive)
   (when-let ((buffer-name (tabulated-list-get-id)))
     (if-let ((buffer (get-buffer buffer-name)))
         (when (yes-or-no-p (format "Restart session %s? " buffer-name))
-          (require 'claudemacs)
+          (require 'Claude)
           ;; Get work-dir before killing buffer
           (let ((work-dir (with-current-buffer buffer
-                           (or claudemacs--cwd
-                               (when (string-match "^\\*claudemacs:\\([^:*]+\\)" buffer-name)
+                           (or claude--cwd
+                               (when (string-match "^\\*claude:\\([^:*]+\\)" buffer-name)
                                  (match-string 1 buffer-name))))))
-            ;; Use claudemacs-restart to handle the restart properly
-            (claudemacs-restart work-dir buffer-name)
+            ;; Use claude-restart to handle the restart properly
+            (claude-restart work-dir buffer-name)
             (message "Restarting session %s..." buffer-name)))
       (message "Buffer %s no longer exists" buffer-name))))
 
-(defun claudemacs-sessions-mark-for-kill ()
+(defun claude-sessions-mark-for-kill ()
   "Mark the session at point for killing."
   (interactive)
   (tabulated-list-put-tag "D" t))
 
-(defun claudemacs-sessions-unmark ()
+(defun claude-sessions-unmark ()
   "Remove mark from the session at point."
   (interactive)
   (tabulated-list-put-tag " " t))
 
-(defun claudemacs-sessions-execute-marks ()
+(defun claude-sessions-execute-marks ()
   "Execute the marked operations."
   (interactive)
   (let ((kill-list '()))
@@ -296,10 +296,10 @@ Returns a list of plists with session information."
                   (when (and process (process-live-p process))
                     (kill-process process)))))
             (kill-buffer buffer)))
-        (claudemacs-sessions-refresh)
+        (claude-sessions-refresh)
         (message "Killed %d session(s)" (length kill-list))))))
 
-(defun claudemacs-sessions-display-buffer ()
+(defun claude-sessions-display-buffer ()
   "Display the session at point in another window without selecting it."
   (interactive)
   (when-let ((buffer-name (tabulated-list-get-id)))
@@ -309,39 +309,39 @@ Returns a list of plists with session information."
 
 ;;;; Mode Definition
 
-(defvar claudemacs-sessions-mode-map
+(defvar claude-sessions-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "RET") #'claudemacs-sessions-open-session)
-    (define-key map (kbd "o") #'claudemacs-sessions-display-buffer)
-    (define-key map (kbd "R") #'claudemacs-sessions-restart-session)
-    (define-key map (kbd "g") #'claudemacs-sessions-refresh)
-    (define-key map (kbd "d") #'claudemacs-sessions-mark-for-kill)
-    (define-key map (kbd "u") #'claudemacs-sessions-unmark)
-    (define-key map (kbd "x") #'claudemacs-sessions-execute-marks)
+    (define-key map (kbd "RET") #'claude-sessions-open-session)
+    (define-key map (kbd "o") #'claude-sessions-display-buffer)
+    (define-key map (kbd "R") #'claude-sessions-restart-session)
+    (define-key map (kbd "g") #'claude-sessions-refresh)
+    (define-key map (kbd "d") #'claude-sessions-mark-for-kill)
+    (define-key map (kbd "u") #'claude-sessions-unmark)
+    (define-key map (kbd "x") #'claude-sessions-execute-marks)
     (define-key map (kbd "q") #'quit-window)
     map)
-  "Keymap for `claudemacs-sessions-mode'.")
+  "Keymap for `claude-sessions-mode'.")
 
 ;; Evil mode support
 (with-eval-after-load 'evil
-  (evil-define-key 'normal claudemacs-sessions-mode-map
-    (kbd "RET") #'claudemacs-sessions-open-session
-    (kbd "o") #'claudemacs-sessions-display-buffer
-    (kbd "R") #'claudemacs-sessions-restart-session
-    (kbd "gr") #'claudemacs-sessions-refresh
-    (kbd "d") #'claudemacs-sessions-mark-for-kill
-    (kbd "u") #'claudemacs-sessions-unmark
-    (kbd "x") #'claudemacs-sessions-execute-marks
+  (evil-define-key 'normal claude-sessions-mode-map
+    (kbd "RET") #'claude-sessions-open-session
+    (kbd "o") #'claude-sessions-display-buffer
+    (kbd "R") #'claude-sessions-restart-session
+    (kbd "gr") #'claude-sessions-refresh
+    (kbd "d") #'claude-sessions-mark-for-kill
+    (kbd "u") #'claude-sessions-unmark
+    (kbd "x") #'claude-sessions-execute-marks
     (kbd "q") #'quit-window)
-  (evil-define-key 'motion claudemacs-sessions-mode-map
-    (kbd "RET") #'claudemacs-sessions-open-session
-    (kbd "o") #'claudemacs-sessions-display-buffer
+  (evil-define-key 'motion claude-sessions-mode-map
+    (kbd "RET") #'claude-sessions-open-session
+    (kbd "o") #'claude-sessions-display-buffer
     (kbd "q") #'quit-window))
 
-(define-derived-mode claudemacs-sessions-mode tabulated-list-mode "Claudemacs-Sessions"
-  "Major mode for viewing and managing claudemacs sessions.
+(define-derived-mode claude-sessions-mode tabulated-list-mode "Claudemacs-Sessions"
+  "Major mode for viewing and managing Claude sessions.
 
-\\{claudemacs-sessions-mode-map}"
+\\{claude-sessions-mode-map}"
   (setq tabulated-list-format
         [("Project" 20 t)
          ("Buffer" 50 t)
@@ -350,33 +350,33 @@ Returns a list of plists with session information."
          ("Directory" 40 t)])
   (setq tabulated-list-padding 2)
   (setq tabulated-list-sort-key '("Project" . nil))
-  (setq tabulated-list-entries #'claudemacs-sessions--get-entries)
+  (setq tabulated-list-entries #'claude-sessions--get-entries)
   (tabulated-list-init-header)
   ;; Start auto-refresh when entering mode
-  (add-hook 'kill-buffer-hook #'claudemacs-sessions--stop-auto-refresh nil t)
+  (add-hook 'kill-buffer-hook #'claude-sessions--stop-auto-refresh nil t)
   ;; Start/stop timer based on window visibility
   (add-hook 'window-configuration-change-hook
             (lambda ()
               (if (get-buffer-window (current-buffer) 'visible)
-                  (claudemacs-sessions--start-auto-refresh)
-                (claudemacs-sessions--stop-auto-refresh)))
+                  (claude-sessions--start-auto-refresh)
+                (claude-sessions--stop-auto-refresh)))
             nil t))
 
 ;;;; Entry Point
 
 ;;;###autoload
-(defun claudemacs-list-sessions ()
-  "Display a buffer listing all claudemacs sessions.
+(defun claude-list-sessions ()
+  "Display a buffer listing all Claude sessions.
 The buffer updates automatically every 2 seconds while visible."
   (interactive)
-  (let ((buffer (get-buffer-create claudemacs-sessions-buffer-name)))
+  (let ((buffer (get-buffer-create claude-sessions-buffer-name)))
     (with-current-buffer buffer
-      (claudemacs-sessions-mode)
+      (claude-sessions-mode)
       (tabulated-list-print))
     (display-buffer buffer)
     (select-window (get-buffer-window buffer))
     ;; Start auto-refresh
-    (claudemacs-sessions--start-auto-refresh)))
+    (claude-sessions--start-auto-refresh)))
 
-(provide 'claudemacs-sessions)
-;;; claudemacs-sessions.el ends here
+(provide 'claude-sessions)
+;;; claude-sessions.el ends here
