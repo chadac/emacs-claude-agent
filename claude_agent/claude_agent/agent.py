@@ -360,14 +360,10 @@ class ClaudeAgent:
 
     async def connect(self) -> None:
         """Initialize and connect the SDK client."""
-        mcp_servers = {}
-        if self.mcp_config:
-            mcp_servers = self.mcp_config  # Path to config file
-
         options = ClaudeAgentOptions(
             cwd=self.work_dir,
             can_use_tool=self._can_use_tool,
-            mcp_servers=mcp_servers if mcp_servers else {},
+            mcp_servers=self.mcp_config or {},  # Pass path string or empty dict
             allowed_tools=self.allowed_tools if self.allowed_tools else [],
             resume=self._resume_session,
             continue_conversation=self._continue_session or (not self._resume_session),
@@ -407,6 +403,7 @@ class ClaudeAgent:
             in_assistant_block = False
             current_tool = None
 
+            self._log_json("DEBUG", {"action": "waiting for SDK messages..."})
             async for msg in self._client.receive_messages():
                 self._log_json("RECV", {"type": type(msg).__name__, "data": str(msg)[:200]})
                 msg_type = type(msg).__name__
@@ -518,6 +515,10 @@ class ClaudeAgent:
                                             parts.append(self._filter_system_reminders(item))
                                     result_text = "\n".join(parts)
 
+                            # Ensure non-empty content when is_error is true
+                            if is_error and not result_text:
+                                result_text = "Tool execution failed (no error details provided)"
+
                             self._emit({
                                 "type": "tool_result",
                                 "content": result_text,
@@ -527,6 +528,7 @@ class ClaudeAgent:
                             if current_tool:
                                 self._emit({"type": "tool_end"})
                                 current_tool = None
+                            self._log_json("DEBUG", {"action": "tool_result processed, continuing to wait for more messages..."})
 
                 elif msg_type == "ResultMessage":
                     # Conversation turn complete

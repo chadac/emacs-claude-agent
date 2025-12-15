@@ -19,6 +19,7 @@
 
 (require 'ansi-color)
 (require 'org)
+(require 'transient)
 
 ;;;; Customization
 
@@ -29,6 +30,13 @@
 (defcustom claude-agent-python-command "uv"
   "Command to run Python for the agent wrapper."
   :type 'string
+  :group 'claude-agent)
+
+(defcustom claude-agent-enable-mcp t
+  "Whether to enable the Emacs MCP server for Claude sessions.
+When non-nil, Claude can interact with Emacs buffers via MCP tools.
+Requires the Emacs server to be running (`server-start')."
+  :type 'boolean
   :group 'claude-agent)
 
 ;;;; Faces
@@ -229,27 +237,53 @@ Each element is an alist with keys: name, status.")
 
 (defvar claude-agent-mode-map
   (let ((map (make-sparse-keymap)))
+    ;; Standard Emacs-style bindings (work everywhere)
     (define-key map (kbd "C-c C-c") #'claude-agent-send)
     (define-key map (kbd "C-<return>") #'claude-agent-send)
     (define-key map (kbd "C-c C-k") #'claude-agent-interrupt)
     (define-key map (kbd "C-c C-q") #'claude-agent-quit)
     (define-key map (kbd "M-p") #'claude-agent-previous-input)
     (define-key map (kbd "M-n") #'claude-agent-next-input)
+    ;; Transient menu (C-c C-a for "actions")
+    (define-key map (kbd "C-c C-a") #'claude-agent-transient-menu)
     map)
   "Keymap for `claude-agent-mode'.")
 
+(defvar claude-agent-log-mode-map
+  (let ((map (make-sparse-keymap)))
+    ;; Magit-style single-key bindings for the log/read-only area
+    ;; Model
+    (define-key map (kbd "m") #'claude-agent-set-model)
+    (define-key map (kbd "$") #'claude-agent-show-cost)
+    ;; MCP
+    (define-key map (kbd "M l") #'claude-agent-mcp-list)
+    (define-key map (kbd "M s") #'claude-agent-show-mcp-status)
+    (define-key map (kbd "M a") #'claude-agent-mcp-add)
+    (define-key map (kbd "M r") #'claude-agent-mcp-remove)
+    ;; Session control
+    (define-key map (kbd "c") #'claude-agent-compact)
+    (define-key map (kbd "C") #'claude-agent-clear)
+    (define-key map (kbd "q") #'claude-agent-quit)
+    (define-key map (kbd "k") #'claude-agent-interrupt)
+    ;; Navigation - go to input
+    (define-key map (kbd "i") #'claude-agent-goto-input)
+    (define-key map (kbd "RET") #'claude-agent-goto-input)
+    ;; Help
+    (define-key map (kbd "?") #'claude-agent-transient-menu)
+    map)
+  "Keymap for the read-only log area in `claude-agent-mode'.
+These single-key bindings only apply outside the input area.")
+
 (define-derived-mode claude-agent-mode fundamental-mode "Claude"
-  "Major mode for Claude interaction buffer.
-Uses org-mode fontification without org-mode keybindings."
+  "Major mode for Claude interaction buffer."
   :group 'claude-agent
   (setq-local truncate-lines nil)
   (setq-local word-wrap t)
   (setq-local buffer-read-only nil)
   (visual-line-mode 1)
-  ;; Set up org-mode fontification without org-mode keybindings
-  ;; This calls org's internal function to populate font-lock-keywords
-  (org-set-font-lock-defaults)
-  (font-lock-mode 1)
+  ;; Disable font-lock to avoid org-mode fontification errors
+  ;; TODO: Re-enable with proper org-mode setup once performance is fixed
+  (font-lock-mode -1)
   ;; Ensure our keybindings are set (defvar doesn't reinit on re-eval)
   (use-local-map claude-agent-mode-map)
   ;; Re-define keys to ensure they're set
@@ -264,7 +298,9 @@ Uses org-mode fontification without org-mode keybindings."
   ;; Set up evil insert state entry hook to move to input area
   ;; Use after-change-major-mode-hook to ensure evil is loaded
   (add-hook 'evil-insert-state-entry-hook
-            #'claude-agent--on-insert-state-entry nil t))
+            #'claude-agent--on-insert-state-entry nil t)
+  ;; Add C-c C-a for transient menu (works in all states)
+  (local-set-key (kbd "C-c C-a") #'claude-agent-transient-menu))
 
 ;;;; Helper functions
 
@@ -272,6 +308,39 @@ Uses org-mode fontification without org-mode keybindings."
   "Return t if point is in the input area."
   (and claude-agent--input-start-marker
        (>= (point) claude-agent--input-start-marker)))
+
+(defun claude-agent-goto-input ()
+  "Move point to the input area."
+  (interactive)
+  (when claude-agent--input-start-marker
+    (goto-char claude-agent--input-start-marker)
+    ;; Enter insert state if using evil
+    (when (and (bound-and-true-p evil-local-mode)
+               (fboundp 'evil-insert-state))
+      (evil-insert-state))))
+
+(defvar-local claude-agent--in-log-area nil
+  "Non-nil when cursor is in the log area (not input area).
+Used to track keymap state changes.")
+
+(defun claude-agent--update-keymap ()
+  "Update the active keymap based on cursor position.
+When in the log area, enable magit-style single-key bindings.
+When in the input area, use normal text input bindings."
+  (let ((in-log (not (claude-agent--in-input-area-p))))
+    (unless (eq in-log claude-agent--in-log-area)
+      (setq claude-agent--in-log-area in-log)
+      (if in-log
+          ;; Entering log area - add log keymap as minor mode map
+          (progn
+            (setq-local minor-mode-overriding-map-alist
+                        (cons (cons 'claude-agent--in-log-area claude-agent-log-mode-map)
+                              (assq-delete-all 'claude-agent--in-log-area
+                                               minor-mode-overriding-map-alist))))
+        ;; Entering input area - remove log keymap
+        (setq-local minor-mode-overriding-map-alist
+                    (assq-delete-all 'claude-agent--in-log-area
+                                     minor-mode-overriding-map-alist))))))
 
 (defmacro claude-agent--in-base-buffer (&rest body)
   "Execute BODY in the base buffer (for polymode compatibility)."
@@ -328,7 +397,8 @@ Moves cursor to input area if currently outside it."
 
 (defun claude-agent--post-command-hook ()
   "Hook run after each command to update placeholder visibility.
-Also constrains cursor to input area when in evil insert state."
+Also constrains cursor to input area when in evil insert state,
+and switches keymaps based on cursor position."
   (claude-agent--update-placeholder)
   ;; In insert mode, keep cursor in input area
   (when (and claude-agent--input-start-marker
@@ -340,7 +410,9 @@ Also constrains cursor to input area when in evil insert state."
   (when (and (claude-agent--input-empty-p)
              (claude-agent--in-input-area-p)
              claude-agent--input-start-marker)
-    (goto-char claude-agent--input-start-marker)))
+    (goto-char claude-agent--input-start-marker))
+  ;; Switch keymaps based on position (magit-style in log area)
+  (claude-agent--update-keymap))
 
 ;;;; Section management
 ;;
@@ -358,7 +430,9 @@ Also constrains cursor to input area when in evil insert state."
       (insert "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
       (insert (format " Claude Session: %s\n" session-name))
       (insert "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
-      (claude-agent--apply-face start (point) 'claude-agent-header-face))
+      (claude-agent--apply-face start (point) 'claude-agent-header-face)
+      ;; Mark as fontified to prevent org-mode font-lock from interfering
+      (put-text-property start (point) 'fontified t))
 
     ;; === STATIC END MARKER ===
     ;; Everything before this is committed content that never changes
@@ -885,7 +959,9 @@ If VIRTUAL-INDENT is non-nil, apply it as line-prefix/wrap-prefix."
       ;; Apply virtual indent if specified
       (when virtual-indent
         (put-text-property start (point) 'line-prefix virtual-indent)
-        (put-text-property start (point) 'wrap-prefix virtual-indent)))
+        (put-text-property start (point) 'wrap-prefix virtual-indent))
+      ;; Mark as fontified to prevent org-mode font-lock from interfering
+      (put-text-property start (point) 'fontified t))
     (set-marker claude-agent--static-end-marker (point))
     ;; Insert status bar
     (when claude-agent--has-conversation
@@ -1010,9 +1086,7 @@ If VIRTUAL-INDENT is non-nil, apply it as line-prefix/wrap-prefix."
     ("user_start"
      (setq claude-agent--parse-state 'user)
      (setq claude-agent--has-conversation t)
-     (claude-agent--append-to-log
-      "\n━━━ You ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-      'claude-agent-user-header-face))
+     (claude-agent--append-to-log "\nyou> " 'claude-agent-user-header-face))
 
     ;; User message text
     ("user_text"
@@ -1026,9 +1100,7 @@ If VIRTUAL-INDENT is non-nil, apply it as line-prefix/wrap-prefix."
     ;; Assistant message start
     ("assistant_start"
      (setq claude-agent--parse-state 'assistant)
-     (claude-agent--append-to-log
-      "\n━━━ Claude ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-      'claude-agent-assistant-header-face))
+     (claude-agent--append-to-log "\nclaude> " 'claude-agent-assistant-header-face))
 
     ;; Assistant message text
     ("assistant_text"
@@ -1055,17 +1127,15 @@ If VIRTUAL-INDENT is non-nil, apply it as line-prefix/wrap-prefix."
          (claude-agent--insert-tool-call name args-str)))))
 
     ;; Tool result
+    ;; NOTE: Result display commented out to speed up rendering
     ("tool_result"
      (let ((content (cdr (assq 'content msg)))
            (is-error (cdr (assq 'is_error msg))))
        (if (eq claude-agent--parse-state 'read-tool)
            ;; Read tool - use special formatted display
            (claude-agent--insert-read-content content)
-         ;; Other tools - show in example block
-         (progn
-           (claude-agent--insert-tool-result-start)
-           (claude-agent--append-to-log (concat content "\n") nil " ")
-           (claude-agent--insert-tool-result-end)))))
+         ;; Other tools - skip result display for now
+         nil)))
 
     ;; Tool end
     ("tool_end"
@@ -1493,22 +1563,62 @@ Restores text input mode and any saved input."
       (expand-file-name "claude_agent"
                         (file-name-directory this-file)))))
 
+(defun claude-agent--generate-mcp-config (work-dir buffer-name)
+  "Generate MCP config file for emacs_mcp server.
+WORK-DIR is the session working directory.
+BUFFER-NAME is the Claude buffer name for this session.
+Returns the path to the generated config file."
+  (let* ((agent-dir (claude-agent--get-agent-dir))
+         (emacs-mcp-dir (expand-file-name "../emacs_mcp" agent-dir))
+         (config-file (make-temp-file "claude-mcp-config-" nil ".json"))
+         (server-socket (or (bound-and-true-p server-socket-dir)
+                           (expand-file-name "server" (temporary-file-directory))))
+         (config `((mcpServers
+                    . ((claudemacs
+                        . ((command . "uv")
+                           (args . ["run" "--directory" ,emacs-mcp-dir
+                                    "python" "-m" "emacs_mcp.server"])
+                           (env . ((CLAUDEMACS_SOCKET . ,server-socket)
+                                   (CLAUDE_AGENT_CWD . ,(expand-file-name work-dir))
+                                   (CLAUDE_AGENT_BUFFER_NAME . ,buffer-name))))))))))
+    (with-temp-file config-file
+      (insert (json-encode config)))
+    config-file))
+
+(defvar-local claude-agent--mcp-config-file nil
+  "Path to the MCP config file for this session.")
+
 (defun claude-agent--start-process (work-dir buffer &optional resume-session continue-session)
   "Start the Python agent process for WORK-DIR with BUFFER.
 Optional RESUME-SESSION is a session ID to resume.
 Optional CONTINUE-SESSION, if non-nil, continues the most recent session."
+  ;; Ensure Emacs server is running if MCP is enabled
+  (when (and claude-agent-enable-mcp
+             (not (bound-and-true-p server-process)))
+    (message "Starting Emacs server for MCP...")
+    (server-start))
   (let* ((agent-dir (claude-agent--get-agent-dir))
          (log-file (expand-file-name "claude-agent.log" work-dir))
+         (buffer-name (buffer-name buffer))
+         (mcp-config (when claude-agent-enable-mcp
+                       (claude-agent--generate-mcp-config work-dir buffer-name)))
          (args (list "run" "--directory" agent-dir
                      "python" "-u" "-m" "claude_agent"  ; -u for unbuffered
                      "--work-dir" work-dir
                      "--log-file" log-file)))
+    ;; Add MCP config if enabled
+    (when mcp-config
+      (setq args (append args (list "--mcp-config" mcp-config)))
+      ;; Store MCP config path for cleanup
+      (with-current-buffer buffer
+        (setq claude-agent--mcp-config-file mcp-config)))
     ;; Add resume or continue flags
     (when resume-session
       (setq args (append args (list "--resume" resume-session))))
     (when continue-session
       (setq args (append args (list "--continue"))))
-    (let ((process-connection-type t)  ; Use PTY for line-buffered output
+    ;; Use pipe (nil) instead of PTY to avoid focus-related buffering issues
+    (let ((process-connection-type nil)
           (process-environment (cons "PYTHONUNBUFFERED=1" process-environment))
           (proc (apply #'start-process
                        "claude-agent"
@@ -1518,6 +1628,7 @@ Optional CONTINUE-SESSION, if non-nil, continues the most recent session."
       (set-process-coding-system proc 'utf-8 'utf-8)
       (set-process-filter proc #'claude-agent--process-filter)
       (set-process-sentinel proc #'claude-agent--process-sentinel)
+      (set-process-query-on-exit-flag proc nil)
       proc)))
 
 (defun claude-agent--process-sentinel (proc event)
@@ -1529,7 +1640,12 @@ Optional CONTINUE-SESSION, if non-nil, continues the most recent session."
           (claude-agent--set-thinking nil)
           (claude-agent--append-to-log
            (format "\n[Process %s]\n" (string-trim event))
-           'claude-agent-session-face))))))
+           'claude-agent-session-face)
+          ;; Clean up MCP config file
+          (when (and claude-agent--mcp-config-file
+                     (file-exists-p claude-agent--mcp-config-file))
+            (delete-file claude-agent--mcp-config-file)
+            (setq claude-agent--mcp-config-file nil)))))))
 
 ;;;; User commands
 
@@ -1608,6 +1724,15 @@ Optional CONTINUE-SESSION, if non-nil, continues the most recent session."
                 (process-live-p claude-agent--process))
        (process-send-string claude-agent--process
                             (concat (json-encode '((type . "quit"))) "\n"))))))
+
+(defun claude-agent--send-json (msg)
+  "Send MSG as JSON to the agent process.
+MSG should be an alist that will be encoded as JSON."
+  (claude-agent--in-base-buffer
+   (when (and claude-agent--process
+              (process-live-p claude-agent--process))
+     (process-send-string claude-agent--process
+                          (concat (json-encode msg) "\n")))))
 
 (defun claude-agent-previous-input ()
   "Recall previous input from history."
@@ -1697,6 +1822,170 @@ Optional CONTINUE-SESSION, if non-nil, continues the most recent session."
     ;; Display buffer
     (pop-to-buffer buf)
     buf))
+
+;;;; Transient Menu
+
+(defvar claude-agent--available-models
+  '(("sonnet" . "claude-sonnet-4-20250514")
+    ("opus" . "claude-opus-4-20250514")
+    ("haiku" . "claude-haiku-3-5-20241022"))
+  "Available Claude models as (alias . full-name) pairs.")
+
+(defun claude-agent--current-model ()
+  "Get the current model from session info."
+  (when claude-agent--session-info
+    (cdr (assq 'model claude-agent--session-info))))
+
+(defun claude-agent--format-model-for-display (model-string)
+  "Format MODEL-STRING for display, extracting key info."
+  (cond
+   ((string-match "sonnet" model-string) "Sonnet")
+   ((string-match "opus" model-string) "Opus")
+   ((string-match "haiku" model-string) "Haiku")
+   (t model-string)))
+
+(defun claude-agent-set-model (model)
+  "Set the model for the current session to MODEL.
+MODEL should be an alias like 'sonnet' or 'opus'.
+Note: This sends /model as a message to Claude."
+  (interactive
+   (list (completing-read "Model: "
+                          (mapcar #'car claude-agent--available-models)
+                          nil t)))
+  (if (and claude-agent--process (process-live-p claude-agent--process))
+      (progn
+        ;; Send as a slash command message
+        (claude-agent--send-json `((type . "message") (text . ,(format "/model %s" model))))
+        (message "Requesting model change to %s..." model))
+    (message "No active Claude session")))
+
+(defun claude-agent-mcp-list ()
+  "List configured MCP servers."
+  (interactive)
+  (let ((output (shell-command-to-string "claude mcp list 2>/dev/null")))
+    (if (string-match-p "No MCP servers" output)
+        (message "No MCP servers configured")
+      (with-current-buffer (get-buffer-create "*Claude MCP Servers*")
+        (read-only-mode -1)
+        (erase-buffer)
+        (insert "MCP Servers\n")
+        (insert "===========\n\n")
+        (insert output)
+        (read-only-mode 1)
+        (goto-char (point-min))
+        (display-buffer (current-buffer))))))
+
+(defun claude-agent-mcp-add ()
+  "Add an MCP server interactively."
+  (interactive)
+  (let* ((name (read-string "Server name: "))
+         (type (completing-read "Type: " '("stdio" "sse") nil t))
+         (command-or-url (read-string (if (equal type "stdio")
+                                          "Command: "
+                                        "URL: "))))
+    (if (equal type "stdio")
+        (let ((args (read-string "Arguments (space-separated, optional): ")))
+          (shell-command (format "claude mcp add %s %s %s"
+                                 (shell-quote-argument name)
+                                 (shell-quote-argument command-or-url)
+                                 args)))
+      (shell-command (format "claude mcp add --transport sse %s %s"
+                             (shell-quote-argument name)
+                             (shell-quote-argument command-or-url))))
+    (message "Added MCP server: %s" name)))
+
+(defun claude-agent-mcp-remove ()
+  "Remove an MCP server."
+  (interactive)
+  (let* ((output (shell-command-to-string "claude mcp list --json 2>/dev/null"))
+         (servers (ignore-errors (json-read-from-string output)))
+         (names (mapcar (lambda (s) (cdr (assq 'name s))) servers)))
+    (if names
+        (let ((name (completing-read "Remove server: " names nil t)))
+          (shell-command (format "claude mcp remove %s" (shell-quote-argument name)))
+          (message "Removed MCP server: %s" name))
+      (message "No MCP servers to remove"))))
+
+(defun claude-agent-compact ()
+  "Compact the conversation history.
+Sends /compact as a message to Claude."
+  (interactive)
+  (if (and claude-agent--process (process-live-p claude-agent--process))
+      (progn
+        (claude-agent--send-json '((type . "message") (text . "/compact")))
+        (message "Compacting conversation..."))
+    (message "No active Claude session")))
+
+(defun claude-agent-clear ()
+  "Clear the conversation history and start fresh.
+Sends /clear as a message to Claude."
+  (interactive)
+  (if (and claude-agent--process (process-live-p claude-agent--process))
+      (when (yes-or-no-p "Clear conversation history? ")
+        (claude-agent--send-json '((type . "message") (text . "/clear")))
+        (message "Clearing conversation..."))
+    (message "No active Claude session")))
+
+(defun claude-agent-show-cost ()
+  "Show token usage and cost for current session."
+  (interactive)
+  (if claude-agent--session-info
+      (let ((cost (cdr (assq 'cost claude-agent--session-info)))
+            (input (cdr (assq 'input_tokens claude-agent--session-info)))
+            (output (cdr (assq 'output_tokens claude-agent--session-info))))
+        (message "Cost: $%.4f | Input: %s tokens | Output: %s tokens"
+                 (or cost 0)
+                 (or input "?")
+                 (or output "?")))
+    (message "No session info available")))
+
+(defun claude-agent--model-description ()
+  "Return a description of the current model for transient."
+  (let ((model (claude-agent--current-model)))
+    (if model
+        (format "Current: %s" (claude-agent--format-model-for-display model))
+      "No model set")))
+
+(defun claude-agent--session-description ()
+  "Return session info description for transient."
+  (if claude-agent--session-info
+      (let ((session-id (cdr (assq 'session_id claude-agent--session-info))))
+        (if session-id
+            (format "Session: %s" (substring session-id 0 (min 8 (length session-id))))
+          "Active"))
+    "No session"))
+
+;;;###autoload (autoload 'claude-agent-transient-menu "claude-agent" nil t)
+(transient-define-prefix claude-agent-transient-menu ()
+  "Claude Agent command menu.
+
+In the log area, single-key bindings are active (like magit).
+In the input area, keys insert text normally.
+Press 'i' or RET in the log area to jump to input."
+  [:description
+   (lambda () (concat "Claude Agent  "
+                      (propertize (claude-agent--session-description) 'face 'transient-value)))
+   ""]
+  [["Model"
+    ("m" "Change model" claude-agent-set-model
+     :description (lambda () (concat "Model  " (propertize (or (claude-agent--format-model-for-display
+                                                                 (or (claude-agent--current-model) ""))
+                                                               "none")
+                                                           'face 'transient-value))))
+    ("$" "Show cost/tokens" claude-agent-show-cost)]
+   ["MCP Servers  (M prefix)"
+    ("M l" "List servers" claude-agent-mcp-list)
+    ("M s" "Show status" claude-agent-show-mcp-status)
+    ("M a" "Add server" claude-agent-mcp-add)
+    ("M r" "Remove server" claude-agent-mcp-remove)]
+   ["Session"
+    ("c" "Compact history" claude-agent-compact)
+    ("C" "Clear history" claude-agent-clear)
+    ("q" "Quit session" claude-agent-quit)
+    ("k" "Interrupt" claude-agent-interrupt)]
+   ["Navigation"
+    ("i" "Go to input" claude-agent-goto-input)
+    ("RET" "Go to input" claude-agent-goto-input)]])
 
 (provide 'claude-agent)
 ;;; claude-agent.el ends here

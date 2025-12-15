@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Claudemacs MCP Server - Expose Emacs operations to Claude via MCP.
 
-Tools are defined in tools.yaml and dynamically loaded at startup.
-Native async tools (like watch functions) are defined in Python.
+Tools are registered in Emacs using claude-mcp-deftool and queried via emacsclient.
+Native async tools (like watch functions) are defined in Python's NATIVE_TOOLS.
 """
 
 import asyncio
@@ -27,8 +27,7 @@ app = Server("claudemacs")
 # This is set during server initialization from CLAUDE_AGENT_BUFFER_NAME env var
 SESSION_BUFFER_NAME: str | None = None
 
-# Load tool definitions from YAML
-TOOLS_FILE = Path(__file__).parent.parent / "tools.yaml"
+# Tool definitions loaded from Emacs registry
 TOOL_DEFS: dict = {}
 
 # Native Python tools (async, don't block Emacs)
@@ -67,22 +66,6 @@ NATIVE_TOOLS: dict = {
             "input": {"type": "string", "description": "Text/command to send", "required": True},
             "done_pattern": {"type": "string", "description": "Optional regex pattern that signals completion (otherwise waits for stability)"},
             "timeout": {"type": "integer", "description": "Maximum seconds to wait (default: 30)"},
-        },
-    },
-    "bash": {
-        "description": "[EXECUTE] Execute a bash command in a project shell (eat terminal). Output is visible in Emacs. Returns output and exit code.",
-        "safe": False,
-        "args": {
-            "command": {"type": "string", "description": "The bash command to execute", "required": True},
-            "directory": {"type": "string", "description": "Working directory for the shell (defaults to session cwd)"},
-            "timeout": {"type": "integer", "description": "Maximum seconds to wait (default: 120)"},
-        },
-    },
-    "interrupt_shell": {
-        "description": "[EXECUTE] Send interrupt signal (Ctrl+C) to a shell buffer to kill the currently running command. Useful for recovering from stuck or unresponsive commands.",
-        "safe": False,
-        "args": {
-            "buffer_name": {"type": "string", "description": "Name of the shell buffer (e.g., '*eat-shell:dirname*')", "required": True},
         },
     },
     "reload_file": {
@@ -137,44 +120,19 @@ NATIVE_TOOLS: dict = {
 
 
 def load_tools() -> dict:
-    """Load tool definitions from YAML file and any additional tools files."""
+    """Load tool definitions from Emacs registry via emacsclient."""
     global TOOL_DEFS
 
-    # Load main tools file
-    with open(TOOLS_FILE) as f:
-        data = yaml.safe_load(f)
-    TOOL_DEFS = data.get("tools", {})
+    # Query Emacs for registered tools
+    result = lib.call_emacs("(claude-mcp-export-tools)")
 
-    # Check for default .claude/claudemacs-tools.yaml in session directory
-    session_cwd = os.environ.get("CLAUDE_AGENT_CWD")
-    if session_cwd:
-        default_tools_file = os.path.join(session_cwd, ".claude", "claudemacs-tools.yaml")
-        if os.path.exists(default_tools_file):
-            try:
-                with open(default_tools_file) as f:
-                    default_data = yaml.safe_load(f)
-                default_tools = default_data.get("tools", {})
-                # Merge default tools (these can be overridden by explicitly specified files)
-                TOOL_DEFS.update(default_tools)
-                print(f"Loaded project tools from {default_tools_file}", file=sys.stderr)
-            except Exception as e:
-                print(f"Warning: Failed to load default tools from {default_tools_file}: {e}", file=sys.stderr)
+    # emacsclient returns JSON wrapped in quotes: "{\\"tool\\":...}"
+    # Strip outer quotes and unescape
+    if result.startswith('"') and result.endswith('"'):
+        result = result[1:-1].replace('\\"', '"').replace('\\n', '\n')
 
-    # Load additional tools files from environment variable
-    additional_files = os.environ.get("CLAUDE_MCP_ADDITIONAL_TOOLS_FILES", "")
-    if additional_files:
-        for tools_file in additional_files.split(":"):
-            tools_file = tools_file.strip()
-            if tools_file and os.path.exists(tools_file):
-                try:
-                    with open(tools_file) as f:
-                        additional_data = yaml.safe_load(f)
-                    additional_tools = additional_data.get("tools", {})
-                    # Merge additional tools into TOOL_DEFS
-                    TOOL_DEFS.update(additional_tools)
-                except Exception as e:
-                    # Log but don't fail - continue with other tools
-                    print(f"Warning: Failed to load additional tools from {tools_file}: {e}", file=sys.stderr)
+    TOOL_DEFS = json.loads(result)
+    print(f"Loaded {len(TOOL_DEFS)} tools from Emacs registry", file=sys.stderr, flush=True)
 
     return TOOL_DEFS
 
@@ -204,12 +162,12 @@ def build_input_schema(tool_def: dict) -> dict:
 
 @app.list_tools()
 async def list_tools() -> list[Tool]:
-    """List available Emacs interaction tools from YAML and native definitions."""
+    """List available Emacs interaction tools from registry and native definitions."""
     # Reload tools on each list_tools call to pick up changes
     load_tools()
 
     tools = []
-    # Add YAML-defined tools
+    # Add Emacs-registered tools
     for name, tool_def in TOOL_DEFS.items():
         tools.append(Tool(
             name=name,
@@ -488,28 +446,6 @@ async def handle_native_tool(name: str, arguments: dict) -> str:
         result = await lib.send_and_watch_async(buffer_name, input_text, done_pattern, timeout)
         return result
 
-    elif name == "bash":
-        command = arguments["command"]
-        # Use provided directory or fall back to session cwd
-        directory = arguments.get("directory") or lib.get_session_cwd()
-        if not directory:
-            raise ValueError("No directory specified and CLAUDE_AGENT_CWD not set")
-        timeout = float(arguments.get("timeout", 120))
-        bash_result = await lib.bash_async(command, directory, timeout)
-        # Format output similar to Claude Code's Bash tool
-        output = bash_result['output']
-        exit_code = bash_result['exit_code']
-        buffer_name = bash_result['buffer_name']
-        if exit_code == 0:
-            return f"{output}\n\n[exit code: {exit_code}, shell: {buffer_name}]"
-        else:
-            return f"{output}\n\n[exit code: {exit_code}, shell: {buffer_name}] (command failed)"
-
-    elif name == "interrupt_shell":
-        buffer_name = arguments["buffer_name"]
-        result = await lib.interrupt_shell_async(buffer_name)
-        return result
-
     elif name == "reload_file":
         # Support both single file_path and multiple file_paths
         if "file_paths" in arguments:
@@ -567,15 +503,16 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = await handle_native_tool(name, arguments)
             return [TextContent(type="text", text=result)]
 
-        # Otherwise, it's a YAML-defined elisp tool
+        # Otherwise, it's an Emacs-registered elisp tool
         if name not in TOOL_DEFS:
             raise ValueError(f"Unknown tool: {name}")
 
         tool_def = TOOL_DEFS[name]
-        elisp_fn = tool_def.get("elisp")
+        # Support both 'function' (new Emacs registry) and 'elisp' (legacy YAML)
+        elisp_fn = tool_def.get("function") or tool_def.get("elisp")
 
         if not elisp_fn:
-            raise ValueError(f"Tool {name} has no elisp function defined")
+            raise ValueError(f"Tool {name} has no function defined")
 
         # Extract explicit context parameters first (these are special and not passed to elisp)
         context_buffer = arguments.pop("__buffer", None)
@@ -745,7 +682,7 @@ async def main():
 
 
 def get_safe_tools() -> list[str]:
-    """Return list of tool names marked as safe in the YAML and native tools."""
+    """Return list of tool names marked as safe in the registry and native tools."""
     load_tools()
     safe = [name for name, defn in TOOL_DEFS.items() if defn.get("safe", False)]
     safe.extend([name for name, defn in NATIVE_TOOLS.items() if defn.get("safe", False)])

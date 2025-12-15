@@ -14,7 +14,10 @@
       "Bash(git mv:*)",
       "mcp__claudemacs__reload_file",
       "Bash(uv run:*)",
-      "Read(//home/chadac/.emacs.d/**)"
+      "Read(//home/chadac/.emacs.d/**)",
+      "Bash(mkdir:*)",
+      "Read(//home/chadac/.config/**)",
+      "Read(//home/chadac/.claude/**)"
     ],
     "deny": [],
     "ask": []

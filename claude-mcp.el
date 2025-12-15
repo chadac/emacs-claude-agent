@@ -26,6 +26,78 @@
 (require 'claude-mcp-magit)
 (require 'claude-mcp-notes)
 
+;;;; Tool Registry
+;;
+;; MCP tools are registered in Emacs and exported to the Python server.
+;; This replaces the YAML-based tool definitions.
+
+(defvar claude-mcp-tools (make-hash-table :test 'equal)
+  "Registry of MCP tools. Key is tool name string, value is plist.")
+
+(defmacro claude-mcp-deftool (name docstring &rest args)
+  "Define an MCP tool NAME with DOCSTRING.
+NAME uses Lisp conventions (dashes), automatically converted to underscores for MCP.
+ARGS is a plist with :function, :safe, and :args keys.
+
+Example:
+  (claude-mcp-deftool get-buffer-content
+    \"Get the content of an Emacs buffer.\"
+    :function #\\='claude-mcp-get-buffer-content
+    :safe t
+    :args ((buffer-name string :required \"Name of the buffer\")
+           (tail-lines integer \"Optional: last N lines\")))"
+  (declare (indent 2) (doc-string 2))
+  (let ((mcp-name (replace-regexp-in-string "-" "_" (symbol-name name)))
+        (quoted-args (cl-loop for (key val) on args by #'cddr
+                              append (list key (if (eq key :args) `',val val)))))
+    `(puthash ,mcp-name
+              (list :description ,docstring
+                    ,@quoted-args)
+              claude-mcp-tools)))
+
+(defun claude-mcp--convert-args (args)
+  "Convert ARGS list to hash table for JSON export.
+Each arg is (name type [:required] description).
+Converts dashes to underscores in arg names."
+  (let ((result (make-hash-table :test 'equal)))
+    (dolist (arg args)
+      (let* ((name (replace-regexp-in-string "-" "_" (symbol-name (nth 0 arg))))
+             (type (symbol-name (nth 1 arg)))
+             (rest (nthcdr 2 arg))
+             (required (eq (car rest) :required))
+             (desc (if required (cadr rest) (car rest))))
+        (puthash name
+                 `((type . ,type)
+                   (required . ,(if required t :json-false))
+                   (description . ,(or desc "")))
+                 result)))
+    result))
+
+(defun claude-mcp-export-tools ()
+  "Export registered tools as JSON for MCP server.
+Called by Python server via emacsclient to get tool definitions."
+  (let ((tools (make-hash-table :test 'equal)))
+    (maphash
+     (lambda (name def)
+       (puthash name
+                `((description . ,(or (plist-get def :description) ""))
+                  (function . ,(symbol-name (plist-get def :function)))
+                  (safe . ,(if (plist-get def :safe) t :json-false))
+                  (args . ,(claude-mcp--convert-args (plist-get def :args))))
+                tools))
+     claude-mcp-tools)
+    (json-encode tools)))
+
+(defun claude-mcp-remove-tool (name)
+  "Remove tool NAME from the registry."
+  (remhash (if (symbolp name) (symbol-name name) name) claude-mcp-tools))
+
+(defun claude-mcp-list-tools ()
+  "List all registered tool names."
+  (let (names)
+    (maphash (lambda (k _v) (push k names)) claude-mcp-tools)
+    (sort names #'string<)))
+
 ;; Dynamic variable for session context (set by MCP server via let binding)
 (defvar claude-session-cwd nil
   "The working directory for the current Claude session.
@@ -805,6 +877,57 @@ Designed to be called via MCP by Claude AI."
         (format "Truncated buffer %s: %d → %d chars (removed %d)"
                 buffer-name original-size new-size (- original-size new-size))
       (format "Buffer %s is only %d chars, no truncation needed" buffer-name original-size))))
+
+;;;; Tool Registrations
+;;
+;; Register core buffer tools with the MCP server
+
+(claude-mcp-deftool get-buffer-content
+  "Get the content of an Emacs buffer. Can optionally get head/tail lines or a specific line range."
+  :function #'claude-mcp-get-buffer-content
+  :safe t
+  :args ((buffer-name string :required "Name of the buffer (e.g. 'main.py', '*scratch*')")
+         (tail-lines integer "Optional: get only the last N lines")
+         (head-lines integer "Optional: get only the first N lines")
+         (start-line integer "Optional: start line for range (1-indexed, requires end-line)")
+         (end-line integer "Optional: end line for range (1-indexed, inclusive, requires start-line)")))
+
+(claude-mcp-deftool list-buffers
+  "List all open buffers in Emacs."
+  :function #'claude-mcp-list-buffers
+  :safe t
+  :args ())
+
+(claude-mcp-deftool buffer-info
+  "Get detailed information about a buffer (file path, size, major mode, cursor position, etc.)."
+  :function #'claude-mcp-buffer-info
+  :safe t
+  :args ((buffer-name string :required "Name of the buffer")))
+
+(claude-mcp-deftool search-buffer
+  "Search for a pattern in a buffer and return matches with context lines (similar to grep). Supports regex patterns and context control."
+  :function #'claude-mcp-search-buffer
+  :safe t
+  :args ((buffer-name string :required "Name of the buffer to search")
+         (pattern string :required "Regular expression pattern to search for")
+         (context-before integer "Number of lines to show before each match (like grep -B)")
+         (context-after integer "Number of lines to show after each match (like grep -A)")
+         (case-insensitive boolean "If true, ignore case when searching (like grep -i)")
+         (limit integer "Maximum number of matches to return")))
+
+(claude-mcp-deftool get-region
+  "Get content from a specific region in a buffer by character positions."
+  :function #'claude-mcp-get-region
+  :safe t
+  :args ((buffer-name string :required "Name of the buffer")
+         (start integer :required "Start position (1-indexed)")
+         (end integer :required "End position (1-indexed)")))
+
+(claude-mcp-deftool clear-buffer
+  "Clear the terminal content in a claudemacs buffer. Useful when the buffer gets too large and causing performance issues."
+  :function #'claude-mcp-clear-buffer
+  :safe nil
+  :args ((buffer-name string :required "Name of the claudemacs buffer to clear")))
 
 (provide 'claude-mcp)
 ;;; claude-mcp.el ends here
