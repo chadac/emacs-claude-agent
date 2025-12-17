@@ -32,10 +32,10 @@ Set at load time to avoid issues with locate-library finding wrong version.")
 (require 'project)
 (require 'vc-git)
 (require 'eat nil 'noerror)
-(require 'claude-comment)
+;; (require 'claude-comment)
 (require 'claude-mcp)
 (require 'claude-sessions)
-(require 'claude-mcp-notes-todo)
+(require 'todo)
 (require 'claude-agent)
 
 ;; Declare functions from optional packages

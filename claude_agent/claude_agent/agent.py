@@ -20,12 +20,71 @@ from claude_agent_sdk import (
     ToolPermissionContext,
     PermissionResultAllow,
     PermissionResultDeny,
+    HookMatcher,
+    PostToolUseHookInput,
+    HookContext,
+    HookJSONOutput,
 )
 
 
 def _format_traceback() -> str:
     """Format the current exception traceback as a string."""
     return traceback.format_exc()
+
+
+def validate_tool_result(tool_response: dict, tool_name: str = "unknown") -> dict:
+    """Centralized validation and fixing of tool results.
+
+    Ensures that tool results with is_error=True always have non-empty content,
+    which is required by the Anthropic API.
+
+    Args:
+        tool_response: The tool response dict with 'content' and 'is_error' fields
+        tool_name: Name of the tool for error message context
+
+    Returns:
+        The validated/fixed tool response
+    """
+    is_error = tool_response.get("is_error", False)
+    content = tool_response.get("content")
+
+    # If not an error, no validation needed
+    if not is_error:
+        return tool_response
+
+    # Check if content is empty/missing
+    needs_placeholder = False
+    if content is None:
+        needs_placeholder = True
+    elif isinstance(content, str) and not content.strip():
+        needs_placeholder = True
+    elif isinstance(content, list) and len(content) == 0:
+        needs_placeholder = True
+    elif isinstance(content, list):
+        # Check if list has only empty text blocks
+        has_content = False
+        for item in content:
+            if isinstance(item, dict):
+                text = item.get("text", "")
+                if isinstance(text, str) and text.strip():
+                    has_content = True
+                    break
+            elif isinstance(item, str) and item.strip():
+                has_content = True
+                break
+        if not has_content:
+            needs_placeholder = True
+
+    # Insert placeholder if needed
+    if needs_placeholder:
+        tool_response["content"] = [
+            {
+                "type": "text",
+                "text": f"Tool '{tool_name}' failed without providing error details"
+            }
+        ]
+
+    return tool_response
 
 
 def _make_stdout_blocking() -> None:
@@ -247,10 +306,53 @@ class ClaudeAgent:
         # Handle wildcards
         if pattern_content.endswith("*"):
             prefix = pattern_content[:-1]
+            # For Bash commands, strip the colon separator from the prefix
+            # and ensure word boundary (command ends or has space/tab after)
+            # So "Bash(ls:*)" matches "ls" or "ls -la" but NOT "lsof"
+            if tool_name == "Bash" and prefix.endswith(":"):
+                prefix = prefix[:-1]  # Remove colon
+                # Check for word boundary: exact match or followed by whitespace
+                if input_value == prefix:
+                    return True
+                elif input_value.startswith(prefix) and len(input_value) > len(prefix):
+                    next_char = input_value[len(prefix)]
+                    return next_char in (' ', '\t', '\n')
+                return False
             return input_value.startswith(prefix)
 
         # Handle exact match
         return pattern_content == input_value
+
+    async def _fix_empty_error_content(
+        self,
+        hook_input: PostToolUseHookInput,
+        tool_use_id: Optional[str],
+        context: HookContext,
+    ) -> HookJSONOutput:
+        """Hook to ensure tool results with errors always have content.
+
+        The Anthropic API requires that when is_error=True, content cannot be empty.
+        This hook fixes any tool responses that violate this requirement.
+        """
+        self._log_json("HOOK_INPUT", {"hook_input": str(hook_input)[:500], "tool_use_id": tool_use_id})
+        tool_response = hook_input.get("tool_response", {})
+        tool_name = hook_input.get("tool_name", "unknown")
+
+        # Get original content for comparison
+        original_content = tool_response.get("content")
+
+        # Use centralized validation
+        tool_response = validate_tool_result(tool_response, tool_name)
+
+        # Log if we made a fix
+        if original_content != tool_response.get("content"):
+            self._log_json("HOOK_FIX", {
+                "action": "fixed_empty_error_content",
+                "tool": tool_name,
+                "original_content": str(original_content)[:200],
+            })
+
+        return {"tool_response": tool_response}
 
     async def _can_use_tool(
         self,
@@ -286,7 +388,7 @@ class ClaudeAgent:
             await asyncio.wait_for(self._permission_event.wait(), timeout=300.0)
         except asyncio.TimeoutError:
             self._emit_session_message("Permission request timed out")
-            return PermissionResultDeny()
+            return PermissionResultDeny(message="Permission request timed out after 5 minutes")
 
         response = self._permission_response
         self._permission_response = None
@@ -294,13 +396,13 @@ class ClaudeAgent:
         self._pending_permission_request = None
 
         if not response:
-            return PermissionResultDeny()
+            return PermissionResultDeny(message="Permission request failed: no response received")
 
         action = response.get("action")
         pattern = response.get("pattern")
 
         if action == "deny":
-            return PermissionResultDeny()
+            return PermissionResultDeny(message=f"Permission denied by user for tool '{tool_name}'")
 
         # Add to appropriate permission set
         if pattern:
@@ -360,6 +462,14 @@ class ClaudeAgent:
 
     async def connect(self) -> None:
         """Initialize and connect the SDK client."""
+        # Create hook to fix empty error content
+        # This prevents API errors when tools fail without providing error messages
+        hooks = {
+            "PostToolUse": [
+                HookMatcher(hooks=[self._fix_empty_error_content])
+            ]
+        }
+
         options = ClaudeAgentOptions(
             cwd=self.work_dir,
             can_use_tool=self._can_use_tool,
@@ -367,6 +477,7 @@ class ClaudeAgent:
             allowed_tools=self.allowed_tools if self.allowed_tools else [],
             resume=self._resume_session,
             continue_conversation=self._continue_session or (not self._resume_session),
+            hooks=hooks,
         )
 
         self._client = ClaudeSDKClient(options=options)
@@ -515,9 +626,27 @@ class ClaudeAgent:
                                             parts.append(self._filter_system_reminders(item))
                                     result_text = "\n".join(parts)
 
-                            # Ensure non-empty content when is_error is true
-                            if is_error and not result_text:
-                                result_text = "Tool execution failed (no error details provided)"
+                            # Safety net: Use centralized validation to ensure non-empty error content
+                            # This should already be handled by the hook, but we validate here as well
+                            # to catch any SDK bugs that bypass the hook
+                            validated = validate_tool_result(
+                                {"content": content, "is_error": is_error},
+                                current_tool or "unknown"
+                            )
+
+                            # If validation added content, extract it
+                            if not result_text and validated.get("content"):
+                                validated_content = validated["content"]
+                                if isinstance(validated_content, list):
+                                    parts = []
+                                    for item in validated_content:
+                                        if isinstance(item, dict) and "text" in item:
+                                            parts.append(item["text"])
+                                        elif isinstance(item, str):
+                                            parts.append(item)
+                                    result_text = "\n".join(parts)
+                                elif isinstance(validated_content, str):
+                                    result_text = validated_content
 
                             self._emit({
                                 "type": "tool_result",
@@ -557,7 +686,26 @@ class ClaudeAgent:
                     break
 
         except Exception as e:
-            self._emit_error(str(e), _format_traceback())
+            error_msg = str(e)
+            # Check for the specific SDK bug with empty error content
+            if "content cannot be empty if `is_error` is true" in error_msg:
+                self._emit_error(
+                    "Session corrupted due to SDK bug (empty error content after permission timeout). "
+                    "This is a known issue. Please restart the session.",
+                    _format_traceback()
+                )
+                # Force disconnect to prevent further corruption
+                if self._client:
+                    try:
+                        await self._client.disconnect()
+                    except Exception:
+                        pass
+                self._client = None
+                self._emit_session_message(
+                    "Session terminated. Please use claude-run to start a new session."
+                )
+            else:
+                self._emit_error(error_msg, _format_traceback())
 
         self.state.status = "ready"
         self._emit_ready()
