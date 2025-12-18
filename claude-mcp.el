@@ -929,5 +929,17 @@ Designed to be called via MCP by Claude AI."
   :safe nil
   :args ((buffer-name string :required "Name of the claudemacs buffer to clear")))
 
+(defun claude-mcp-eval (expression)
+  "Evaluate EXPRESSION as Emacs Lisp and return the result.
+EXPRESSION should be a string containing valid Emacs Lisp code."
+  (let ((result (eval (read expression))))
+    (prin1-to-string result)))
+
+(claude-mcp-deftool eval
+  "[EXECUTE] Evaluate an Emacs Lisp expression directly. Use this for arbitrary elisp evaluation like changing themes, settings, or running commands."
+  :function #'claude-mcp-eval
+  :safe nil
+  :args ((expression string :required "The Emacs Lisp expression to evaluate")))
+
 (provide 'claude-mcp)
 ;;; claude-mcp.el ends here

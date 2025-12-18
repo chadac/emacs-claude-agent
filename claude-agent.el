@@ -284,6 +284,11 @@ These single-key bindings only apply outside the input area.")
   ;; Disable font-lock to avoid org-mode fontification errors
   ;; TODO: Re-enable with proper org-mode setup once performance is fixed
   (font-lock-mode -1)
+  ;; Disable flycheck and company to prevent expensive syntax parsing
+  (when (bound-and-true-p flycheck-mode)
+    (flycheck-mode -1))
+  (when (bound-and-true-p company-mode)
+    (company-mode -1))
   ;; Ensure our keybindings are set (defvar doesn't reinit on re-eval)
   (use-local-map claude-agent-mode-map)
   ;; Re-define keys to ensure they're set
@@ -471,14 +476,23 @@ and switches keymaps based on cursor position."
             (overlay-put ov 'claude-agent-styled t)))))))
 
 (defun claude-agent--update-read-only ()
-  "Update read-only text property to cover everything before prompt marker."
+  "Update read-only text property to cover everything before prompt marker.
+Optimized to only modify the dynamic section, not the entire buffer."
   ;; Use text properties for read-only (overlays don't enforce read-only)
   (when (and claude-agent--input-start-marker
              (> (marker-position claude-agent--input-start-marker) (point-min)))
-    ;; Remove read-only from entire buffer first (property list needs property names only)
-    (remove-list-of-text-properties (point-min) (point-max) '(read-only rear-nonsticky))
+    ;; Only remove read-only from the dynamic section (after static-end).
+    ;; The static section already has read-only applied and doesn't change.
+    ;; This is O(dynamic-section-size) instead of O(buffer-size).
+    (when (and claude-agent--static-end-marker
+               (marker-position claude-agent--static-end-marker))
+      (remove-list-of-text-properties
+       claude-agent--static-end-marker (point-max)
+       '(read-only rear-nonsticky)))
     ;; Apply read-only to everything before prompt, with rear-nonsticky
-    ;; so text inserted at the boundary is NOT read-only
+    ;; so text inserted at the boundary is NOT read-only.
+    ;; Note: This still applies to the full static section, but add-text-properties
+    ;; is fast when properties already exist (it's a no-op for unchanged regions).
     (add-text-properties (point-min) claude-agent--input-start-marker
                          '(read-only t rear-nonsticky (read-only)))))
 
@@ -566,10 +580,30 @@ Handles different input modes: text input vs permission prompt."
        (goto-char claude-agent--input-start-marker))
 
       ('permission
-       ;; Permission prompt mode - render the permission dialog
+       ;; Permission prompt mode - render the permission dialog (legacy, replaces input)
        (setq claude-agent--input-start-marker (point-marker))
        (claude-agent--render-permission-content)
-       (claude-agent--update-read-only)))))
+       (claude-agent--update-read-only))
+
+      ('text-with-permission
+       ;; Combined mode: permission dialog ABOVE preserved text input
+       ;; First render the permission dialog
+       (claude-agent--render-permission-content)
+       ;; Add separator before input area
+       (insert "\n")
+       ;; Now render the text input area
+       (setq claude-agent--input-start-marker (point-marker))
+       (set-marker-insertion-type claude-agent--input-start-marker nil)
+       (unless (string-empty-p input-to-restore)
+         (insert input-to-restore))
+       ;; Update read-only and placeholder
+       (claude-agent--update-read-only)
+       (claude-agent--update-placeholder)
+       ;; Restore cursor position within input area
+       (if (and cursor-offset (>= cursor-offset 0))
+           (goto-char (min (+ claude-agent--input-start-marker cursor-offset)
+                           (point-max)))
+         (goto-char claude-agent--input-start-marker))))))
 
 ;;;; Status bar rendering
 
@@ -636,12 +670,48 @@ Called by `render-dynamic-section'. Assumes point is positioned correctly."
     (claude-agent--apply-face start (point) 'claude-agent-header-face)))
 
 (defun claude-agent--spinner-tick ()
-  "Advance spinner and rebuild dynamic section."
+  "Advance spinner and update in-place (lightweight)."
   (when claude-agent--thinking-status
     (setq claude-agent--spinner-index
           (mod (1+ claude-agent--spinner-index)
                (length claude-agent--spinner-frames)))
-    (claude-agent--render-dynamic-section)))
+    ;; Only update the spinner/elapsed time, don't rebuild everything
+    (claude-agent--update-spinner-display)))
+
+(defun claude-agent--update-spinner-display ()
+  "Update spinner and elapsed time in-place without full rebuild."
+  (when (and claude-agent--thinking-status
+             claude-agent--static-end-marker
+             (marker-position claude-agent--static-end-marker))
+    (let ((inhibit-read-only t)
+          (spinner (nth claude-agent--spinner-index
+                        claude-agent--spinner-frames))
+          (elapsed (if claude-agent--thinking-start-time
+                       (claude-agent--format-elapsed-time
+                        claude-agent--thinking-start-time)
+                     "0s"))
+          (tokens (format "(+%d/-%d)"
+                          claude-agent--input-tokens
+                          claude-agent--output-tokens)))
+      (save-excursion
+        ;; Find the thinking indicator line (starts after static-end-marker)
+        (goto-char claude-agent--static-end-marker)
+        ;; Skip the first newline
+        (when (looking-at "\n")
+          (forward-char 1))
+        ;; Now we should be at the start of the spinner line
+        (when (looking-at ".*?\\(C-c C-k to interrupt\\)")
+          (let ((line-start (point))
+                (line-end (line-end-position)))
+            ;; Replace the line
+            (delete-region line-start line-end)
+            (insert (format "%s %s %s %s (C-c C-k to interrupt)"
+                            spinner
+                            claude-agent--thinking-status
+                            elapsed
+                            tokens))
+            ;; Reapply the face
+            (claude-agent--apply-face line-start (point) 'claude-agent-thinking-face)))))))
 
 (defun claude-agent--set-thinking (status)
   "Set thinking STATUS, or clear if nil."
@@ -1385,15 +1455,15 @@ This is called when the user navigates options."
   (claude-agent--render-dynamic-section))
 
 (defun claude-agent--show-permission-prompt (data)
-  "Show permission prompt for DATA in the input area.
-Saves current input text and switches to permission mode."
+  "Show permission prompt for DATA above the input area.
+Saves current input text and shows dialog while preserving input."
   ;; Save current input text before switching modes
   (setq claude-agent--saved-input (claude-agent--get-input-text))
   ;; Set permission state
   (setq claude-agent--permission-data data)
   (setq claude-agent--permission-selection 0)
-  ;; Switch to permission mode
-  (setq claude-agent--input-mode 'permission)
+  ;; Switch to combined mode: permission dialog + text input preserved
+  (setq claude-agent--input-mode 'text-with-permission)
   ;; Render the dialog (which now uses render-dynamic-section)
   (claude-agent--render-permission-dialog)
   ;; Set up keyboard navigation
@@ -1554,14 +1624,11 @@ Restores text input mode and any saved input."
 ;;;; Process management
 
 (defun claude-agent--get-agent-dir ()
-  "Get the directory containing the Python agent."
-  (let ((this-file (or load-file-name
-                       buffer-file-name
-                       (locate-library "claude-agent")
-                       (symbol-file 'claude-agent-run 'defun))))
-    (when this-file
-      (expand-file-name "claude_agent"
-                        (file-name-directory this-file)))))
+  "Get the directory containing the Python agent.
+Returns the path to the claude_agent directory, or nil if not found."
+  (when-let ((lib-file (locate-library "claude-agent")))
+    (expand-file-name "claude_agent"
+                      (file-name-directory lib-file))))
 
 (defun claude-agent--generate-mcp-config (work-dir buffer-name)
   "Generate MCP config file for emacs_mcp server.
@@ -1588,10 +1655,36 @@ Returns the path to the generated config file."
 (defvar-local claude-agent--mcp-config-file nil
   "Path to the MCP config file for this session.")
 
+(defun claude-agent--validate-prerequisites ()
+  "Validate that all required commands and directories exist.
+Returns nil if valid, or an error message string if validation fails."
+  (let ((agent-dir (claude-agent--get-agent-dir)))
+    (cond
+     ;; Check if command exists in PATH
+     ((not (executable-find claude-agent-python-command))
+      (format "Command '%s' not found in PATH. Please install it or set `claude-agent-python-command' to the correct command.\n\nFor uv installation, see: https://docs.astral.sh/uv/getting-started/installation/"
+              claude-agent-python-command))
+     ;; Check if agent directory exists
+     ((not agent-dir)
+      "Could not locate claude-agent library using (locate-library \"claude-agent\").\n\nPlease ensure claude-agent is properly installed and in your `load-path'.")
+     ((not (file-directory-p agent-dir))
+      (format "Agent directory not found: %s\n\nThe claude_agent Python package should be in the same directory as claude-agent.el."
+              agent-dir))
+     ;; Check if Python module exists
+     ((not (file-exists-p (expand-file-name "claude_agent/__init__.py" agent-dir)))
+      (format "Python module 'claude_agent' not found in: %s\n\nPlease ensure the claude_agent package is properly installed."
+              agent-dir))
+     ;; All checks passed
+     (t nil))))
+
 (defun claude-agent--start-process (work-dir buffer &optional resume-session continue-session)
   "Start the Python agent process for WORK-DIR with BUFFER.
 Optional RESUME-SESSION is a session ID to resume.
 Optional CONTINUE-SESSION, if non-nil, continues the most recent session."
+  ;; Validate prerequisites first
+  (when-let ((error-msg (claude-agent--validate-prerequisites)))
+    (error "Cannot start Claude agent:\n%s" error-msg))
+
   ;; Ensure Emacs server is running if MCP is enabled
   (when (and claude-agent-enable-mcp
              (not (bound-and-true-p server-process)))
@@ -1619,17 +1712,25 @@ Optional CONTINUE-SESSION, if non-nil, continues the most recent session."
       (setq args (append args (list "--continue"))))
     ;; Use pipe (nil) instead of PTY to avoid focus-related buffering issues
     (let ((process-connection-type nil)
-          (process-environment (cons "PYTHONUNBUFFERED=1" process-environment))
-          (proc (apply #'start-process
-                       "claude-agent"
-                       buffer
-                       claude-agent-python-command
-                       args)))
-      (set-process-coding-system proc 'utf-8 'utf-8)
-      (set-process-filter proc #'claude-agent--process-filter)
-      (set-process-sentinel proc #'claude-agent--process-sentinel)
-      (set-process-query-on-exit-flag proc nil)
-      proc)))
+          (process-environment (cons "PYTHONUNBUFFERED=1" process-environment)))
+      (condition-case err
+          (let ((proc (apply #'start-process
+                             "claude-agent"
+                             buffer
+                             claude-agent-python-command
+                             args)))
+            (set-process-coding-system proc 'utf-8 'utf-8)
+            (set-process-filter proc #'claude-agent--process-filter)
+            (set-process-sentinel proc #'claude-agent--process-sentinel)
+            (set-process-query-on-exit-flag proc nil)
+            proc)
+        (error
+         (error "Failed to start Claude agent process:\n\nCommand: %s %s\n\nError: %s\n\nPlease check that:\n- %s is installed and in your PATH\n- The agent directory exists: %s\n- Python is available"
+                claude-agent-python-command
+                (mapconcat #'identity args " ")
+                (error-message-string err)
+                claude-agent-python-command
+                agent-dir))))))
 
 (defun claude-agent--process-sentinel (proc event)
   "Handle process PROC state change EVENT."

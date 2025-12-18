@@ -1026,6 +1026,74 @@ TODO-ID can be a file path or title (defaults to current TODO)."
           (save-buffer))))
     (format "%s: %s" (if checked "Checked" "Unchecked") item-text)))
 
+(defun org-roam-todo-mcp-create (project-root title &optional description acceptance-criteria)
+  "Create a new TODO programmatically.
+PROJECT-ROOT is the path to the project.
+TITLE is the TODO title.
+DESCRIPTION is optional task description text.
+ACCEPTANCE-CRITERIA is an optional list of criteria strings.
+Returns JSON with the created TODO's file path and ID."
+  (unless project-root
+    (error "project_root is required"))
+  (unless title
+    (error "title is required"))
+  (let* ((project-name (org-roam-todo--project-name project-root))
+         (project-dir (expand-file-name (concat "projects/" project-name) org-roam-directory))
+         (slug (org-roam-todo--slugify title))
+         (id-timestamp (format-time-string "%Y%m%dT%H%M%S"))
+         (date-stamp (format-time-string "%Y-%m-%d"))
+         (file-path (expand-file-name (format "todo-%s.org" slug) project-dir))
+         ;; Format acceptance criteria as org checkboxes
+         (criteria-text (if acceptance-criteria
+                            (mapconcat (lambda (c) (format "- [ ] %s" c))
+                                       acceptance-criteria "\n")
+                          "- [ ] ")))
+    ;; Ensure project directory exists
+    (unless (file-directory-p project-dir)
+      (make-directory project-dir t))
+    ;; Check if file already exists
+    (when (file-exists-p file-path)
+      (error "TODO already exists: %s" file-path))
+    ;; Create the TODO file
+    (with-temp-file file-path
+      (insert (format ":PROPERTIES:
+:ID: %s
+:PROJECT_NAME: %s
+:PROJECT_ROOT: %s
+:STATUS: draft
+:CREATED: %s
+:END:
+#+title: %s
+#+filetags: :todo:%s:
+
+** Task Description
+%s
+
+** Acceptance Criteria
+%s
+
+** Progress Log
+
+"
+                      id-timestamp
+                      project-name
+                      (expand-file-name project-root)
+                      date-stamp
+                      title
+                      project-name
+                      (or description "")
+                      criteria-text)))
+    ;; Update org-roam database
+    (when (fboundp 'org-roam-db-update-file)
+      (org-roam-db-update-file file-path))
+    ;; Return JSON with file info
+    (json-encode
+     `((file . ,file-path)
+       (id . ,id-timestamp)
+       (title . ,title)
+       (project . ,project-name)
+       (status . "draft")))))
+
 (defun org-roam-todo-mcp-update-acceptance (criteria &optional todo-id)
   "Update or add acceptance criteria items.
 CRITERIA is a list of (text . checked) pairs.
@@ -1118,7 +1186,16 @@ TODO-ID can be a file path or title (defaults to current TODO)."
     :function #'org-roam-todo-mcp-update-acceptance
     :safe nil
     :args ((criteria array :required "Array of {text: string, checked: boolean} objects")
-           (todo-id string "TODO identifier (file path or title). Defaults to current TODO."))))
+           (todo-id string "TODO identifier (file path or title). Defaults to current TODO.")))
+
+  (claude-mcp-deftool todo-create
+    "Create a new TODO for a project. Returns the created TODO's file path and metadata."
+    :function #'org-roam-todo-mcp-create
+    :safe nil
+    :args ((project-root string :required "Path to the project root directory")
+           (title string :required "Title of the TODO")
+           (description string "Optional task description")
+           (acceptance-criteria array "Optional array of acceptance criteria strings"))))
 
 ;;;; Global Keybindings
 

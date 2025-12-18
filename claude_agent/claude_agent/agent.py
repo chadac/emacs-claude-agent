@@ -354,6 +354,14 @@ class ClaudeAgent:
 
         return {"tool_response": tool_response}
 
+    # Workflow tools that should always be allowed without permission prompts
+    # These have no side effects on the filesystem and are required for plan mode
+    ALWAYS_SAFE_TOOLS = {
+        "ExitPlanMode",
+        "EnterPlanMode",
+        "TodoWrite",
+    }
+
     async def _can_use_tool(
         self,
         tool_name: str,
@@ -362,6 +370,11 @@ class ClaudeAgent:
     ) -> PermissionResultAllow | PermissionResultDeny:
         """Callback for permission checks. Asks user if not pre-approved."""
         self._log_json("PERMISSION_CHECK", {"tool": tool_name, "input": tool_input})
+
+        # Always allow workflow/planning tools without prompting
+        if tool_name in self.ALWAYS_SAFE_TOOLS:
+            self._log_json("PERMISSION_AUTO_ALLOW", {"tool": tool_name, "reason": "workflow_tool"})
+            return PermissionResultAllow()
 
         # Check if already permitted
         if self._matches_permission(tool_name, tool_input):
