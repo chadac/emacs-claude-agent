@@ -1403,39 +1403,63 @@ If VIRTUAL-INDENT is non-nil, apply it as line-prefix/wrap-prefix."
 
 (defun claude-agent--render-permission-content ()
   "Insert the permission dialog content at point.
-Called by `render-dynamic-section' when in permission mode."
+Called by `render-dynamic-section' when in permission mode.
+Uses compact inline format when in text-with-permission mode."
   (when claude-agent--permission-data
     (let* ((tool-name (cdr (assq 'tool_name claude-agent--permission-data)))
            (tool-input (cdr (assq 'tool_input claude-agent--permission-data)))
            (input-str (claude-agent--format-tool-input tool-name tool-input))
            (sel claude-agent--permission-selection)
            (inhibit-read-only t)
-           (options '("Allow once" "Allow for this session" "Always allow" "Deny"))
+           (compact (eq claude-agent--input-mode 'text-with-permission))
            (overlay-specs nil))
       ;; Helper to insert and record overlay spec
       (cl-flet ((insert-styled (text face)
                   (let ((start (point)))
                     (insert text)
                     (push (list start (point) face) overlay-specs))))
-        ;; Header
-        (insert-styled "── Permission Request " 'claude-agent-input-header-face)
-        (insert-styled (make-string 40 ?─) 'claude-agent-input-header-face)
-        (insert "\n")
-        ;; Tool info - now function-style
-        (insert-styled " Claude wants to run:\n" 'claude-agent-session-face)
-        (insert-styled (format " %s(%s)\n\n" tool-name input-str) 'claude-agent-tool-face)
-        ;; Options
-        (dotimes (i 4)
-          (let* ((selected (= i sel))
-                 (checkbox (if selected "[X]" "[ ]"))
-                 (label (nth i options))
-                 (face (if selected
-                           'claude-agent-permission-selected-face
-                         'claude-agent-permission-option-face)))
-            (insert-styled (format " %d. %s %s\n" (1+ i) checkbox label) face)))
-        ;; Footer
-        (insert-styled (make-string 62 ?─) 'claude-agent-input-header-face)
-        (insert "\n"))
+        (if compact
+            ;; Compact 3-line format for inline display
+            (let ((short-options '("once" "session" "always" "deny")))
+              ;; Line 1: Tool being requested
+              (insert-styled "⚡ " 'claude-agent-session-face)
+              (insert-styled (format "%s(%s)" tool-name input-str) 'claude-agent-tool-face)
+              (insert "\n")
+              ;; Line 2: Options as inline buttons
+              (insert "  ")
+              (dotimes (i 4)
+                (let* ((selected (= i sel))
+                       (label (nth i short-options))
+                       (face (if selected
+                                 'claude-agent-permission-selected-face
+                               'claude-agent-permission-option-face)))
+                  (insert-styled (format "[%d:%s]" (1+ i) label) face)
+                  (when (< i 3) (insert " "))))
+              (insert "\n")
+              ;; Line 3: Hint
+              (insert-styled "  ↑/↓ navigate, RET confirm, 1-4 quick select" 'claude-agent-session-face)
+              (insert "\n"))
+          ;; Full format for standalone permission mode
+          (let ((options '("Allow once" "Allow for this session" "Always allow" "Deny")))
+            ;; Header
+            (insert-styled "── Permission Request " 'claude-agent-input-header-face)
+            (insert-styled (make-string 40 ?─) 'claude-agent-input-header-face)
+            (insert "\n")
+            ;; Tool info
+            (insert-styled " Claude wants to run:\n" 'claude-agent-session-face)
+            (insert-styled (format " %s(%s)\n\n" tool-name input-str) 'claude-agent-tool-face)
+            ;; Options
+            (dotimes (i 4)
+              (let* ((selected (= i sel))
+                     (checkbox (if selected "[X]" "[ ]"))
+                     (label (nth i options))
+                     (face (if selected
+                               'claude-agent-permission-selected-face
+                             'claude-agent-permission-option-face)))
+                (insert-styled (format " %d. %s %s\n" (1+ i) checkbox label) face)))
+            ;; Footer
+            (insert-styled (make-string 62 ?─) 'claude-agent-input-header-face)
+            (insert "\n"))))
       ;; Save overlay specs and apply
       (setq claude-agent--permission-overlay-specs (nreverse overlay-specs))
       (claude-agent--apply-permission-overlays)
