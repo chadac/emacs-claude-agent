@@ -1437,7 +1437,7 @@ Uses compact inline format when in text-with-permission mode."
                   (when (< i 3) (insert " "))))
               (insert "\n")
               ;; Line 3: Hint
-              (insert-styled "  ↑/↓ navigate, RET confirm, 1-4 quick select" 'claude-agent-session-face)
+              (insert-styled "  C-n/C-p navigate, C-c C-c confirm, C-1..C-4 direct" 'claude-agent-session-face)
               (insert "\n"))
           ;; Full format for standalone permission mode
           (let ((options '("Allow once" "Allow for this session" "Always allow" "Deny")))
@@ -1522,48 +1522,31 @@ Saves current input text and shows dialog while preserving input."
        (2 (claude-agent--send-permission-response "allow_always"))
        (3 (claude-agent--send-permission-response "deny"))))))
 
-;; Minor mode for permission dialog - takes precedence over evil-mode
+;; Minor mode for permission dialog - uses chord keys to not interfere with typing
 (defvar claude-agent-permission-mode-map
   (let ((map (make-sparse-keymap)))
-    ;; Number keys for direct selection
-    (define-key map (kbd "1") #'claude-agent-permit-once)
-    (define-key map (kbd "2") #'claude-agent-permit-session)
-    (define-key map (kbd "3") #'claude-agent-permit-always)
-    (define-key map (kbd "4") #'claude-agent-deny)
-    ;; Arrow keys for navigation
-    (define-key map (kbd "<up>") #'claude-agent--permission-select-prev)
-    (define-key map (kbd "<down>") #'claude-agent--permission-select-next)
+    ;; Navigation with C-n/C-p (Emacs-style)
     (define-key map (kbd "C-p") #'claude-agent--permission-select-prev)
     (define-key map (kbd "C-n") #'claude-agent--permission-select-next)
-    (define-key map (kbd "k") #'claude-agent--permission-select-prev)
-    (define-key map (kbd "j") #'claude-agent--permission-select-next)
-    ;; Confirm selection
-    (define-key map (kbd "RET") #'claude-agent--permission-confirm)
-    (define-key map (kbd "SPC") #'claude-agent--permission-confirm)
-    ;; Quick keys
-    (define-key map (kbd "y") #'claude-agent-permit-once)
-    (define-key map (kbd "n") #'claude-agent-deny)
-    (define-key map (kbd "a") #'claude-agent-permit-always)
-    (define-key map (kbd "q") #'claude-agent-deny)
-    ;; Escape to deny (helpful for evil users)
-    (define-key map (kbd "<escape>") #'claude-agent-deny)
+    ;; Confirm with C-c C-c (standard Emacs "do it" chord)
+    (define-key map (kbd "C-c C-c") #'claude-agent--permission-confirm)
+    ;; Direct selection with C-1 through C-4
+    (define-key map (kbd "C-1") #'claude-agent-permit-once)
+    (define-key map (kbd "C-2") #'claude-agent-permit-session)
+    (define-key map (kbd "C-3") #'claude-agent-permit-always)
+    (define-key map (kbd "C-4") #'claude-agent-deny)
+    ;; C-g to deny (standard Emacs cancel)
+    (define-key map (kbd "C-g") #'claude-agent-deny)
     map)
   "Keymap for permission dialog mode.")
 
 (define-minor-mode claude-agent-permission-mode
   "Minor mode for permission dialog interaction.
-Takes precedence over evil-mode keybindings."
+Uses chord keys so typing is not affected."
   :lighter " Permit"
   :keymap claude-agent-permission-mode-map
-  (if claude-agent-permission-mode
-      (progn
-        ;; Switch to emacs state to use our keymap directly
-        (when (bound-and-true-p evil-local-mode)
-          (evil-emacs-state))
-        (message "Permission: j/k to select, RET to confirm, 1-4 for direct choice"))
-    ;; When disabling, return to normal state
-    (when (bound-and-true-p evil-local-mode)
-      (evil-normal-state))))
+  (when claude-agent-permission-mode
+    (message "Permission: C-n/C-p navigate, C-c C-c confirm, C-1..C-4 direct, C-g deny")))
 
 (defun claude-agent--setup-permission-keymap ()
   "Set up keymap for permission prompt interaction."
