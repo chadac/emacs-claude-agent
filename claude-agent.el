@@ -281,9 +281,11 @@ These single-key bindings only apply outside the input area.")
   (setq-local word-wrap t)
   (setq-local buffer-read-only nil)
   (visual-line-mode 1)
-  ;; Disable font-lock to avoid org-mode fontification errors
-  ;; TODO: Re-enable with proper org-mode setup once performance is fixed
-  (font-lock-mode -1)
+  ;; Set up org-mode fontification without org-mode keybindings
+  ;; This gives us org syntax highlighting (bold, italic, code, src blocks)
+  (require 'org)
+  (org-set-font-lock-defaults)
+  (font-lock-mode 1)
   ;; Disable flycheck and company to prevent expensive syntax parsing
   (when (bound-and-true-p flycheck-mode)
     (flycheck-mode -1))
@@ -779,7 +781,7 @@ Inserts directly at point with proper faces and clickable link."
   "Format a tool call for display with TOOL-NAME and ARGS-STRING.
 Returns formatted string like: ⚙ ToolName(args)
 with 1-space indent applied via virtual indentation."
-  (format "\n ⚙ %s(%s)\n" tool-name args-string))
+  (format " ⚙ %s(%s)\n" tool-name args-string))
 
 (defun claude-agent--insert-tool-call (tool-name args-string)
   "Insert a tool call display for TOOL-NAME with ARGS-STRING.
@@ -798,11 +800,9 @@ Uses consistent formatting with 1-space virtual indent and tool face."
   (claude-agent--append-to-log " #+end_example\n" nil))
 
 (defun claude-agent--insert-bash-tool (command)
-  "Insert a Bash tool call with COMMAND formatted as org src block."
-  (claude-agent--append-to-log
-   (format "\n #+begin_src bash\n %s\n #+end_src\n" command)
-   nil
-   " "))
+  "Insert a Bash tool call with COMMAND."
+  ;; Just use the standard tool call format, no special src block
+  (claude-agent--insert-tool-call "Bash" command))
 
 (defvar-local claude-agent--current-read-file nil
   "File path for current Read tool being displayed.")
@@ -814,48 +814,10 @@ Uses consistent formatting with 1-space virtual indent and tool face."
   "Content for current Write tool being displayed.")
 
 (defun claude-agent--insert-read-tool (file-path)
-  "Insert a Read tool header with FILE-PATH as clickable link."
+  "Insert a Read tool call with FILE-PATH."
   (setq claude-agent--current-read-file file-path)
-  (let* ((inhibit-read-only t)
-         (saved-input (if (eq claude-agent--input-mode 'text)
-                          (claude-agent--get-input-text)
-                        claude-agent--saved-input))
-         (cursor-offset (when (and (eq claude-agent--input-mode 'text)
-                                   claude-agent--input-start-marker
-                                   (marker-position claude-agent--input-start-marker)
-                                   (>= (point) claude-agent--input-start-marker))
-                          (- (point) claude-agent--input-start-marker))))
-    ;; Delete dynamic section
-    (delete-region claude-agent--static-end-marker (point-max))
-    (goto-char claude-agent--static-end-marker)
-    ;; Insert header with tool icon
-    (let ((start (point)))
-      (insert "\n ⚙ Read(")
-      (claude-agent--apply-face start (point) 'claude-agent-tool-face))
-    ;; File path as clickable button
-    (insert-text-button file-path
-                        'action (lambda (_btn)
-                                  (find-file-other-window
-                                   (button-get _btn 'file-path)))
-                        'file-path file-path
-                        'face 'claude-agent-file-link
-                        'help-echo "Click to open file"
-                        'follow-link t)
-    (let ((end-start (point)))
-      (insert ")\n")
-      (claude-agent--apply-face end-start (point) 'claude-agent-tool-face))
-    ;; Update static marker
-    (set-marker claude-agent--static-end-marker (point))
-    ;; Rebuild dynamic section
-    (when claude-agent--has-conversation
-      (claude-agent--insert-status-bar))
-    (setq claude-agent--input-start-marker (point-marker))
-    (insert saved-input)
-    (claude-agent--update-read-only)
-    (claude-agent--update-placeholder)
-    (goto-char (if (and cursor-offset (>= cursor-offset 0))
-                   (min (+ claude-agent--input-start-marker cursor-offset) (point-max))
-                 claude-agent--input-start-marker))))
+  ;; Just use the standard tool call format
+  (claude-agent--insert-tool-call "Read" file-path))
 
 (defun claude-agent--format-read-line (line)
   "Format a LINE from Read tool output with prettier line numbers.
@@ -1181,31 +1143,18 @@ If VIRTUAL-INDENT is non-nil, apply it as line-prefix/wrap-prefix."
     ("assistant_end"
      (setq claude-agent--parse-state nil))
 
-    ;; Tool call
+    ;; Tool call - all tools use the same simple format now
     ("tool_call"
      (let* ((name (cdr (assq 'name msg)))
             (input (cdr (assq 'input msg)))
             (args-str (claude-agent--format-tool-input-for-display name input)))
-       (setq claude-agent--parse-state (if (string= name "Read") 'read-tool 'tool))
-       ;; Format based on tool type
-       (cond
-        ((string= name "Bash")
-         (claude-agent--insert-bash-tool (cdr (assq 'command input))))
-        ((string= name "Read")
-         (claude-agent--insert-read-tool (cdr (assq 'file_path input))))
-        (t
-         (claude-agent--insert-tool-call name args-str)))))
+       (setq claude-agent--parse-state 'tool)
+       (claude-agent--insert-tool-call name args-str)))
 
-    ;; Tool result
-    ;; NOTE: Result display commented out to speed up rendering
+    ;; Tool result - hidden by default for cleaner display
+    ;; TODO: implement expandable/collapsible results in the future
     ("tool_result"
-     (let ((content (cdr (assq 'content msg)))
-           (is-error (cdr (assq 'is_error msg))))
-       (if (eq claude-agent--parse-state 'read-tool)
-           ;; Read tool - use special formatted display
-           (claude-agent--insert-read-content content)
-         ;; Other tools - skip result display for now
-         nil)))
+     nil)
 
     ;; Tool end
     ("tool_end"
@@ -1437,7 +1386,7 @@ Uses compact inline format when in text-with-permission mode."
                   (when (< i 3) (insert " "))))
               (insert "\n")
               ;; Line 3: Hint
-              (insert-styled "  C-n/C-p navigate, C-c C-c confirm, C-1..C-4 direct" 'claude-agent-session-face)
+              (insert-styled "  ↑↓ navigate, RET confirm, C-1..C-4 direct, C-g deny" 'claude-agent-session-face)
               (insert "\n"))
           ;; Full format for standalone permission mode
           (let ((options '("Allow once" "Allow for this session" "Always allow" "Deny")))
@@ -1525,10 +1474,13 @@ Saves current input text and shows dialog while preserving input."
 ;; Minor mode for permission dialog - uses chord keys to not interfere with typing
 (defvar claude-agent-permission-mode-map
   (let ((map (make-sparse-keymap)))
-    ;; Navigation with C-n/C-p (Emacs-style)
-    (define-key map (kbd "C-p") #'claude-agent--permission-select-prev)
-    (define-key map (kbd "C-n") #'claude-agent--permission-select-next)
-    ;; Confirm with C-c C-c (standard Emacs "do it" chord)
+    ;; Navigation with M-n/M-p and arrow keys
+    (define-key map (kbd "M-p") #'claude-agent--permission-select-prev)
+    (define-key map (kbd "M-n") #'claude-agent--permission-select-next)
+    (define-key map (kbd "<up>") #'claude-agent--permission-select-prev)
+    (define-key map (kbd "<down>") #'claude-agent--permission-select-next)
+    ;; Confirm with RET or C-c C-c
+    (define-key map (kbd "RET") #'claude-agent--permission-confirm)
     (define-key map (kbd "C-c C-c") #'claude-agent--permission-confirm)
     ;; Direct selection with C-1 through C-4
     (define-key map (kbd "C-1") #'claude-agent-permit-once)
@@ -1540,13 +1492,25 @@ Saves current input text and shows dialog while preserving input."
     map)
   "Keymap for permission dialog mode.")
 
+;; Use emulation-mode-map-alists to give permission keymap highest priority
+(defvar claude-agent--permission-emulation-map-alist nil
+  "Alist for `emulation-mode-map-alists' to override other keymaps during permission.")
+
 (define-minor-mode claude-agent-permission-mode
   "Minor mode for permission dialog interaction.
 Uses chord keys so typing is not affected."
   :lighter " Permit"
   :keymap claude-agent-permission-mode-map
-  (when claude-agent-permission-mode
-    (message "Permission: C-n/C-p navigate, C-c C-c confirm, C-1..C-4 direct, C-g deny")))
+  (if claude-agent-permission-mode
+      (progn
+        ;; Use emulation-mode-map-alists for higher priority
+        (setq claude-agent--permission-emulation-map-alist
+              `((claude-agent-permission-mode . ,claude-agent-permission-mode-map)))
+        (add-to-list 'emulation-mode-map-alists 'claude-agent--permission-emulation-map-alist)
+        (message "Permission: ↑↓ navigate, RET confirm, C-1..C-4 direct, C-g deny"))
+    ;; Remove from emulation alist when disabling
+    (setq emulation-mode-map-alists
+          (delq 'claude-agent--permission-emulation-map-alist emulation-mode-map-alists))))
 
 (defun claude-agent--setup-permission-keymap ()
   "Set up keymap for permission prompt interaction."

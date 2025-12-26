@@ -32,19 +32,24 @@ def _format_traceback() -> str:
     return traceback.format_exc()
 
 
-def validate_tool_result(tool_response: dict, tool_name: str = "unknown") -> dict:
+def validate_tool_result(tool_response, tool_name: str = "unknown") -> dict:
     """Centralized validation and fixing of tool results.
 
     Ensures that tool results with is_error=True always have non-empty content,
     which is required by the Anthropic API.
 
     Args:
-        tool_response: The tool response dict with 'content' and 'is_error' fields
+        tool_response: The tool response (dict with 'content' and 'is_error' fields,
+                       or sometimes a list which we wrap)
         tool_name: Name of the tool for error message context
 
     Returns:
         The validated/fixed tool response
     """
+    # Handle case where tool_response is not a dict (e.g., a list)
+    if not isinstance(tool_response, dict):
+        return {"content": tool_response, "is_error": False}
+
     is_error = tool_response.get("is_error", False)
     content = tool_response.get("content")
 
@@ -338,8 +343,8 @@ class ClaudeAgent:
         tool_response = hook_input.get("tool_response", {})
         tool_name = hook_input.get("tool_name", "unknown")
 
-        # Get original content for comparison
-        original_content = tool_response.get("content")
+        # Get original content for comparison (handle non-dict tool_response)
+        original_content = tool_response.get("content") if isinstance(tool_response, dict) else tool_response
 
         # Use centralized validation
         tool_response = validate_tool_result(tool_response, tool_name)
