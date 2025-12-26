@@ -20,6 +20,7 @@
 (require 'ansi-color)
 (require 'org)
 (require 'transient)
+(require 'claude-mcp)
 
 ;;;; Customization
 
@@ -777,19 +778,99 @@ Inserts directly at point with proper faces and clickable link."
       (insert "└─\n")
       (claude-agent--apply-face footer-start (point) 'claude-agent-diff-header))))
 
-(defun claude-agent--format-tool-call (tool-name args-string)
-  "Format a tool call for display with TOOL-NAME and ARGS-STRING.
-Returns formatted string like: ⚙ ToolName(args)
-with 1-space indent applied via virtual indentation."
-  (format " ⚙ %s(%s)\n" tool-name args-string))
+(defface claude-agent-tool-name-face
+  '((t :foreground "#5c6370"))
+  "Face for tool names in tool calls (dimmed)."
+  :group 'claude-agent)
+
+(defface claude-agent-tool-arrow-face
+  '((t :foreground "#5c6370"))
+  "Face for the arrow separator in tool calls."
+  :group 'claude-agent)
+
+(defface claude-agent-tool-cmd-face
+  '((t :foreground "#abb2bf"))
+  "Face for command text in tool calls."
+  :group 'claude-agent)
+
+(defface claude-agent-tool-file-face
+  '((t :foreground "#61afef"))
+  "Face for file paths in tool calls."
+  :group 'claude-agent)
+
+(defface claude-agent-tool-pattern-face
+  '((t :foreground "#98c379"))
+  "Face for patterns (glob, grep) in tool calls."
+  :group 'claude-agent)
+
+(defface claude-agent-tool-continuation-face
+  '((t :foreground "#5c6370"))
+  "Face for continuation markers in multi-line tool calls."
+  :group 'claude-agent)
+
+(defun claude-agent--format-bash-multiline (command)
+  "Format a multi-line bash COMMAND with pipe continuations."
+  (let ((lines (split-string command "\n")))
+    (if (= (length lines) 1)
+        ;; Single line - just return propertized command
+        (propertize command 'face 'claude-agent-tool-cmd-face)
+      ;; Multi-line - add continuation markers
+      (let ((result ""))
+        (dotimes (i (length lines))
+          (let ((line (nth i lines)))
+            (if (= i 0)
+                (setq result (concat result (propertize line 'face 'claude-agent-tool-cmd-face) "\n"))
+              (setq result (concat result
+                                   (propertize "   │ " 'face 'claude-agent-tool-continuation-face)
+                                   (propertize line 'face 'claude-agent-tool-cmd-face)
+                                   "\n")))))
+        ;; Remove trailing newline since caller adds it
+        (substring result 0 -1)))))
 
 (defun claude-agent--insert-tool-call (tool-name args-string)
   "Insert a tool call display for TOOL-NAME with ARGS-STRING.
-Uses consistent formatting with 1-space virtual indent and tool face."
-  (claude-agent--append-to-log
-   (claude-agent--format-tool-call tool-name args-string)
-   'claude-agent-tool-face
-   " "))  ; 1-space virtual indent for wrapped lines
+Uses terse format: toolname› args with appropriate faces."
+  (let* ((inhibit-read-only t)
+         (tool-lower (downcase tool-name))
+         (saved-input (claude-agent--get-input-text))
+         (cursor-offset (when (and claude-agent--input-start-marker
+                                   (marker-position claude-agent--input-start-marker)
+                                   (>= (point) claude-agent--input-start-marker))
+                          (- (point) claude-agent--input-start-marker))))
+    ;; Delete dynamic section
+    (delete-region claude-agent--static-end-marker (point-max))
+    (goto-char claude-agent--static-end-marker)
+
+    ;; Insert tool name
+    (insert (propertize tool-lower 'face 'claude-agent-tool-name-face))
+    (insert (propertize "› " 'face 'claude-agent-tool-arrow-face))
+
+    ;; Insert args with appropriate face based on tool type
+    (cond
+     ((string= tool-name "Bash")
+      (insert (claude-agent--format-bash-multiline args-string)))
+     ((member tool-name '("Read" "Write" "Edit"))
+      (insert (propertize args-string 'face 'claude-agent-tool-file-face)))
+     ((member tool-name '("Glob" "Grep"))
+      (insert (propertize args-string 'face 'claude-agent-tool-pattern-face)))
+     (t
+      (insert (propertize args-string 'face 'claude-agent-tool-cmd-face))))
+
+    (insert "\n")
+
+    ;; Update static marker
+    (set-marker claude-agent--static-end-marker (point))
+
+    ;; Rebuild dynamic section
+    (when claude-agent--has-conversation
+      (claude-agent--insert-status-bar))
+    (setq claude-agent--input-start-marker (point-marker))
+    (insert saved-input)
+    (claude-agent--update-read-only)
+    (claude-agent--update-placeholder)
+    (goto-char (if (and cursor-offset (>= cursor-offset 0))
+                   (min (+ claude-agent--input-start-marker cursor-offset) (point-max))
+                 claude-agent--input-start-marker))))
 
 (defun claude-agent--insert-tool-result-start ()
   "Insert the start of a tool result section."
@@ -1118,7 +1199,7 @@ If VIRTUAL-INDENT is non-nil, apply it as line-prefix/wrap-prefix."
     ("user_start"
      (setq claude-agent--parse-state 'user)
      (setq claude-agent--has-conversation t)
-     (claude-agent--append-to-log "\nyou> " 'claude-agent-user-header-face))
+     (claude-agent--append-to-log "you> " 'claude-agent-user-header-face))
 
     ;; User message text
     ("user_text"
@@ -1132,7 +1213,7 @@ If VIRTUAL-INDENT is non-nil, apply it as line-prefix/wrap-prefix."
     ;; Assistant message start
     ("assistant_start"
      (setq claude-agent--parse-state 'assistant)
-     (claude-agent--append-to-log "\nclaude> " 'claude-agent-assistant-header-face))
+     (claude-agent--append-to-log "claude> " 'claude-agent-assistant-header-face))
 
     ;; Assistant message text
     ("assistant_text"
@@ -1231,10 +1312,7 @@ If VIRTUAL-INDENT is non-nil, apply it as line-prefix/wrap-prefix."
    ((member tool-name '("Read" "Write" "Edit"))
     (cdr (assq 'file_path tool-input)))
    ((string= tool-name "Bash")
-    (let ((cmd (cdr (assq 'command tool-input))))
-      (if (> (length cmd) 60)
-          (concat (substring cmd 0 57) "...")
-        cmd)))
+    (cdr (assq 'command tool-input)))
    ((string= tool-name "Glob")
     (cdr (assq 'pattern tool-input)))
    ((string= tool-name "Grep")
@@ -1609,8 +1687,9 @@ Returns the path to the generated config file."
   (let* ((agent-dir (claude-agent--get-agent-dir))
          (emacs-mcp-dir (expand-file-name "../emacs_mcp" agent-dir))
          (config-file (make-temp-file "claude-mcp-config-" nil ".json"))
-         (server-socket (or (bound-and-true-p server-socket-dir)
-                           (expand-file-name "server" (temporary-file-directory))))
+         (server-socket (expand-file-name "server"
+                                          (or (bound-and-true-p server-socket-dir)
+                                              (expand-file-name "emacs" (temporary-file-directory)))))
          (config `((mcpServers
                     . ((claudemacs
                         . ((command . "uv")
