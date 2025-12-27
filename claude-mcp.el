@@ -519,23 +519,27 @@ ATTEMPT is the retry count (max 20 attempts, ~10 seconds total)."
                        #'claude-mcp--send-to-agent-when-ready
                        buffer-name prompt (1+ attempt)))))))
 
-(defun claude-mcp-spawn-agent (directory &optional initial-prompt)
+(defun claude-mcp-spawn-agent (directory &optional agent-name)
   "Spawn a new Claude agent in DIRECTORY.
-If INITIAL-PROMPT is provided, send it to the agent after startup.
+Optional AGENT-NAME provides a custom name suffix for the buffer.
 Returns the buffer name of the new agent.
-Designed to be called via emacsclient by Claude AI."
-  (require 'claudemacs)
+Designed to be called via MCP by Claude AI."
+  (require 'claude-agent)
   (let* ((work-dir (expand-file-name directory))
-         (buffer-name (format "*claude:%s*" work-dir)))
+         (short-name (file-name-nondirectory (directory-file-name work-dir)))
+         (buf-name (if agent-name
+                       (format "*claude:%s:%s*" short-name agent-name)
+                     (format "*claude:%s*" short-name))))
     ;; Check if session already exists
-    (if (get-buffer buffer-name)
-        (format "Agent already running in %s (buffer: %s)" work-dir buffer-name)
-      ;; Start new session
-      (claude--start work-dir)
-      ;; Send initial prompt when terminal is ready
-      (when initial-prompt
-        (claude-mcp--send-to-agent-when-ready buffer-name initial-prompt))
-      (format "Spawned agent in %s (buffer: %s)" work-dir buffer-name))))
+    (if (get-buffer buf-name)
+        buf-name  ; Return existing buffer name
+      ;; Start new session using claude-agent-run
+      (let ((buf (claude-agent-run work-dir)))
+        ;; Rename if agent-name provided
+        (when agent-name
+          (with-current-buffer buf
+            (rename-buffer buf-name)))
+        buf-name))))
 
 (defun claude-mcp-list-agents ()
   "List all running Claude agent sessions.
@@ -548,25 +552,39 @@ Designed to be called via emacsclient by Claude AI."
           (push (list name (match-string 1 name)) agents))))
     (or agents "No agents running")))
 
-(defun claude-mcp-message-agent (buffer-name message)
+(defun claude-mcp-message-agent (buffer-name message &optional from-buffer)
   "Send MESSAGE to the agent in BUFFER-NAME.
 This sends the message as user input to the Claude session.
-Designed to be called via emacsclient by Claude AI."
+Optional FROM-BUFFER identifies the sender for the message queue.
+Designed to be called via MCP by Claude AI."
   (if (get-buffer buffer-name)
       (with-current-buffer buffer-name
-        (if (and (boundp 'eat-terminal) eat-terminal)
-            (let ((buf (current-buffer)))
-              (eat-term-send-string eat-terminal message)
-              ;; Small delay before sending return to ensure text is processed
-              (run-at-time 0.1 nil
-                           (lambda (b)
-                             (when (buffer-live-p b)
-                               (with-current-buffer b
-                                 (when (and (boundp 'eat-terminal) eat-terminal)
-                                   (eat-term-input-event eat-terminal 1 'return)))))
-                           buf)
+        (if (and (boundp 'claude-agent--process)
+                 claude-agent--process
+                 (process-live-p claude-agent--process))
+            ;; New claude-agent buffer system
+            (let ((formatted-message (if from-buffer
+                                         (format "[From %s]: %s" from-buffer message)
+                                       message)))
+              ;; Insert message into input area and send
+              (goto-char (point-max))
+              (let ((inhibit-read-only t))
+                (insert formatted-message))
+              (claude-agent-send)
               (format "Sent message to %s" buffer-name))
-          (error "Buffer '%s' is not a Claude terminal" buffer-name)))
+          ;; Fallback: try old eat-terminal system
+          (if (and (boundp 'eat-terminal) eat-terminal)
+              (let ((buf (current-buffer)))
+                (eat-term-send-string eat-terminal message)
+                (run-at-time 0.1 nil
+                             (lambda (b)
+                               (when (buffer-live-p b)
+                                 (with-current-buffer b
+                                   (when (and (boundp 'eat-terminal) eat-terminal)
+                                     (eat-term-input-event eat-terminal 1 'return)))))
+                             buf)
+                (format "Sent message to %s" buffer-name))
+            (error "Buffer '%s' is not a Claude agent buffer" buffer-name))))
     (error "Buffer '%s' does not exist" buffer-name)))
 
 ;;;; Session Management

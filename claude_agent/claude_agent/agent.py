@@ -237,11 +237,7 @@ class ClaudeAgent:
         if tool_name in ("Read", "Write", "Edit"):
             return tool_input.get("file_path", "")
         elif tool_name == "Bash":
-            cmd = tool_input.get("command", "")
-            # Truncate long commands
-            if len(cmd) > 60:
-                return cmd[:57] + "..."
-            return cmd
+            return tool_input.get("command", "")
         elif tool_name == "Glob":
             return tool_input.get("pattern", "")
         elif tool_name == "Grep":
@@ -253,12 +249,11 @@ class ClaudeAgent:
         elif tool_name == "WebFetch":
             return tool_input.get("url", "")
         elif tool_name == "Task":
-            return tool_input.get("description", "")[:40]
+            return tool_input.get("description", "")
         else:
             # For unknown tools, show first key=value
             for k, v in tool_input.items():
-                val = str(v)[:40]
-                return f"{k}={val}"
+                return f"{k}={v}"
             return ""
 
     def _matches_permission(self, tool_name: str, tool_input: dict) -> bool:

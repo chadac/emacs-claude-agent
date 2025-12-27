@@ -1351,13 +1351,11 @@ If VIRTUAL-INDENT is non-nil, apply it as line-prefix/wrap-prefix."
    ((string= tool-name "WebFetch")
     (cdr (assq 'url tool-input)))
    ((string= tool-name "Task")
-    (let ((desc (cdr (assq 'description tool-input))))
-      (if (> (length desc) 40) (substring desc 0 40) desc)))
+    (cdr (assq 'description tool-input)))
    (t
     (let ((first-val (cdar tool-input)))
       (if first-val
-          (let ((val-str (format "%s" first-val)))
-            (if (> (length val-str) 40) (substring val-str 0 40) val-str))
+          (format "%s" first-val)
         "")))))
 
 ;;;; Permission prompt UI
@@ -1393,10 +1391,7 @@ If VIRTUAL-INDENT is non-nil, apply it as line-prefix/wrap-prefix."
    ((string= tool-name "Edit")
     (cdr (assq 'file_path tool-input)))
    ((string= tool-name "Bash")
-    (let ((cmd (cdr (assq 'command tool-input))))
-      (if (> (length cmd) 50)
-          (concat (substring cmd 0 47) "...")
-        cmd)))
+    (cdr (assq 'command tool-input)))
    (t (format "%s" tool-input))))
 
 (defun claude-agent--generate-permission-pattern (tool-name tool-input scope)
