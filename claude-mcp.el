@@ -1164,5 +1164,179 @@ Blocks until user makes a selection. Returns the selected option or 'cancelled'.
          (options array :required "Array of option strings to present as numbered choices")
          (include-other boolean "If true, user can press 'o' to enter custom response")))
 
+;;;; Proposal Buffer
+;;
+;; A buffer for reviewing/editing proposals before accepting or rejecting.
+
+(defvar claude-mcp--proposal-result nil
+  "Result of the proposal: 'accepted, 'rejected, or 'cancelled.")
+
+(defvar claude-mcp--proposal-original nil
+  "Original content of the proposal for diff generation.")
+
+(defvar claude-mcp--proposal-title nil
+  "Title of the current proposal.")
+
+(defvar claude-mcp-proposal-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-c C-c") #'claude-mcp--accept-proposal)
+    (define-key map (kbd "C-c C-k") #'claude-mcp--reject-proposal)
+    map)
+  "Keymap for proposal buffer.")
+
+(define-derived-mode claude-mcp-proposal-mode text-mode "Proposal"
+  "Mode for reviewing and editing proposals from Claude.
+\\<claude-mcp-proposal-mode-map>
+\\[claude-mcp--accept-proposal] - Accept the proposal (with any edits)
+\\[claude-mcp--reject-proposal] - Reject the proposal"
+  :group 'claude-mcp
+  (setq header-line-format
+        (propertize " C-c C-c accept | C-c C-k reject | Edit freely "
+                    'face '(:foreground "#98c379" :weight bold))))
+
+;; Evil emacs state for proposal mode too
+(with-eval-after-load 'evil
+  (evil-set-initial-state 'claude-mcp-proposal-mode 'insert))
+
+(defun claude-mcp--accept-proposal ()
+  "Accept the proposal with any user modifications."
+  (interactive)
+  (let ((content (if claude-mcp--proposal-content-marker
+                     (buffer-substring-no-properties claude-mcp--proposal-content-marker (point-max))
+                   (buffer-substring-no-properties (point-min) (point-max)))))
+    (setq claude-mcp--proposal-result (list 'accepted content)))
+  (quit-window t)
+  (exit-recursive-edit))
+
+(defun claude-mcp--reject-proposal ()
+  "Reject the proposal, returning a diff of any modifications."
+  (interactive)
+  (let* ((modified (if claude-mcp--proposal-content-marker
+                       (buffer-substring-no-properties claude-mcp--proposal-content-marker (point-max))
+                     (buffer-substring-no-properties (point-min) (point-max))))
+         (diff (if (string= modified claude-mcp--proposal-original)
+                   nil
+                 (claude-mcp--generate-diff claude-mcp--proposal-original modified))))
+    (setq claude-mcp--proposal-result (list 'rejected diff))
+    (quit-window t)
+    (exit-recursive-edit)))
+
+(defun claude-mcp--generate-diff (original modified)
+  "Generate a simple diff between ORIGINAL and MODIFIED text."
+  (let ((orig-file (make-temp-file "proposal-orig"))
+        (mod-file (make-temp-file "proposal-mod")))
+    (unwind-protect
+        (progn
+          (with-temp-file orig-file (insert original))
+          (with-temp-file mod-file (insert modified))
+          (with-temp-buffer
+            (call-process "diff" nil t nil "-u" orig-file mod-file)
+            (buffer-string)))
+      (delete-file orig-file)
+      (delete-file mod-file))))
+
+(defface claude-mcp-proposal-header-face
+  '((t :foreground "#5c6370" :slant italic))
+  "Face for proposal header instructions."
+  :group 'claude-mcp)
+
+(defface claude-mcp-proposal-title-face
+  '((t :foreground "#61afef" :weight bold :height 1.1))
+  "Face for proposal title."
+  :group 'claude-mcp)
+
+(defface claude-mcp-proposal-separator-face
+  '((t :foreground "#3e4451"))
+  "Face for proposal separator line."
+  :group 'claude-mcp)
+
+(defvar-local claude-mcp--proposal-content-marker nil
+  "Marker for the start of the actual proposal content.")
+
+(defun claude-mcp--insert-proposal-header (title)
+  "Insert the proposal header with TITLE and instructions."
+  (let ((inhibit-read-only t))
+    ;; Title
+    (insert (propertize (concat "  " title "\n")
+                        'face 'claude-mcp-proposal-title-face
+                        'read-only t
+                        'front-sticky t
+                        'rear-nonsticky t))
+    ;; Instructions
+    (insert (propertize "  Review and edit this proposal, then:\n"
+                        'face 'claude-mcp-proposal-header-face
+                        'read-only t))
+    (insert (propertize "    C-c C-c  "
+                        'face '(:foreground "#98c379" :weight bold)
+                        'read-only t))
+    (insert (propertize "Accept proposal (with your edits)\n"
+                        'face 'claude-mcp-proposal-header-face
+                        'read-only t))
+    (insert (propertize "    C-c C-k  "
+                        'face '(:foreground "#e06c75" :weight bold)
+                        'read-only t))
+    (insert (propertize "Reject proposal (sends your edits as feedback)\n"
+                        'face 'claude-mcp-proposal-header-face
+                        'read-only t))
+    ;; Separator
+    (insert (propertize (concat "  " (make-string 60 ?─) "\n\n")
+                        'face 'claude-mcp-proposal-separator-face
+                        'read-only t
+                        'rear-nonsticky t))))
+
+(defun claude-mcp-show-proposal (title content &optional mode)
+  "Show a proposal buffer with TITLE and CONTENT for user review.
+Optional MODE specifies the major mode for syntax highlighting (e.g., 'python-mode).
+Blocks until user accepts (C-c C-c) or rejects (C-c C-k).
+Returns a list: (status result) where:
+- For accepted: ('accepted final-content)
+- For rejected with edits: ('rejected diff-string)
+- For rejected without edits: ('rejected nil)"
+  (let ((buf (get-buffer-create "*claude-proposal*"))
+        (content-start nil))
+    (setq claude-mcp--proposal-original content)
+    (setq claude-mcp--proposal-result nil)
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        ;; Insert header with instructions
+        (claude-mcp--insert-proposal-header title)
+        ;; Remember where content starts
+        (setq content-start (point))
+        ;; Insert the actual content
+        (insert content))
+      ;; Apply syntax highlighting mode if specified
+      (when mode
+        (let ((mode-fn (intern mode)))
+          (when (fboundp mode-fn)
+            (funcall mode-fn))))
+      ;; Then enable our mode for keybindings
+      (claude-mcp-proposal-mode)
+      (setq-local claude-mcp--proposal-title title)
+      ;; Set marker after mode is enabled (mode might reset buffer-locals)
+      (setq-local claude-mcp--proposal-content-marker (copy-marker content-start))
+      ;; Go to start of editable content
+      (goto-char content-start))
+    (pop-to-buffer buf '((display-buffer-same-window)))
+    ;; Block until user responds
+    (recursive-edit)
+    ;; Return result
+    (let ((result claude-mcp--proposal-result))
+      (setq claude-mcp--proposal-result nil)
+      (setq claude-mcp--proposal-original nil)
+      (pcase result
+        (`(accepted ,content) (format "ACCEPTED\n%s" content))
+        (`(rejected nil) "REJECTED")
+        (`(rejected ,diff) (format "REJECTED_WITH_CHANGES\n%s" diff))
+        (_ "CANCELLED")))))
+
+(claude-mcp-deftool show-proposal
+  "Show a proposal buffer for user to review, edit, and accept/reject. The user can freely edit the content. Blocks until user presses C-c C-c (accept) or C-c C-k (reject). Returns 'ACCEPTED\\n<content>' if accepted, 'REJECTED' if rejected without changes, or 'REJECTED_WITH_CHANGES\\n<diff>' if rejected after making edits."
+  :function #'claude-mcp-show-proposal
+  :safe t
+  :args ((title string :required "Title for the proposal (shown in header)")
+         (content string :required "The proposal content to display")
+         (mode string "Optional major mode for syntax highlighting (e.g., 'python-mode', 'org-mode')")))
+
 (provide 'claude-mcp)
 ;;; claude-mcp.el ends here
