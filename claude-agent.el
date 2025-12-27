@@ -871,11 +871,24 @@ Inserts directly at point with proper faces and clickable link."
         ;; Remove trailing newline since caller adds it
         (substring result 0 -1)))))
 
+(defun claude-agent--format-tool-name (tool-name)
+  "Format TOOL-NAME for display.
+Converts MCP tools like 'mcp__claudemacs__reload_file' to 'claudemacs/reload-file'."
+  (if (string-prefix-p "mcp__" tool-name)
+      ;; MCP tool: mcp__server__tool_name -> server/tool-name
+      (let* ((without-prefix (substring tool-name 5))  ; Remove "mcp__"
+             (parts (split-string without-prefix "__"))
+             (server (car parts))
+             (tool (mapconcat #'identity (cdr parts) "_")))
+        (concat server "/" (replace-regexp-in-string "_" "-" tool)))
+    ;; Regular tool: just lowercase
+    (downcase tool-name)))
+
 (defun claude-agent--insert-tool-call (tool-name args-string)
   "Insert a tool call display for TOOL-NAME with ARGS-STRING.
 Uses terse format: toolname› args with appropriate faces."
   (let* ((inhibit-read-only t)
-         (tool-lower (downcase tool-name))
+         (tool-lower (claude-agent--format-tool-name tool-name))
          (saved-input (claude-agent--get-input-text))
          (cursor-offset (when (and claude-agent--input-start-marker
                                    (marker-position claude-agent--input-start-marker)
@@ -1259,6 +1272,9 @@ If VIRTUAL-INDENT is non-nil, apply it as line-prefix/wrap-prefix."
            (new-string (cdr (assq 'new_string msg))))
        (setq claude-agent--parse-state 'tool)
        (claude-agent--set-thinking (format "Editing: %s" (file-name-nondirectory file-path)))
+       ;; Mark position for tool result storage
+       (setq claude-agent--last-tool-marker
+             (copy-marker (or claude-agent--static-end-marker (point-max))))
        ;; Insert the diff display
        (let* ((inhibit-read-only t)
               (saved-input (claude-agent--get-input-text))
@@ -1286,6 +1302,9 @@ If VIRTUAL-INDENT is non-nil, apply it as line-prefix/wrap-prefix."
            (content (cdr (assq 'content msg))))
        (setq claude-agent--parse-state 'tool)
        (claude-agent--set-thinking (format "Writing: %s" (file-name-nondirectory file-path)))
+       ;; Mark position for tool result storage
+       (setq claude-agent--last-tool-marker
+             (copy-marker (or claude-agent--static-end-marker (point-max))))
        (claude-agent--insert-write-tool file-path)
        (claude-agent--insert-write-content content)))
 
