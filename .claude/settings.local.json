@@ -17,7 +17,17 @@
       "Read(//home/chadac/.emacs.d/**)",
       "Bash(mkdir:*)",
       "Read(//home/chadac/.config/**)",
-      "Read(//home/chadac/.claude/**)"
+      "Read(//home/chadac/.claude/**)",
+      "Bash(git:*)",
+      "Bash(cd:*)",
+      "Bash(ls:*)",
+      "mcp__claudemacs__eval(*)",
+      "mcp__claudemacs__todo_create(*)",
+      "Edit(/home/chadac/.emacs.d/claude-agent/emacs_mcp/emacs_mcp/*)",
+      "mcp__claudemacs__todo_update_acceptance(*)",
+      "Read(/home/chadac/org-roam/projects/claude-agent/*)",
+      "Write(/home/chadac/org-roam/projects/claude-agent/*)",
+      "Edit(/home/chadac/.emacs.d/claude-agent/*)"
     ],
     "deny": [],
     "ask": []

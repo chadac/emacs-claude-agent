@@ -959,5 +959,210 @@ EXPRESSION should be a string containing valid Emacs Lisp code."
   :safe nil
   :args ((expression string :required "The Emacs Lisp expression to evaluate")))
 
+;;;; Interactive UX Primitives
+;;
+;; These functions provide structured interaction patterns between
+;; the agent and user, making agent interactions more intuitive.
+;;
+;; Design: These use a popup buffer with keybindings rather than
+;; blocking minibuffer prompts, so the MCP call can return immediately
+;; while the user makes their selection.
+
+(defvar-local claude-mcp--prompt-id nil
+  "Unique ID for the current prompt.")
+
+(defvar claude-mcp--prompt-results (make-hash-table :test 'equal)
+  "Hash table storing prompt results by ID.")
+
+(defvar claude-mcp--prompt-options nil
+  "Options for the current choice prompt.")
+
+(defvar claude-mcp--prompt-include-other nil
+  "Whether to include 'Other' option.")
+
+(defvar claude-mcp--prompt-selection 0
+  "Currently selected option index.")
+
+(defface claude-mcp-prompt-title-face
+  '((t :foreground "#61afef" :weight bold :height 1.2))
+  "Face for prompt titles."
+  :group 'claude-mcp)
+
+(defface claude-mcp-prompt-option-face
+  '((t :foreground "#abb2bf"))
+  "Face for unselected options."
+  :group 'claude-mcp)
+
+(defface claude-mcp-prompt-selected-face
+  '((t :foreground "#282c34" :background "#98c379" :weight bold))
+  "Face for selected option."
+  :group 'claude-mcp)
+
+(defface claude-mcp-prompt-hint-face
+  '((t :foreground "#5c6370" :slant italic))
+  "Face for hint text."
+  :group 'claude-mcp)
+
+(defvar claude-mcp-choice-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "1") (lambda () (interactive) (claude-mcp--select-option 0)))
+    (define-key map (kbd "2") (lambda () (interactive) (claude-mcp--select-option 1)))
+    (define-key map (kbd "3") (lambda () (interactive) (claude-mcp--select-option 2)))
+    (define-key map (kbd "4") (lambda () (interactive) (claude-mcp--select-option 3)))
+    (define-key map (kbd "5") (lambda () (interactive) (claude-mcp--select-option 4)))
+    (define-key map (kbd "6") (lambda () (interactive) (claude-mcp--select-option 5)))
+    (define-key map (kbd "7") (lambda () (interactive) (claude-mcp--select-option 6)))
+    (define-key map (kbd "8") (lambda () (interactive) (claude-mcp--select-option 7)))
+    (define-key map (kbd "9") (lambda () (interactive) (claude-mcp--select-option 8)))
+    (define-key map (kbd "j") #'claude-mcp--next-option)
+    (define-key map (kbd "k") #'claude-mcp--prev-option)
+    (define-key map (kbd "n") #'claude-mcp--next-option)
+    (define-key map (kbd "p") #'claude-mcp--prev-option)
+    (define-key map (kbd "<down>") #'claude-mcp--next-option)
+    (define-key map (kbd "<up>") #'claude-mcp--prev-option)
+    (define-key map (kbd "RET") #'claude-mcp--confirm-selection)
+    (define-key map (kbd "o") #'claude-mcp--enter-other)
+    (define-key map (kbd "q") #'claude-mcp--cancel-prompt)
+    (define-key map (kbd "C-g") #'claude-mcp--cancel-prompt)
+    map)
+  "Keymap for choice prompt buffer.")
+
+(define-derived-mode claude-mcp-choice-mode special-mode "Choice"
+  "Mode for displaying choice prompts from Claude."
+  :group 'claude-mcp
+  (setq-local cursor-type nil)
+  (setq-local truncate-lines t))
+
+;; Set evil to use emacs state for this mode so our keymap works
+(with-eval-after-load 'evil
+  (evil-set-initial-state 'claude-mcp-choice-mode 'emacs))
+
+(defun claude-mcp--select-option (n)
+  "Select option N (0-indexed) and confirm."
+  (when (< n (length claude-mcp--prompt-options))
+    (setq claude-mcp--prompt-selection n)
+    (claude-mcp--confirm-selection)))
+
+(defun claude-mcp--next-option ()
+  "Move to next option."
+  (interactive)
+  (setq claude-mcp--prompt-selection
+        (min (1- (length claude-mcp--prompt-options))
+             (1+ claude-mcp--prompt-selection)))
+  (claude-mcp--redraw-choices))
+
+(defun claude-mcp--prev-option ()
+  "Move to previous option."
+  (interactive)
+  (setq claude-mcp--prompt-selection
+        (max 0 (1- claude-mcp--prompt-selection)))
+  (claude-mcp--redraw-choices))
+
+(defun claude-mcp--redraw-choices ()
+  "Redraw the choice list with current selection."
+  (let ((inhibit-read-only t)
+        (pos (point)))
+    (erase-buffer)
+    (claude-mcp--insert-choice-content)
+    (goto-char (min pos (point-max)))))
+
+(defun claude-mcp--insert-choice-content ()
+  "Insert the choice prompt content."
+  (insert (propertize claude-mcp--prompt-title 'face 'claude-mcp-prompt-title-face))
+  (insert "\n\n")
+  (dotimes (i (length claude-mcp--prompt-options))
+    (let ((opt (nth i claude-mcp--prompt-options))
+          (selected (= i claude-mcp--prompt-selection)))
+      (insert (propertize (format "  %d. %s\n"
+                                  (1+ i)
+                                  opt)
+                          'face (if selected
+                                    'claude-mcp-prompt-selected-face
+                                  'claude-mcp-prompt-option-face)))))
+  (insert "\n")
+  (insert (propertize "↑↓/jk navigate, RET confirm, 1-9 direct select"
+                      'face 'claude-mcp-prompt-hint-face))
+  (when claude-mcp--prompt-include-other
+    (insert (propertize ", o for other" 'face 'claude-mcp-prompt-hint-face)))
+  (insert (propertize ", q cancel" 'face 'claude-mcp-prompt-hint-face)))
+
+(defun claude-mcp--confirm-selection ()
+  "Confirm the current selection."
+  (interactive)
+  (let ((result (nth claude-mcp--prompt-selection claude-mcp--prompt-options))
+        (id claude-mcp--prompt-id))
+    (puthash id result claude-mcp--prompt-results)
+    (quit-window t)
+    (exit-recursive-edit)))
+
+(defun claude-mcp--enter-other ()
+  "Enter a custom response."
+  (interactive)
+  (if claude-mcp--prompt-include-other
+      (let ((response (read-string "Enter your response: "))
+            (id claude-mcp--prompt-id))
+        (puthash id response claude-mcp--prompt-results)
+        (quit-window t)
+        (exit-recursive-edit))
+    (message "Other option not enabled for this prompt")))
+
+(defun claude-mcp--cancel-prompt ()
+  "Cancel the prompt."
+  (interactive)
+  (let ((id claude-mcp--prompt-id))
+    (puthash id 'cancelled claude-mcp--prompt-results)
+    (quit-window t)
+    (exit-recursive-edit)))
+
+(defvar claude-mcp--prompt-title nil
+  "Title for current prompt.")
+
+(defun claude-mcp-prompt-choice (prompt options &optional include-other)
+  "Present a numbered list of OPTIONS with PROMPT.
+If INCLUDE-OTHER is non-nil, allow free-form input with 'o' key.
+Blocks until user makes a selection. Returns the selected option or 'cancelled'."
+  (let* ((id (format "choice-%s" (format-time-string "%s%N")))
+         (options-list (if (stringp options)
+                           (split-string options "\n" t)
+                         (if (listp options) options (list options))))
+         (buf (get-buffer-create "*claude-prompt*")))
+    (with-current-buffer buf
+      (claude-mcp-choice-mode)
+      (setq-local claude-mcp--prompt-id id)
+      (setq-local claude-mcp--prompt-title prompt)
+      (setq-local claude-mcp--prompt-options options-list)
+      (setq-local claude-mcp--prompt-include-other include-other)
+      (setq-local claude-mcp--prompt-selection 0)
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (claude-mcp--insert-choice-content))
+      (goto-char (point-min)))
+    (pop-to-buffer buf '((display-buffer-below-selected)
+                         (window-height . fit-window-to-buffer)))
+    ;; Block until user makes selection
+    (recursive-edit)
+    ;; Return the result
+    (let ((result (gethash id claude-mcp--prompt-results)))
+      (remhash id claude-mcp--prompt-results)
+      (if (eq result 'cancelled)
+          "cancelled"
+        (or result "cancelled")))))
+
+(defun claude-mcp-get-prompt-result (prompt-id)
+  "Get the result for PROMPT-ID. Returns nil if not yet answered."
+  (let ((result (gethash prompt-id claude-mcp--prompt-results)))
+    (cond
+     ((null result) "pending")
+     ((eq result 'cancelled) "cancelled")
+     (t result))))
+
+(claude-mcp-deftool prompt-choice
+  "Present a numbered list of choices to the user and wait for selection. Blocks until user picks an option. User can navigate with j/k or arrows, confirm with RET or 1-9, press 'o' for custom input if enabled. Returns the selected option text or 'cancelled'."
+  :function #'claude-mcp-prompt-choice
+  :safe t
+  :args ((prompt string :required "The prompt/question to display to the user")
+         (options array :required "Array of option strings to present as numbered choices")
+         (include-other boolean "If true, user can press 'o' to enter custom response")))
+
 (provide 'claude-mcp)
 ;;; claude-mcp.el ends here
