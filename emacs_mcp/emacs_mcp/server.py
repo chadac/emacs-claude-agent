@@ -340,6 +340,13 @@ def build_elisp_call(elisp_fn: str, args: dict, arg_defs: dict) -> str:
                 elisp_args.append(str(int(value)))
             elif arg_type == "boolean":
                 elisp_args.append("t" if value else "nil")
+            elif arg_type == "array":
+                # Handle array as elisp list
+                if isinstance(value, list):
+                    items = [f'"{escape_elisp_string(str(v))}"' for v in value]
+                    elisp_args.append(f"'({' '.join(items)})")
+                else:
+                    elisp_args.append("'()")
             else:
                 elisp_args.append(f'"{escape_elisp_string(str(value))}"')
         else:
