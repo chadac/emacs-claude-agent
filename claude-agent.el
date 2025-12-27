@@ -317,6 +317,14 @@ These single-key bindings only apply outside the input area.")
   (and claude-agent--input-start-marker
        (>= (point) claude-agent--input-start-marker)))
 
+(defun claude-agent--scroll-to-bottom ()
+  "Scroll window to show maximum content with input area near bottom.
+This eliminates empty space below the input area."
+  (when-let ((win (get-buffer-window (current-buffer))))
+    (with-selected-window win
+      ;; Recenter with point near the bottom (negative arg = lines from bottom)
+      (recenter -3))))
+
 (defun claude-agent-goto-input ()
   "Move point to the input area."
   (interactive)
@@ -568,7 +576,9 @@ Handles different input modes: text input vs permission prompt."
        (if (and cursor-offset (>= cursor-offset 0))
            (goto-char (min (+ claude-agent--input-start-marker cursor-offset)
                            (point-max)))
-         (goto-char claude-agent--input-start-marker)))
+         (goto-char claude-agent--input-start-marker))
+       ;; Scroll to show maximum content - put input near bottom
+       (claude-agent--scroll-to-bottom))
 
       ('empty
        ;; Empty mode - clear input area and switch to text mode
@@ -745,38 +755,30 @@ Called by `render-dynamic-section'. Assumes point is positioned correctly."
   "Insert a diff display for FILE-PATH with OLD-STRING and NEW-STRING.
 Inserts directly at point with proper faces and clickable link."
   (let ((inhibit-read-only t))
-    ;; Header with clickable file link
-    (let ((header-start (point)))
-      (insert "\n┌─ Edit: ")
-      (claude-agent--apply-face header-start (point) 'claude-agent-diff-header))
-    ;; File path as button
+    ;; Tool header in new terse format
+    (insert (propertize "edit" 'face 'claude-agent-tool-name-face))
+    (insert (propertize "› " 'face 'claude-agent-tool-arrow-face))
     (insert-text-button file-path
                         'action (lambda (_btn)
                                   (find-file-other-window
                                    (button-get _btn 'file-path)))
                         'file-path file-path
-                        'face 'claude-agent-file-link
+                        'face 'claude-agent-tool-file-face
                         'help-echo "Click to open file"
                         'follow-link t)
-    (let ((nl-start (point)))
-      (insert "\n")
-      (claude-agent--apply-face nl-start (point) 'claude-agent-diff-header))
+    (insert "\n")
     ;; Old lines (removed)
     (when (and old-string (not (string-empty-p old-string)))
       (dolist (line (split-string old-string "\n"))
         (let ((line-start (point)))
-          (insert "│- " line "\n")
+          (insert "- " line "\n")
           (claude-agent--apply-face line-start (point) 'claude-agent-diff-removed))))
     ;; New lines (added)
     (when (and new-string (not (string-empty-p new-string)))
       (dolist (line (split-string new-string "\n"))
         (let ((line-start (point)))
-          (insert "│+ " line "\n")
-          (claude-agent--apply-face line-start (point) 'claude-agent-diff-added))))
-    ;; Footer
-    (let ((footer-start (point)))
-      (insert "└─\n")
-      (claude-agent--apply-face footer-start (point) 'claude-agent-diff-header))))
+          (insert "+ " line "\n")
+          (claude-agent--apply-face line-start (point) 'claude-agent-diff-added))))))
 
 (defface claude-agent-tool-name-face
   '((t :foreground "#5c6370"))
@@ -957,49 +959,10 @@ Expects content in the format from Claude's Read tool."
                  claude-agent--input-start-marker))))
 
 (defun claude-agent--insert-write-tool (file-path)
-  "Insert a Write tool header with FILE-PATH as clickable link.
-Follows same pattern as `claude-agent--insert-read-tool'."
+  "Insert a Write tool header with FILE-PATH as clickable link."
   (setq claude-agent--current-write-file file-path)
-  (let* ((inhibit-read-only t)
-         (saved-input (if (eq claude-agent--input-mode 'text)
-                          (claude-agent--get-input-text)
-                        claude-agent--saved-input))
-         (cursor-offset (when (and (eq claude-agent--input-mode 'text)
-                                   claude-agent--input-start-marker
-                                   (marker-position claude-agent--input-start-marker)
-                                   (>= (point) claude-agent--input-start-marker))
-                          (- (point) claude-agent--input-start-marker))))
-    ;; Delete dynamic section
-    (delete-region claude-agent--static-end-marker (point-max))
-    (goto-char claude-agent--static-end-marker)
-    ;; Insert header with tool icon
-    (let ((start (point)))
-      (insert "\n ⚙ Write(")
-      (claude-agent--apply-face start (point) 'claude-agent-tool-face))
-    ;; File path as clickable button
-    (insert-text-button file-path
-                        'action (lambda (_btn)
-                                  (find-file-other-window
-                                   (button-get _btn 'file-path)))
-                        'file-path file-path
-                        'face 'claude-agent-file-link
-                        'help-echo "Click to open file"
-                        'follow-link t)
-    (let ((end-start (point)))
-      (insert ")\n")
-      (claude-agent--apply-face end-start (point) 'claude-agent-tool-face))
-    ;; Update static marker
-    (set-marker claude-agent--static-end-marker (point))
-    ;; Rebuild dynamic section
-    (when claude-agent--has-conversation
-      (claude-agent--insert-status-bar))
-    (setq claude-agent--input-start-marker (point-marker))
-    (insert saved-input)
-    (claude-agent--update-read-only)
-    (claude-agent--update-placeholder)
-    (goto-char (if (and cursor-offset (>= cursor-offset 0))
-                   (min (+ claude-agent--input-start-marker cursor-offset) (point-max))
-                 claude-agent--input-start-marker))))
+  ;; Use standard tool call format
+  (claude-agent--insert-tool-call "Write" file-path))
 
 (defun claude-agent--insert-write-content (content)
   "Insert Write tool CONTENT with line numbers showing additions.
