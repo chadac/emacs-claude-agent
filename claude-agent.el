@@ -199,6 +199,13 @@ Each element is an alist with keys: name, status.")
 (defvar-local claude-agent--has-conversation nil
   "Non-nil if conversation has started (first message sent).")
 
+(defvar-local claude-agent--tool-results nil
+  "Alist mapping tool call positions to their results.
+Each entry is (MARKER . RESULT-STRING).")
+
+(defvar-local claude-agent--last-tool-marker nil
+  "Marker for the last tool call, used to associate results.")
+
 (defvar-local claude-agent--placeholder-overlay nil
   "Overlay for the placeholder text in empty input area.")
 
@@ -269,6 +276,8 @@ Each element is an alist with keys: name, status.")
     ;; Navigation - go to input
     (define-key map (kbd "i") #'claude-agent-goto-input)
     (define-key map (kbd "RET") #'claude-agent-goto-input)
+    ;; Tool result viewing
+    (define-key map (kbd "'") #'claude-agent-show-tool-result)
     ;; Help
     (define-key map (kbd "?") #'claude-agent-transient-menu)
     map)
@@ -301,6 +310,7 @@ These single-key bindings only apply outside the input area.")
   (local-set-key (kbd "C-c C-q") #'claude-agent-quit)
   (local-set-key (kbd "M-p") #'claude-agent-previous-input)
   (local-set-key (kbd "M-n") #'claude-agent-next-input)
+  (local-set-key (kbd "C-c '") #'claude-agent-show-tool-result)
   ;; Set up placeholder update hook
   (add-hook 'post-command-hook #'claude-agent--post-command-hook nil t)
   ;; Set up evil insert state entry hook to move to input area
@@ -324,6 +334,38 @@ This eliminates empty space below the input area."
     (with-selected-window win
       ;; Recenter with point near the bottom (negative arg = lines from bottom)
       (recenter -3))))
+
+(defun claude-agent--find-tool-result-at-point ()
+  "Find the tool result for the tool call on the current line.
+Returns (NAME . RESULT) cons or nil if not found."
+  (let ((line-start (line-beginning-position))
+        (line-end (line-end-position))
+        (result nil))
+    ;; Find a tool marker on this line
+    (dolist (entry claude-agent--tool-results)
+      (let ((marker (car entry)))
+        (when (and (marker-position marker)
+                   (>= (marker-position marker) line-start)
+                   (<= (marker-position marker) line-end))
+          (setq result entry))))
+    ;; Return just the result string for now
+    (cdr result)))
+
+(defun claude-agent-show-tool-result ()
+  "Show the result of the tool call at point in a popup buffer.
+Like `org-edit-special' (C-c ') for source blocks."
+  (interactive)
+  (if-let ((result (claude-agent--find-tool-result-at-point)))
+      (let ((buf (get-buffer-create "*claude-tool-result*")))
+        (with-current-buffer buf
+          (let ((inhibit-read-only t))
+            (erase-buffer)
+            (insert result)
+            (goto-char (point-min))
+            (special-mode)))
+        (display-buffer buf '(display-buffer-below-selected
+                              (window-height . 0.4))))
+    (message "No tool result found at point")))
 
 (defun claude-agent-goto-input ()
   "Move point to the input area."
@@ -1193,12 +1235,17 @@ If VIRTUAL-INDENT is non-nil, apply it as line-prefix/wrap-prefix."
             (input (cdr (assq 'input msg)))
             (args-str (claude-agent--format-tool-input-for-display name input)))
        (setq claude-agent--parse-state 'tool)
+       ;; Mark position before inserting so we can associate result later
+       (setq claude-agent--last-tool-marker
+             (copy-marker (or claude-agent--static-end-marker (point-max))))
        (claude-agent--insert-tool-call name args-str)))
 
-    ;; Tool result - hidden by default for cleaner display
-    ;; TODO: implement expandable/collapsible results in the future
+    ;; Tool result - store for later viewing with C-c '
     ("tool_result"
-     nil)
+     (let ((content (cdr (assq 'content msg))))
+       (when (and claude-agent--last-tool-marker content)
+         (push (cons claude-agent--last-tool-marker content)
+               claude-agent--tool-results))))
 
     ;; Tool end
     ("tool_end"
