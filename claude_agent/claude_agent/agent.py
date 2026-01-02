@@ -129,6 +129,7 @@ class ClaudeAgent:
         work_dir: str,
         mcp_config: Optional[str] = None,
         allowed_tools: Optional[list[str]] = None,
+        disallowed_tools: Optional[list[str]] = None,
         log_file: Optional[str] = None,
         resume_session: Optional[str] = None,
         continue_session: bool = False,
@@ -136,6 +137,7 @@ class ClaudeAgent:
         self.work_dir = work_dir
         self.mcp_config = mcp_config
         self.allowed_tools = allowed_tools or []
+        self.disallowed_tools = disallowed_tools or []
         self.state = AgentState()
         self._running = True
         self._log_file = log_file
@@ -488,6 +490,7 @@ class ClaudeAgent:
             can_use_tool=self._can_use_tool,
             mcp_servers=self.mcp_config or {},  # Pass path string or empty dict
             allowed_tools=self.allowed_tools if self.allowed_tools else [],
+            disallowed_tools=self.disallowed_tools if self.disallowed_tools else [],
             resume=self._resume_session,
             continue_conversation=self._continue_session or (not self._resume_session),
             hooks=hooks,
@@ -778,6 +781,7 @@ async def run_agent(
     resume_session: Optional[str] = None,
     continue_session: bool = False,
     allowed_tools: Optional[list[str]] = None,
+    disallowed_tools: Optional[list[str]] = None,
     log_file: Optional[str] = None,
 ) -> None:
     """Run the agent, reading commands from stdin."""
@@ -785,6 +789,7 @@ async def run_agent(
         work_dir=work_dir,
         mcp_config=mcp_config,
         allowed_tools=allowed_tools,
+        disallowed_tools=disallowed_tools,
         log_file=log_file,
         resume_session=resume_session,
         continue_session=continue_session,
@@ -904,6 +909,11 @@ def main() -> None:
         help="Comma-separated list of allowed tools",
     )
     parser.add_argument(
+        "--disallowed-tools",
+        default=None,
+        help="Comma-separated list of disallowed tools",
+    )
+    parser.add_argument(
         "--log-file",
         default=None,
         help="Path to write JSON message log (for debugging)",
@@ -914,6 +924,10 @@ def main() -> None:
     if args.allowed_tools:
         allowed_tools = [t.strip() for t in args.allowed_tools.split(",")]
 
+    disallowed_tools = None
+    if args.disallowed_tools:
+        disallowed_tools = [t.strip() for t in args.disallowed_tools.split(",")]
+
     asyncio.run(
         run_agent(
             work_dir=args.work_dir,
@@ -921,6 +935,7 @@ def main() -> None:
             resume_session=args.resume,
             continue_session=args.continue_session,
             allowed_tools=allowed_tools,
+            disallowed_tools=disallowed_tools,
             log_file=args.log_file,
         )
     )

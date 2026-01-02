@@ -308,6 +308,27 @@ Designed to be called via emacsclient by Claude AI."
                     :message (flymake-diagnostic-text diag)))
             (flymake-diagnostics))))
 
+(defun claude-mcp--get-lsp-diagnostics ()
+  "Get LSP diagnostics directly for the current buffer as a list of plists.
+This extracts diagnostics directly from LSP when flycheck/flymake haven't picked them up."
+  (when (and (bound-and-true-p lsp-mode)
+             (fboundp 'lsp--get-buffer-diagnostics))
+    (mapcar (lambda (diag)
+              (let* ((range (gethash "range" diag))
+                     (start (gethash "start" range))
+                     (severity (gethash "severity" diag))
+                     (level (pcase severity
+                              (1 "error")
+                              (2 "warning")
+                              (3 "info")
+                              (4 "hint")
+                              (_ "unknown"))))
+                (list :line (1+ (gethash "line" start))
+                      :column (1+ (gethash "character" start))
+                      :level level
+                      :message (gethash "message" diag))))
+            (lsp--get-buffer-diagnostics))))
+
 (defun claude-mcp--format-diagnostics (diagnostics source)
   "Format DIAGNOSTICS from SOURCE (flycheck/flymake) as a string."
   (if (null diagnostics)
@@ -334,6 +355,10 @@ LIMIT is the number of lines to read (default: all remaining lines).
 Returns a formatted string with metadata, diagnostics, and content."
   (let* ((file-path (expand-file-name file-path))
          (existing-buffer (get-file-buffer file-path))
+         ;; Suppress interactive prompts when opening files
+         (lsp-auto-guess-root t)  ; Auto-guess LSP root instead of prompting
+         (lsp-ask-to-select-first-project nil)  ; Don't ask to select project
+         (enable-local-variables :safe)  ; Only use safe local vars, don't prompt
          (buffer (or existing-buffer
                      (find-file-noselect file-path)))
          (offset (or offset 1))
@@ -348,7 +373,8 @@ Returns a formatted string with metadata, diagnostics, and content."
 
           (let* ((flycheck-errors (claude-mcp--get-flycheck-errors))
                  (flymake-diags (claude-mcp--get-flymake-diagnostics))
-                 (has-diagnostics (or flycheck-errors flymake-diags))
+                 (lsp-diags (claude-mcp--get-lsp-diagnostics))
+                 (has-diagnostics (or flycheck-errors flymake-diags lsp-diags))
                  (total-lines (count-lines (point-min) (point-max)))
                  ;; Calculate the range of lines to include
                  (start-line (max 1 offset))
@@ -370,30 +396,26 @@ Returns a formatted string with metadata, diagnostics, and content."
                   (concat
                    ;; Diagnostics section (filter to visible range if limited)
                    (when has-diagnostics
-                     (let* ((visible-flycheck
-                             (when flycheck-errors
+                     (let* ((filter-to-range
+                             (lambda (diags)
                                (if limit
-                                   (seq-filter (lambda (err)
-                                                 (let ((line (plist-get err :line)))
+                                   (seq-filter (lambda (d)
+                                                 (let ((line (plist-get d :line)))
                                                    (and (>= line start-line)
                                                         (<= line end-line))))
-                                               flycheck-errors)
-                                 flycheck-errors)))
-                            (visible-flymake
-                             (when flymake-diags
-                               (if limit
-                                   (seq-filter (lambda (diag)
-                                                 (let ((line (plist-get diag :line)))
-                                                   (and (>= line start-line)
-                                                        (<= line end-line))))
-                                               flymake-diags)
-                                 flymake-diags)))
-                            (has-visible (or visible-flycheck visible-flymake)))
+                                               diags)
+                                 diags)))
+                            (visible-flycheck (funcall filter-to-range flycheck-errors))
+                            (visible-flymake (funcall filter-to-range flymake-diags))
+                            (visible-lsp (funcall filter-to-range lsp-diags))
+                            (has-visible (or visible-flycheck visible-flymake visible-lsp)))
                        (when has-visible
                          (concat
                           (or (claude-mcp--format-diagnostics visible-flycheck "Flycheck") "")
-                          (when (and visible-flycheck visible-flymake) "\n")
+                          (when (and visible-flycheck (or visible-flymake visible-lsp)) "\n")
                           (or (claude-mcp--format-diagnostics visible-flymake "Flymake") "")
+                          (when (and visible-flymake visible-lsp) "\n")
+                          (or (claude-mcp--format-diagnostics visible-lsp "LSP") "")
                           "\n\n"))))
 
                    ;; Content with line numbers - compact format matching Read tool
@@ -412,8 +434,8 @@ Returns a formatted string with metadata, diagnostics, and content."
 
     result))
 
-(claude-mcp-deftool read-file-with-diagnostics
-  "Read a file and return rich context including IDE diagnostics from flycheck/flymake. Opens the file in an Emacs buffer to get live error/warning information. Use this instead of the regular Read tool when you want to see syntax errors, type errors, linting issues, etc. Supports offset and limit for reading specific portions of large files."
+(claude-mcp-deftool read
+  "Read a file with IDE diagnostics (flycheck/flymake errors). Use this for reading files."
   :function #'claude-mcp-read-file-with-context
   :safe t
   :args ((file-path string :required "Path to the file to read")

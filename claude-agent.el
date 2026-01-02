@@ -40,6 +40,12 @@ Requires the Emacs server to be running (`server-start')."
   :type 'boolean
   :group 'claude-agent)
 
+(defcustom claude-agent-disallowed-tools '()
+  "List of tools that should be disallowed for the Claude agent.
+Example: Setting to \\='(\"WebSearch\") would disable web search."
+  :type '(repeat string)
+  :group 'claude-agent)
+
 ;;;; Faces
 
 (defface claude-agent-header-face
