@@ -442,6 +442,145 @@ Returns a formatted string with metadata, diagnostics, and content."
          (offset integer "Line number to start reading from (1-indexed, default: 1)")
          (limit integer "Number of lines to read (default: all remaining lines)")))
 
+(defun claude-mcp--wait-for-diagnostics (buffer timeout)
+  "Wait up to TIMEOUT seconds for diagnostics to update in BUFFER."
+  (let ((start-time (float-time))
+        (done nil))
+    (while (and (not done)
+                (< (- (float-time) start-time) timeout))
+      (with-current-buffer buffer
+        (when (and (bound-and-true-p flycheck-mode)
+                   (not (eq flycheck-last-status-change 'running)))
+          (setq done t))
+        (when (and (bound-and-true-p flymake-mode)
+                   (not (flymake-running-backends)))
+          (setq done t)))
+      (unless done
+        (sit-for 0.1)))))
+
+(defun claude-mcp-edit-file (file-path old-string new-string &optional replace-all)
+  "Edit FILE-PATH by replacing OLD-STRING with NEW-STRING.
+If REPLACE-ALL is non-nil, replace all occurrences.
+Returns a result with the edit status and any diagnostics from affected lines."
+  (let* ((file-path (expand-file-name file-path))
+         (existing-buffer (get-file-buffer file-path))
+         (lsp-auto-guess-root t)
+         (lsp-ask-to-select-first-project nil)
+         (enable-local-variables :safe)
+         (buffer (or existing-buffer (find-file-noselect file-path)))
+         (content (with-current-buffer buffer
+                    (buffer-substring-no-properties (point-min) (point-max))))
+         (occurrences (let ((positions '())
+                            (start 0)
+                            pos)
+                        (while (setq pos (cl-search old-string content :start2 start))
+                          (push pos positions)
+                          (setq start (1+ pos)))
+                        (nreverse positions)))
+         result edit-start-line edit-end-line replacements-made)
+
+    (cond
+     ;; No matches found
+     ((null occurrences)
+      (setq result (format "Error: old_string not found in %s" file-path)))
+
+     ;; Multiple matches but replace-all not set
+     ((and (> (length occurrences) 1) (not replace-all))
+      (setq result (format "Error: old_string found %d times. Use replace_all=true or provide more context."
+                           (length occurrences))))
+
+     ;; Perform the replacement
+     (t
+      (let* ((first-pos (car occurrences))
+             (last-pos (car (last occurrences)))
+             (new-content (if replace-all
+                              (let ((res content) (offset 0))
+                                (dolist (pos occurrences res)
+                                  (let ((adj (+ pos offset)))
+                                    (setq res (concat (substring res 0 adj)
+                                                      new-string
+                                                      (substring res (+ adj (length old-string)))))
+                                    (setq offset (+ offset (- (length new-string) (length old-string)))))))
+                            (concat (substring content 0 first-pos)
+                                    new-string
+                                    (substring content (+ first-pos (length old-string)))))))
+
+        ;; Calculate line numbers
+        (setq edit-start-line (1+ (cl-count ?\n (substring content 0 first-pos))))
+        (setq edit-end-line (+ edit-start-line (cl-count ?\n new-string)))
+        (setq replacements-made (if replace-all (length occurrences) 1))
+
+        ;; Apply edit
+        (with-current-buffer buffer
+          (erase-buffer)
+          (insert new-content)
+          (save-buffer)
+
+          ;; Trigger syntax checking and LSP refresh
+          (when (bound-and-true-p flycheck-mode) (flycheck-buffer))
+          (when (bound-and-true-p flymake-mode) (flymake-start))
+
+          ;; Wait for diagnostics (longer wait for LSP)
+          (sit-for 1.0)  ; Give LSP time to process changes
+          (claude-mcp--wait-for-diagnostics buffer 3.0)
+
+          ;; Collect diagnostics and show result
+          (let* ((check-start (max 1 (- edit-start-line 3)))
+                 (check-end (+ edit-end-line 3))
+                 (flycheck-errs (claude-mcp--get-flycheck-errors))
+                 (flymake-diags (claude-mcp--get-flymake-diagnostics))
+                 (lsp-diags (claude-mcp--get-lsp-diagnostics))
+                 (in-range (lambda (d)
+                             (let ((line (plist-get d :line)))
+                               (and (>= line check-start) (<= line check-end)))))
+                 (rel-flycheck (seq-filter in-range flycheck-errs))
+                 (rel-flymake (seq-filter in-range flymake-diags))
+                 (rel-lsp (seq-filter in-range lsp-diags))
+                 (has-diags (or rel-flycheck rel-flymake rel-lsp))
+                 ;; Get snippet of edited region with context
+                 (snippet-start (max 1 (- edit-start-line 2)))
+                 (snippet-end-line (min (+ edit-end-line 2) (count-lines (point-min) (point-max))))
+                 (line-width (length (number-to-string snippet-end-line)))
+                 (snippet (save-excursion
+                            (goto-char (point-min))
+                            (forward-line (1- snippet-start))
+                            (let ((lines '())
+                                  (ln snippet-start))
+                              (while (<= ln snippet-end-line)
+                                (push (format (format "%%%dd→%%s" line-width)
+                                              ln
+                                              (buffer-substring-no-properties
+                                               (line-beginning-position)
+                                               (line-end-position)))
+                                      lines)
+                                (setq ln (1+ ln))
+                                (forward-line 1))
+                              (string-join (nreverse lines) "\n")))))
+
+            (setq result
+                  (concat
+                   (if replace-all
+                       (format "Replaced %d occurrence(s) in %s (lines %d-%d)"
+                               replacements-made file-path edit-start-line edit-end-line)
+                     (format "Edited %s (lines %d-%d)" file-path edit-start-line edit-end-line))
+                   "\n\n" snippet
+                   (when has-diags
+                     (concat "\n\n"
+                             (or (claude-mcp--format-diagnostics rel-flycheck "Flycheck") "")
+                             (when (and rel-flycheck (or rel-flymake rel-lsp)) "\n")
+                             (or (claude-mcp--format-diagnostics rel-flymake "Flymake") "")
+                             (when (and rel-flymake rel-lsp) "\n")
+                             (or (claude-mcp--format-diagnostics rel-lsp "LSP") ""))))))))))
+    result))
+
+(claude-mcp-deftool edit
+  "Edit a file by replacing old_string with new_string. Returns diagnostics from affected lines."
+  :function #'claude-mcp-edit-file
+  :args ((file-path string :required "Path to the file to edit")
+         (old_string string :required "The text to replace")
+         (new_string string :required "The replacement text")
+         (replace_all boolean "Replace all occurrences (default: false)")))
+
 ;;;; REPL Integration
 
 (defun claude-mcp-send-to-eat-terminal (buffer-name text)
