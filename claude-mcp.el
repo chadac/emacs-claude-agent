@@ -284,6 +284,142 @@ Designed to be called via emacsclient by Claude AI."
               :point-max (point-max)))
     (error "Buffer '%s' does not exist" buffer-name)))
 
+;;;; Rich File Reading with IDE Context
+
+(defun claude-mcp--get-flycheck-errors ()
+  "Get flycheck errors for the current buffer as a list of plists."
+  (when (and (bound-and-true-p flycheck-mode)
+             (bound-and-true-p flycheck-current-errors))
+    (mapcar (lambda (err)
+              (list :line (flycheck-error-line err)
+                    :column (flycheck-error-column err)
+                    :level (symbol-name (flycheck-error-level err))
+                    :message (flycheck-error-message err)
+                    :checker (symbol-name (flycheck-error-checker err))))
+            flycheck-current-errors)))
+
+(defun claude-mcp--get-flymake-diagnostics ()
+  "Get flymake diagnostics for the current buffer as a list of plists."
+  (when (bound-and-true-p flymake-mode)
+    (mapcar (lambda (diag)
+              (list :line (line-number-at-pos (flymake-diagnostic-beg diag))
+                    :end-line (line-number-at-pos (flymake-diagnostic-end diag))
+                    :type (symbol-name (flymake-diagnostic-type diag))
+                    :message (flymake-diagnostic-text diag)))
+            (flymake-diagnostics))))
+
+(defun claude-mcp--format-diagnostics (diagnostics source)
+  "Format DIAGNOSTICS from SOURCE (flycheck/flymake) as a string."
+  (if (null diagnostics)
+      nil
+    (concat
+     (format "── %s ──\n" source)
+     (mapconcat
+      (lambda (diag)
+        (let ((line (plist-get diag :line))
+              (col (plist-get diag :column))
+              (level (or (plist-get diag :level) (plist-get diag :type)))
+              (msg (plist-get diag :message)))
+          (if col
+              (format "%d:%d [%s] %s" line col level msg)
+            (format "%d [%s] %s" line level msg))))
+      diagnostics
+      "\n"))))
+
+(defun claude-mcp-read-file-with-context (file-path &optional offset limit)
+  "Read FILE-PATH and return rich context including IDE diagnostics.
+Opens the file in a buffer if not already open to get live diagnostics.
+OFFSET is the line number to start reading from (1-indexed, default 1).
+LIMIT is the number of lines to read (default: all remaining lines).
+Returns a formatted string with metadata, diagnostics, and content."
+  (let* ((file-path (expand-file-name file-path))
+         (existing-buffer (get-file-buffer file-path))
+         (buffer (or existing-buffer
+                     (find-file-noselect file-path)))
+         (offset (or offset 1))
+         result)
+    (unwind-protect
+        (with-current-buffer buffer
+          ;; Give flycheck/flymake a moment to run if buffer was just opened
+          (unless existing-buffer
+            (run-hooks 'find-file-hook)
+            ;; Small delay for async checkers
+            (sit-for 0.5))
+
+          (let* ((flycheck-errors (claude-mcp--get-flycheck-errors))
+                 (flymake-diags (claude-mcp--get-flymake-diagnostics))
+                 (has-diagnostics (or flycheck-errors flymake-diags))
+                 (total-lines (count-lines (point-min) (point-max)))
+                 ;; Calculate the range of lines to include
+                 (start-line (max 1 offset))
+                 (end-line (if limit
+                               (min total-lines (+ start-line limit -1))
+                             total-lines))
+                 ;; Get content for the specified range
+                 (content (save-excursion
+                            (goto-char (point-min))
+                            (forward-line (1- start-line))
+                            (let ((start-pos (point)))
+                              (forward-line (1+ (- end-line start-line)))
+                              (buffer-substring-no-properties start-pos (point)))))
+                 ;; Calculate width needed for line numbers
+                 (max-line-width (length (number-to-string end-line))))
+
+            ;; Build the result string - compact format like Read tool
+            (setq result
+                  (concat
+                   ;; Diagnostics section (filter to visible range if limited)
+                   (when has-diagnostics
+                     (let* ((visible-flycheck
+                             (when flycheck-errors
+                               (if limit
+                                   (seq-filter (lambda (err)
+                                                 (let ((line (plist-get err :line)))
+                                                   (and (>= line start-line)
+                                                        (<= line end-line))))
+                                               flycheck-errors)
+                                 flycheck-errors)))
+                            (visible-flymake
+                             (when flymake-diags
+                               (if limit
+                                   (seq-filter (lambda (diag)
+                                                 (let ((line (plist-get diag :line)))
+                                                   (and (>= line start-line)
+                                                        (<= line end-line))))
+                                               flymake-diags)
+                                 flymake-diags)))
+                            (has-visible (or visible-flycheck visible-flymake)))
+                       (when has-visible
+                         (concat
+                          (or (claude-mcp--format-diagnostics visible-flycheck "Flycheck") "")
+                          (when (and visible-flycheck visible-flymake) "\n")
+                          (or (claude-mcp--format-diagnostics visible-flymake "Flymake") "")
+                          "\n\n"))))
+
+                   ;; Content with line numbers - compact format matching Read tool
+                   (let ((lines (split-string content "\n" t))
+                         (line-num start-line)
+                         (numbered-lines '()))
+                     (dolist (line lines)
+                       (push (format (format "%%%dd→%%s" max-line-width) line-num line)
+                             numbered-lines)
+                       (setq line-num (1+ line-num)))
+                     (string-join (nreverse numbered-lines) "\n"))))))
+
+      ;; Clean up: kill buffer if we opened it
+      (unless existing-buffer
+        (kill-buffer buffer)))
+
+    result))
+
+(claude-mcp-deftool read-file-with-diagnostics
+  "Read a file and return rich context including IDE diagnostics from flycheck/flymake. Opens the file in an Emacs buffer to get live error/warning information. Use this instead of the regular Read tool when you want to see syntax errors, type errors, linting issues, etc. Supports offset and limit for reading specific portions of large files."
+  :function #'claude-mcp-read-file-with-context
+  :safe t
+  :args ((file-path string :required "Path to the file to read")
+         (offset integer "Line number to start reading from (1-indexed, default: 1)")
+         (limit integer "Number of lines to read (default: all remaining lines)")))
+
 ;;;; REPL Integration
 
 (defun claude-mcp-send-to-eat-terminal (buffer-name text)
