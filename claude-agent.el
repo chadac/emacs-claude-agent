@@ -82,6 +82,36 @@ Requires the Emacs server to be running (`server-start')."
   "Face for thinking indicator."
   :group 'claude-agent)
 
+(defface claude-agent-progress-face
+  '((t :foreground "#61afef"))
+  "Face for progress indicators."
+  :group 'claude-agent)
+
+(defface claude-agent-progress-header-face
+  '((t :foreground "#5c6370" :slant italic))
+  "Face for progress section header."
+  :group 'claude-agent)
+
+(defface claude-agent-compacting-face
+  '((t :foreground "#e5c07b" :weight bold :slant italic))
+  "Face for compacting indicator (yellow/warning color)."
+  :group 'claude-agent)
+
+(defface claude-agent-todo-pending-face
+  '((t :foreground "#5c6370"))
+  "Face for pending todo items."
+  :group 'claude-agent)
+
+(defface claude-agent-todo-in-progress-face
+  '((t :foreground "#61afef" :weight bold))
+  "Face for in-progress todo items."
+  :group 'claude-agent)
+
+(defface claude-agent-todo-completed-face
+  '((t :foreground "#98c379" :strike-through t))
+  "Face for completed todo items."
+  :group 'claude-agent)
+
 (defface claude-agent-error-face
   '((t :foreground "#e06c75" :weight bold))
   "Face for error messages."
@@ -196,6 +226,26 @@ Each element is an alist with keys: name, status.")
 (defvar-local claude-agent--output-tokens 0
   "Output token count for current turn.")
 
+;;;; Buffer-local variables - Progress indicators
+
+(defvar-local claude-agent--progress-indicators nil
+  "Hash table of active progress indicators.
+Keys are progress IDs, values are plists with :message and :start-time.")
+
+(defvar-local claude-agent--progress-visible t
+  "Whether the progress section is visible.")
+
+(defvar-local claude-agent--compacting nil
+  "Non-nil when the conversation is being compacted.
+This is set when Claude is summarizing the conversation history.")
+
+(defvar-local claude-agent--todos-visible t
+  "Whether the todo list section is visible.")
+
+(defvar-local claude-agent--todos nil
+  "List of current todo items.
+Each item is an alist with keys: content, status, activeForm.")
+
 (defvar-local claude-agent--has-conversation nil
   "Non-nil if conversation has started (first message sent).")
 
@@ -208,6 +258,9 @@ Each entry is (MARKER . RESULT-STRING).")
 
 (defvar-local claude-agent--placeholder-overlay nil
   "Overlay for the placeholder text in empty input area.")
+
+(defvar-local claude-agent--work-dir nil
+  "The working directory for this Claude session.")
 
 (defconst claude-agent--placeholder-text "Enter your message... (C-c C-c to send)"
   "Placeholder text shown when input area is empty.")
@@ -691,7 +744,70 @@ Called by `render-dynamic-section'. Assumes point is positioned correctly."
                       claude-agent--thinking-status
                       elapsed
                       tokens))
-      (claude-agent--apply-face start (point) 'claude-agent-thinking-face)))
+      (claude-agent--apply-face start (point)
+                                (if claude-agent--compacting
+                                    'claude-agent-compacting-face
+                                  'claude-agent-thinking-face))))
+
+  ;; === Compacting indicator (standalone, when not also thinking) ===
+  (when (and claude-agent--compacting (not claude-agent--thinking-status))
+    (let ((start (point))
+          (spinner (nth claude-agent--spinner-index
+                        claude-agent--spinner-frames)))
+      (insert (format "\n%s 📦 Compacting conversation...\n" spinner))
+      (claude-agent--apply-face start (point) 'claude-agent-compacting-face)))
+
+  ;; === Progress indicators (if any and visible) ===
+  (when (and claude-agent--progress-indicators
+             claude-agent--progress-visible
+             (> (hash-table-count claude-agent--progress-indicators) 0))
+    (maphash
+     (lambda (_id info)
+       (let* ((label (plist-get info :label))
+              (percent (or (plist-get info :percent) 0))
+              (start-time (plist-get info :start-time))
+              (elapsed (if start-time
+                           (claude-agent--format-elapsed-time start-time)
+                         ""))
+              (bar-width 30)
+              (filled (round (* bar-width (/ (min (max percent 0) 100.0) 100.0))))
+              (empty (- bar-width filled)))
+         ;; Insert label with percentage and elapsed time
+         (let ((start (point)))
+           (insert (format "\n  %s (%d%%) %s\n"
+                           (or label "Working...")
+                           (round percent)
+                           elapsed))
+           (claude-agent--apply-face start (point) 'claude-agent-progress-face))
+         ;; Insert progress bar
+         (let ((start (point)))
+           (insert (format "  ▐%s%s▌\n"
+                           (make-string filled ?█)
+                           (make-string empty ?░)))
+           (claude-agent--apply-face start (point) 'claude-agent-progress-face))))
+     claude-agent--progress-indicators))
+
+  ;; === Todo list (if any and visible) ===
+  (when (and claude-agent--todos claude-agent--todos-visible)
+    (insert "\n")
+    (dolist (todo claude-agent--todos)
+      (let* ((content (cdr (assq 'content todo)))
+             (status (cdr (assq 'status todo)))
+             (active-form (cdr (assq 'activeForm todo)))
+             (checkbox (pcase status
+                         ("completed" "[X]")
+                         ("in_progress" "[-]")
+                         (_ "[ ]")))
+             (face (pcase status
+                     ("completed" 'claude-agent-todo-completed-face)
+                     ("in_progress" 'claude-agent-todo-in-progress-face)
+                     (_ 'claude-agent-todo-pending-face)))
+             (text (if (equal status "in_progress")
+                       (or active-form content)
+                     content))
+             (start (point)))
+        (insert (format "  - %s %s\n" checkbox text))
+        (claude-agent--apply-face start (point) face))))
 
   ;; === Queued messages (if any) ===
   (when claude-agent--message-queue
@@ -1185,7 +1301,31 @@ If VIRTUAL-INDENT is non-nil, apply it as line-prefix/wrap-prefix."
      (when-let ((cost (cdr (assq 'cost_usd msg))))
        (setq claude-agent--session-info
              (plist-put claude-agent--session-info :cost cost)))
+     ;; Clear compacting status on result
+     (setq claude-agent--compacting nil)
      (claude-agent--render-dynamic-section))
+
+    ;; Compacting - conversation is being summarized
+    ("compacting"
+     (let ((status (cdr (assq 'status msg))))
+       (if (equal status "start")
+           (progn
+             (setq claude-agent--compacting t)
+             (claude-agent--append-to-log
+              "\n📦 Compacting conversation history...\n"
+              'claude-agent-compacting-face))
+         ;; status is "end" or similar
+         (setq claude-agent--compacting nil))
+       (claude-agent--render-dynamic-section)))
+
+    ;; Todo update - update todo list display
+    ("todo_update"
+     (let ((todos (cdr (assq 'todos msg))))
+       ;; Convert vector to list if needed (JSON arrays come as vectors)
+       (setq claude-agent--todos (if (vectorp todos)
+                                     (append todos nil)
+                                   todos))
+       (claude-agent--render-dynamic-section)))
 
     ;; MCP status
     ("mcp_status"
@@ -1987,7 +2127,8 @@ Optional CONTINUE-SESSION, if non-nil, continues the most recent session."
       (setq claude-agent--parse-state nil
             claude-agent--pending-output ""
             claude-agent--session-info nil
-            claude-agent--has-conversation nil))
+            claude-agent--has-conversation nil
+            claude-agent--work-dir expanded-dir))
 
     ;; Start process with optional resume/continue
     (let ((proc (claude-agent--start-process expanded-dir buf resume-session continue-session)))
@@ -2101,6 +2242,38 @@ Sends /clear as a message to Claude."
         (message "Clearing conversation..."))
     (message "No active Claude session")))
 
+(defun claude-agent-restart ()
+  "Restart the Claude session, continuing the same conversation.
+Kills the current process and starts a new one with --continue.
+This reloads the MCP server and Python agent while preserving the session."
+  (interactive)
+  (claude-agent--in-base-buffer
+   (unless claude-agent--work-dir
+     (error "No work directory set for this session"))
+   (let ((work-dir claude-agent--work-dir)
+         (buf (current-buffer)))
+     ;; Kill existing process
+     (when (and claude-agent--process (process-live-p claude-agent--process))
+       (delete-process claude-agent--process))
+     ;; Clean up MCP config file if it exists
+     (when (and claude-agent--mcp-config-file
+                (file-exists-p claude-agent--mcp-config-file))
+       (delete-file claude-agent--mcp-config-file))
+     ;; Reset state but keep conversation markers
+     (setq claude-agent--process nil
+           claude-agent--mcp-config-file nil
+           claude-agent--thinking-status nil
+           claude-agent--progress-indicators nil)
+     ;; Append restart message to log
+     (claude-agent--append-to-log
+      "\n⟳ Restarting session...\n"
+      'claude-agent-session-face)
+     ;; Start new process with --continue to resume the session
+     (let ((proc (claude-agent--start-process work-dir buf nil t)))
+       (setq claude-agent--process proc))
+     (claude-agent--render-dynamic-section)
+     (message "Session restarted, MCP server reloaded."))))
+
 (defun claude-agent-show-cost ()
   "Show token usage and cost for current session."
   (interactive)
@@ -2113,6 +2286,63 @@ Sends /clear as a message to Claude."
                  (or input "?")
                  (or output "?")))
     (message "No session info available")))
+
+;;;; Progress indicator management
+
+(defun claude-agent-toggle-progress ()
+  "Toggle visibility of progress indicators."
+  (interactive)
+  (setq claude-agent--progress-visible (not claude-agent--progress-visible))
+  (claude-agent--render-dynamic-section)
+  (message "Progress indicators %s" (if claude-agent--progress-visible "shown" "hidden")))
+
+(defun claude-agent-toggle-todos ()
+  "Toggle visibility of todo list."
+  (interactive)
+  (setq claude-agent--todos-visible (not claude-agent--todos-visible))
+  (claude-agent--render-dynamic-section)
+  (message "Todo list %s" (if claude-agent--todos-visible "shown" "hidden")))
+
+(defun claude-agent-progress-start (label &optional id percent)
+  "Start a progress indicator with LABEL at PERCENT (default 0).
+Returns the progress ID. Optional ID allows specifying a custom identifier."
+  (unless claude-agent--progress-indicators
+    (setq claude-agent--progress-indicators (make-hash-table :test 'equal)))
+  (let ((progress-id (or id (format "progress-%s" (format-time-string "%s%N"))))
+        (pct (or percent 0)))
+    (puthash progress-id
+             (list :label label
+                   :percent (if (numberp pct) pct (string-to-number pct))
+                   :start-time (current-time))
+             claude-agent--progress-indicators)
+    (claude-agent--render-dynamic-section)
+    progress-id))
+
+(defun claude-agent-progress-update (id &optional label percent)
+  "Update progress indicator ID.
+LABEL updates the text label (nil keeps current).
+PERCENT sets progress 0-100 (nil keeps current)."
+  (when (and claude-agent--progress-indicators
+             (gethash id claude-agent--progress-indicators))
+    (let ((info (gethash id claude-agent--progress-indicators)))
+      (when label
+        (plist-put info :label label))
+      (when percent
+        (plist-put info :percent (if (numberp percent) percent (string-to-number percent))))
+      (puthash id info claude-agent--progress-indicators))
+    (claude-agent--render-dynamic-section))
+  id)
+
+(defun claude-agent-progress-stop (id &optional final-message)
+  "Stop progress indicator ID.
+Optional FINAL-MESSAGE is displayed briefly in the echo area."
+  (when (and claude-agent--progress-indicators
+             (gethash id claude-agent--progress-indicators))
+    (remhash id claude-agent--progress-indicators)
+    (claude-agent--render-dynamic-section)
+    (when final-message
+      (message "✓ %s" final-message)))
+  "stopped")
 
 (defun claude-agent--model-description ()
   "Return a description of the current model for transient."
@@ -2158,6 +2388,15 @@ Press 'i' or RET in the log area to jump to input."
     ("C" "Clear history" claude-agent-clear)
     ("q" "Quit session" claude-agent-quit)
     ("k" "Interrupt" claude-agent-interrupt)]
+   ["View"
+    ("p" "Toggle progress" claude-agent-toggle-progress
+     :description (lambda () (concat "Progress "
+                                     (propertize (if claude-agent--progress-visible "visible" "hidden")
+                                                 'face 'transient-value))))
+    ("t" "Toggle todos" claude-agent-toggle-todos
+     :description (lambda () (concat "Todos "
+                                     (propertize (if claude-agent--todos-visible "visible" "hidden")
+                                                 'face 'transient-value))))]
    ["Navigation"
     ("i" "Go to input" claude-agent-goto-input)
     ("RET" "Go to input" claude-agent-goto-input)]])

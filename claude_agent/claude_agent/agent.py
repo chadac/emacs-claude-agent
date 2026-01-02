@@ -533,8 +533,26 @@ class ClaudeAgent:
                 msg_type = type(msg).__name__
 
                 if msg_type == "SystemMessage":
-                    # Init message with model and session info
+                    # Check subtype for special handling
+                    subtype = getattr(msg, "subtype", None)
                     data = getattr(msg, "data", {})
+
+                    # Handle compacting notification
+                    if subtype and "compact" in subtype.lower():
+                        self._emit({
+                            "type": "compacting",
+                            "status": "start",
+                            "subtype": subtype,
+                        })
+                        self._emit({
+                            "type": "thinking",
+                            "status": "Compacting conversation...",
+                        })
+                    # Handle other system message subtypes
+                    elif subtype:
+                        self._log_json("SYSTEM_SUBTYPE", {"subtype": subtype, "data": data})
+
+                    # Init message with model and session info
                     model = data.get("model")
                     session_id = data.get("session_id")
                     if model or session_id:
@@ -588,6 +606,13 @@ class ClaudeAgent:
                                     "type": "write_tool",
                                     "file_path": tool_input.get("file_path", ""),
                                     "content": tool_input.get("content", ""),
+                                })
+                            # Special handling for TodoWrite - emit todo list
+                            elif tool_name == "TodoWrite":
+                                todos = tool_input.get("todos", [])
+                                self._emit({
+                                    "type": "todo_update",
+                                    "todos": todos,
                                 })
                             else:
                                 # Emit tool call

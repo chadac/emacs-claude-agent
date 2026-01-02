@@ -1778,96 +1778,101 @@ Returns the selected directory path or \"cancelled\" if user cancels."
 ;;
 ;; Updatable progress messages for long operations.
 
-(defvar claude-mcp--progress-indicators (make-hash-table :test 'equal)
-  "Hash table storing active progress indicators by ID.")
+(defun claude-mcp--find-claude-buffer ()
+  "Find the Claude agent buffer for the current session.
+Uses CLAUDE_AGENT_BUFFER_NAME env var if set, otherwise searches for *claude:* buffers."
+  (or (when-let ((name (getenv "CLAUDE_AGENT_BUFFER_NAME")))
+        (get-buffer name))
+      ;; Fallback: find any claude buffer
+      (cl-find-if (lambda (buf)
+                    (string-match-p "^\\*claude:" (buffer-name buf)))
+                  (buffer-list))))
 
-(defface claude-mcp-progress-face
-  '((t :foreground "#61afef" :weight bold))
-  "Face for progress indicator messages.")
-
-(defface claude-mcp-progress-spinner-face
-  '((t :foreground "#c678dd"))
-  "Face for progress spinner.")
-
-(defvar claude-mcp--spinner-frames '("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
-  "Spinner animation frames.")
-
-(defun claude-mcp-progress-start (message &optional id)
-  "Start a progress indicator with MESSAGE.
+(defun claude-mcp-progress-start (message &optional id percent)
+  "Start a progress indicator with MESSAGE as label in the Claude buffer.
 Returns the progress ID which can be used to update or stop it.
-Optional ID allows specifying a custom identifier."
-  (let* ((progress-id (or id (format "progress-%s" (format-time-string "%s%N"))))
-         (overlay (make-overlay (point-min) (point-min))))
-    ;; Store progress info
-    (puthash progress-id
-             (list :message message
-                   :overlay overlay
-                   :frame 0
-                   :timer nil)
-             claude-mcp--progress-indicators)
-    ;; Display in echo area
-    (message "[%s] %s" (nth 0 claude-mcp--spinner-frames) message)
-    ;; Start animation timer
-    (let ((timer (run-with-timer 0.1 0.1
-                                 (lambda ()
-                                   (when-let ((info (gethash progress-id claude-mcp--progress-indicators)))
-                                     (let* ((frame (1+ (plist-get info :frame)))
-                                            (frame-idx (mod frame (length claude-mcp--spinner-frames)))
-                                            (spinner (nth frame-idx claude-mcp--spinner-frames))
-                                            (msg (plist-get info :message)))
-                                       (plist-put info :frame frame)
-                                       (message "[%s] %s" spinner msg)))))))
-      (plist-put (gethash progress-id claude-mcp--progress-indicators) :timer timer))
-    progress-id))
+Optional ID allows specifying a custom identifier.
+Optional PERCENT sets initial progress (default 0)."
+  (if-let ((buf (claude-mcp--find-claude-buffer)))
+      (with-current-buffer buf
+        (claude-agent-progress-start message id percent))
+    ;; Fallback to echo area if no Claude buffer
+    (let* ((progress-id (or id (format "progress-%s" (format-time-string "%s%N"))))
+           (pct (or percent 0))
+           (filled (round (* 10 (/ (min pct 100.0) 100.0))))
+           (empty (- 10 filled)))
+      (message "[▐%s%s▌] %s (%d%%)"
+               (make-string filled ?█)
+               (make-string empty ?░)
+               message
+               (round pct))
+      progress-id)))
 
-(defun claude-mcp-progress-update (id message)
-  "Update progress indicator ID with new MESSAGE."
-  (when-let ((info (gethash id claude-mcp--progress-indicators)))
-    (plist-put info :message message)
-    (let* ((frame (plist-get info :frame))
-           (frame-idx (mod frame (length claude-mcp--spinner-frames)))
-           (spinner (nth frame-idx claude-mcp--spinner-frames)))
-      (message "[%s] %s" spinner message)))
+(defun claude-mcp-progress-update (id message &optional percent)
+  "Update progress indicator ID with new MESSAGE and optional PERCENT (0-100)."
+  (if-let ((buf (claude-mcp--find-claude-buffer)))
+      (with-current-buffer buf
+        (claude-agent-progress-update id message percent))
+    ;; Fallback to echo area
+    (let* ((pct (or percent 0))
+           (filled (round (* 10 (/ (min pct 100.0) 100.0))))
+           (empty (- 10 filled)))
+      (message "[▐%s%s▌] %s (%d%%)"
+               (make-string filled ?█)
+               (make-string empty ?░)
+               message
+               (round pct))))
   id)
 
 (defun claude-mcp-progress-stop (id &optional final-message)
   "Stop progress indicator ID.
 Optional FINAL-MESSAGE is displayed briefly."
-  (when-let ((info (gethash id claude-mcp--progress-indicators)))
-    ;; Cancel timer
-    (when-let ((timer (plist-get info :timer)))
-      (cancel-timer timer))
-    ;; Remove overlay if any
-    (when-let ((overlay (plist-get info :overlay)))
-      (delete-overlay overlay))
-    ;; Show final message
-    (if final-message
-        (message "✓ %s" final-message)
-      (message nil))
-    ;; Clean up
-    (remhash id claude-mcp--progress-indicators))
+  (if-let ((buf (claude-mcp--find-claude-buffer)))
+      (with-current-buffer buf
+        (claude-agent-progress-stop id final-message))
+    ;; Fallback to echo area
+    (when final-message
+      (message "✓ %s" final-message)))
   "stopped")
 
 (claude-mcp-deftool progress-start
-  "Start a progress indicator with a spinner animation. Returns a progress ID that can be used to update or stop the indicator. Use this for long-running operations to provide feedback to the user."
+  "Start a progress indicator with an animated bar. Returns a progress ID that can be used to update or stop the indicator. Use this for long-running operations to provide feedback to the user."
   :function #'claude-mcp-progress-start
   :safe t
-  :args ((message string :required "The progress message to display")
+  :args ((message string :required "The progress message/label to display")
          (id string "Optional custom identifier for the progress indicator")))
 
 (claude-mcp-deftool progress-update
-  "Update an existing progress indicator with a new message. The spinner animation continues."
+  "Update an existing progress indicator with a new message and optional percentage."
   :function #'claude-mcp-progress-update
   :safe t
   :args ((id string :required "The progress indicator ID returned by progress-start")
-         (message string :required "The new progress message")))
+         (message string :required "The new progress message/label")
+         (percent number "Optional progress percentage 0-100. If provided, shows a filled bar.")))
 
 (claude-mcp-deftool progress-stop
   "Stop a progress indicator. Optionally display a final completion message."
   :function #'claude-mcp-progress-stop
   :safe t
   :args ((id string :required "The progress indicator ID to stop")
-         (final-message string "Optional final message to display (prefixed with ✓)")))
+         (final_message string "Optional final message to display (prefixed with ✓)")))
+
+;;;; Session Control
+
+(defun claude-mcp-restart-session ()
+  "Restart the Claude session to reload the MCP server and Python agent.
+The conversation will be continued from where it left off."
+  (if-let ((buf (claude-mcp--find-claude-buffer)))
+      (with-current-buffer buf
+        (claude-agent-restart)
+        "Session restarting... MCP server will be reloaded.")
+    "No Claude buffer found"))
+
+(claude-mcp-deftool restart-session
+  "Restart the Claude session to reload the MCP server and Python agent. Use this after making changes to elisp files that need to be picked up by the MCP server. The conversation will be continued from where it left off."
+  :function #'claude-mcp-restart-session
+  :safe t
+  :args ())
 
 (provide 'claude-mcp)
 ;;; claude-mcp.el ends here
