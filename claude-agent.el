@@ -787,27 +787,33 @@ Called by `render-dynamic-section'. Assumes point is positioned correctly."
            (claude-agent--apply-face start (point) 'claude-agent-progress-face))))
      claude-agent--progress-indicators))
 
-  ;; === Todo list (if any and visible) ===
-  (when (and claude-agent--todos claude-agent--todos-visible)
-    (insert "\n")
-    (dolist (todo claude-agent--todos)
-      (let* ((content (cdr (assq 'content todo)))
-             (status (cdr (assq 'status todo)))
-             (active-form (cdr (assq 'activeForm todo)))
-             (checkbox (pcase status
-                         ("completed" "[X]")
-                         ("in_progress" "[-]")
-                         (_ "[ ]")))
-             (face (pcase status
-                     ("completed" 'claude-agent-todo-completed-face)
-                     ("in_progress" 'claude-agent-todo-in-progress-face)
-                     (_ 'claude-agent-todo-pending-face)))
-             (text (if (equal status "in_progress")
-                       (or active-form content)
-                     content))
-             (start (point)))
-        (insert (format "  - %s %s\n" checkbox text))
-        (claude-agent--apply-face start (point) face))))
+  ;; === Todo list (if any active and visible) ===
+  ;; Hide when all todos are completed
+  (let ((has-active-todos (and claude-agent--todos
+                               (seq-some (lambda (todo)
+                                           (let ((status (cdr (assq 'status todo))))
+                                             (not (equal status "completed"))))
+                                         claude-agent--todos))))
+    (when (and has-active-todos claude-agent--todos-visible)
+      (insert "\n")
+      (dolist (todo claude-agent--todos)
+        (let* ((content (cdr (assq 'content todo)))
+               (status (cdr (assq 'status todo)))
+               (active-form (cdr (assq 'activeForm todo)))
+               (checkbox (pcase status
+                           ("completed" "[X]")
+                           ("in_progress" "[-]")
+                           (_ "[ ]")))
+               (face (pcase status
+                       ("completed" 'claude-agent-todo-completed-face)
+                       ("in_progress" 'claude-agent-todo-in-progress-face)
+                       (_ 'claude-agent-todo-pending-face)))
+               (text (if (equal status "in_progress")
+                         (or active-form content)
+                       content))
+               (start (point)))
+          (insert (format "  - %s %s\n" checkbox text))
+          (claude-agent--apply-face start (point) face)))))
 
   ;; === Queued messages (if any) ===
   (when claude-agent--message-queue
