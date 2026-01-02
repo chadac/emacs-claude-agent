@@ -113,35 +113,34 @@ def get_session_cwd() -> str | None:
 
 
 def get_socket_path() -> str:
-    """Determine the Emacs server socket path.
+    """Get the Emacs server socket path from environment.
 
-    Checks in order:
-    1. CLAUDE_AGENT_SOCKET env var (set by claudemacs.el)
-    2. EMACS_SERVER_FILE env var
-    3. XDG runtime dir: /run/user/$UID/emacs/server
-    4. Legacy: ~/.emacs.d/server/server
+    The CLAUDE_AGENT_SOCKET environment variable MUST be set by the MCP config.
+    This is typically configured when starting Claude Code from Emacs via
+    `update-config.py` or set in the MCP server configuration.
+
+    Raises:
+        RuntimeError: If CLAUDE_AGENT_SOCKET is not set.
     """
-    if socket := os.environ.get('CLAUDE_AGENT_SOCKET'):
-        return socket
-    if server_file := os.environ.get('EMACS_SERVER_FILE'):
-        return server_file
-
-    # Try XDG runtime directory (common on Linux)
-    xdg_runtime = os.environ.get('XDG_RUNTIME_DIR')
-    if xdg_runtime:
-        xdg_socket = os.path.join(xdg_runtime, 'emacs', 'server')
-        if os.path.exists(xdg_socket):
-            return xdg_socket
-
-    # Try /run/user/$UID/emacs/server
-    uid = os.getuid()
-    run_socket = f'/run/user/{uid}/emacs/server'
-    if os.path.exists(run_socket):
-        return run_socket
-
-    # Legacy fallback
-    emacs_dir = os.path.expanduser('~/.emacs.d')
-    return os.path.join(emacs_dir, 'server', 'server')
+    socket = os.environ.get('CLAUDE_AGENT_SOCKET')
+    if not socket:
+        raise RuntimeError(
+            "CLAUDE_AGENT_SOCKET environment variable is not set.\n\n"
+            "The MCP server requires the Emacs socket path to be configured.\n"
+            "Please ensure your MCP config includes the socket path in the env section:\n\n"
+            '  "claudemacs": {\n'
+            '    "command": "/path/to/python",\n'
+            '    "args": ["-m", "emacs_mcp.server"],\n'
+            '    "env": {\n'
+            '      "CLAUDE_AGENT_SOCKET": "/run/user/1000/emacs/server"\n'
+            '    }\n'
+            '  }\n\n'
+            "You can run `python -m emacs_mcp.update-config` from Emacs to generate\n"
+            "the correct configuration, or manually set the socket path.\n\n"
+            "To find your Emacs socket path, run in Emacs:\n"
+            "  (expand-file-name server-name server-socket-dir)"
+        )
+    return socket
 
 
 def call_emacs(elisp_expr: str, socket: str | None = None, timeout: int = 30) -> str:
@@ -179,10 +178,17 @@ def unescape_elisp_string(s: str) -> str:
     """Unescape an elisp string result.
 
     Removes surrounding quotes and unescapes special characters.
+    Order matters: must handle \\\\ before \\n etc, otherwise \\\\n becomes \\<newline>
     """
     if s.startswith('"') and s.endswith('"'):
         s = s[1:-1]
-    return s.replace('\\n', '\n').replace('\\"', '"').replace('\\\\', '\\')
+    # Use placeholder for escaped backslashes to avoid double-processing
+    s = s.replace('\\\\', '\x00')
+    s = s.replace('\\"', '"')
+    s = s.replace('\\n', '\n')
+    s = s.replace('\\t', '\t')
+    s = s.replace('\x00', '\\')
+    return s
 
 
 async def call_emacs_async(elisp_expr: str, socket: str | None = None, timeout: int = 30) -> str:

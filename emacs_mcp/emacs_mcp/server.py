@@ -126,12 +126,25 @@ def load_tools() -> dict:
     # Query Emacs for registered tools
     result = lib.call_emacs("(claude-mcp-export-tools)")
 
-    # emacsclient returns JSON wrapped in quotes: "{\\"tool\\":...}"
-    # Strip outer quotes and unescape
-    if result.startswith('"') and result.endswith('"'):
-        result = result[1:-1].replace('\\"', '"').replace('\\n', '\n')
+    # emacsclient returns elisp string representation, unescape it
+    result = lib.unescape_elisp_string(result)
 
-    TOOL_DEFS = json.loads(result)
+    try:
+        TOOL_DEFS = json.loads(result)
+    except json.JSONDecodeError as e:
+        # Provide helpful error context for debugging
+        context_start = max(0, e.pos - 50)
+        context_end = min(len(result), e.pos + 50)
+        context = result[context_start:context_end]
+        pointer = " " * min(50, e.pos - context_start) + "^"
+        raise RuntimeError(
+            f"Failed to parse tools JSON from Emacs:\n"
+            f"  Error: {e.msg} at position {e.pos}\n"
+            f"  Context: {repr(context)}\n"
+            f"           {pointer}\n"
+            f"  Hint: Check for unescaped special characters in tool descriptions"
+        ) from e
+
     print(f"Loaded {len(TOOL_DEFS)} tools from Emacs registry", file=sys.stderr, flush=True)
 
     return TOOL_DEFS
@@ -189,6 +202,58 @@ def escape_elisp_string(s: str) -> str:
     return s.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
 
 
+def format_elisp_value(value) -> str:
+    """Format a Python value as an elisp expression.
+
+    Handles strings, numbers, booleans, lists, and dicts (as alists).
+    """
+    if value is None:
+        return "nil"
+    elif isinstance(value, bool):
+        return "t" if value else "nil"
+    elif isinstance(value, (int, float)):
+        return str(value)
+    elif isinstance(value, str):
+        return f'"{escape_elisp_string(value)}"'
+    elif isinstance(value, list):
+        return format_elisp_list(value)
+    elif isinstance(value, dict):
+        return format_elisp_alist(value)
+    else:
+        return f'"{escape_elisp_string(str(value))}"'
+
+
+def format_elisp_list(items: list) -> str:
+    """Format a Python list as a quoted elisp list.
+
+    Handles nested lists and dicts (converted to alists).
+    Examples:
+        ["a", "b"] -> '("a" "b")
+        [{"key": "val"}] -> '((("key" . "val")))
+        [1, 2, 3] -> '(1 2 3)
+    """
+    if not items:
+        return "'()"
+    parts = [format_elisp_value(item) for item in items]
+    return f"'({' '.join(parts)})"
+
+
+def format_elisp_alist(obj: dict) -> str:
+    """Format a Python dict as an elisp alist.
+
+    Example:
+        {"name": "foo", "count": 42} -> (("name" . "foo") ("count" . 42))
+    """
+    if not obj:
+        return "nil"
+    pairs = []
+    for key, val in obj.items():
+        formatted_key = f'"{escape_elisp_string(str(key))}"'
+        formatted_val = format_elisp_value(val)
+        pairs.append(f"({formatted_key} . {formatted_val})")
+    return f"({' '.join(pairs)})"
+
+
 def substitute_variables(template: str, args: dict, arg_defs: dict) -> str:
     """Substitute variables in template string using {{var}} or $var syntax."""
     result = template
@@ -205,10 +270,9 @@ def substitute_variables(template: str, args: dict, arg_defs: dict) -> str:
         elif arg_type == "boolean":
             formatted_value = "t" if value else "nil"
         elif arg_type == "array":
-            # Handle array as elisp list
+            # Handle array as elisp list (supports nested dicts/lists)
             if isinstance(value, list):
-                items = [f'"{escape_elisp_string(str(v))}"' for v in value]
-                formatted_value = f"'({' '.join(items)})"
+                formatted_value = format_elisp_list(value)
             else:
                 formatted_value = "'()"
         else:
@@ -343,8 +407,7 @@ def build_elisp_call(elisp_fn: str, args: dict, arg_defs: dict) -> str:
             elif arg_type == "array":
                 # Handle array as elisp list
                 if isinstance(value, list):
-                    items = [f'"{escape_elisp_string(str(v))}"' for v in value]
-                    elisp_args.append(f"'({' '.join(items)})")
+                    elisp_args.append(format_elisp_list(value))
                 else:
                     elisp_args.append("'()")
             else:

@@ -856,11 +856,13 @@ This should be called during Claude startup to expose the CLI to Claude."
   (let ((cli-dir (file-name-directory (claude-mcp-get-cli-path))))
     ;; Add to PATH via setenv (affects child processes)
     (setenv "PATH" (concat cli-dir ":" (getenv "PATH")))
-    ;; Set CLAUDE_AGENT_SOCKET using the actual server-socket-dir
+    ;; Set CLAUDE_AGENT_SOCKET using the actual server-socket-dir and server-name
     (when (and (boundp 'server-socket-dir)
                server-socket-dir
+               (boundp 'server-name)
+               server-name
                (server-running-p))
-      (let ((socket-file (expand-file-name "server" server-socket-dir)))
+      (let ((socket-file (expand-file-name server-name server-socket-dir)))
         (when (file-exists-p socket-file)
           (setenv "CLAUDE_AGENT_SOCKET" socket-file))))))
 
@@ -1337,6 +1339,535 @@ Returns a list: (status result) where:
   :args ((title string :required "Title for the proposal (shown in header)")
          (content string :required "The proposal content to display")
          (mode string "Optional major mode for syntax highlighting (e.g., 'python-mode', 'org-mode')")))
+
+;;;; Confirmation Prompt
+;;
+;; Simple yes/no confirmation dialog using popup buffer.
+
+(defvar claude-mcp--confirm-result nil
+  "Stores the result of the current confirmation prompt.")
+
+(defvar-local claude-mcp--confirm-id nil
+  "Unique ID for the current confirmation prompt buffer.")
+
+(defvar claude-mcp--confirm-results (make-hash-table :test 'equal)
+  "Hash table storing confirmation results by ID.")
+
+(defvar claude-mcp-confirm-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "y") #'claude-mcp-confirm--yes)
+    (define-key map (kbd "Y") #'claude-mcp-confirm--yes)
+    (define-key map (kbd "n") #'claude-mcp-confirm--no)
+    (define-key map (kbd "N") #'claude-mcp-confirm--no)
+    (define-key map (kbd "RET") #'claude-mcp-confirm--yes)
+    (define-key map (kbd "q") #'claude-mcp-confirm--no)
+    (define-key map (kbd "C-g") #'claude-mcp-confirm--cancel)
+    map)
+  "Keymap for confirmation prompt buffer.")
+
+(define-derived-mode claude-mcp-confirm-mode special-mode "Confirm"
+  "Major mode for confirmation prompts."
+  :interactive nil
+  (setq buffer-read-only t
+        truncate-lines t))
+
+(with-eval-after-load 'evil
+  (evil-set-initial-state 'claude-mcp-confirm-mode 'emacs))
+
+(defun claude-mcp-confirm--yes ()
+  "Accept the confirmation."
+  (interactive)
+  (puthash claude-mcp--confirm-id "yes" claude-mcp--confirm-results)
+  (quit-window t)
+  (exit-recursive-edit))
+
+(defun claude-mcp-confirm--no ()
+  "Reject the confirmation."
+  (interactive)
+  (puthash claude-mcp--confirm-id "no" claude-mcp--confirm-results)
+  (quit-window t)
+  (exit-recursive-edit))
+
+(defun claude-mcp-confirm--cancel ()
+  "Cancel the confirmation."
+  (interactive)
+  (puthash claude-mcp--confirm-id "cancelled" claude-mcp--confirm-results)
+  (quit-window t)
+  (exit-recursive-edit))
+
+(defun claude-mcp-confirm (prompt)
+  "Ask user for yes/no confirmation with PROMPT.
+Returns \"yes\", \"no\", or \"cancelled\"."
+  (let* ((id (format "confirm-%s" (format-time-string "%s%N")))
+         (buf (get-buffer-create "*claude-confirm*")))
+    (with-current-buffer buf
+      (claude-mcp-confirm-mode)
+      (setq claude-mcp--confirm-id id)
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert "\n")
+        (insert (propertize "  Confirmation Required\n"
+                            'face '(:foreground "#e5c07b" :weight bold :height 1.3)))
+        (insert (propertize (concat "  " (make-string 50 ?─) "\n\n")
+                            'face '(:foreground "#5c6370")))
+        (insert (propertize (concat "  " prompt "\n\n")
+                            'face '(:foreground "#abb2bf" :height 1.1)))
+        (insert (propertize "  " 'face 'default))
+        (insert (propertize "[y]" 'face '(:foreground "#98c379" :weight bold)))
+        (insert (propertize " Yes    " 'face '(:foreground "#abb2bf")))
+        (insert (propertize "[n]" 'face '(:foreground "#e06c75" :weight bold)))
+        (insert (propertize " No\n" 'face '(:foreground "#abb2bf")))
+        (goto-char (point-min))))
+    (pop-to-buffer buf '((display-buffer-below-selected)
+                         (window-height . fit-window-to-buffer)))
+    (recursive-edit)
+    ;; Return the result
+    (let ((result (gethash id claude-mcp--confirm-results)))
+      (remhash id claude-mcp--confirm-results)
+      (or result "cancelled"))))
+
+(claude-mcp-deftool confirm
+  "Ask the user for a simple yes/no confirmation. Displays a popup with [y] Yes / [n] No options. Returns 'yes', 'no', or 'cancelled'."
+  :function #'claude-mcp-confirm
+  :safe t
+  :args ((prompt string :required "The confirmation prompt to display")))
+
+;;;; Multi-Select Prompt
+;;
+;; Checkbox-style selection from a list of options.
+
+(defvar-local claude-mcp--multiselect-id nil
+  "Unique ID for the current multi-select buffer.")
+
+(defvar-local claude-mcp--multiselect-options nil
+  "List of options for the current multi-select.")
+
+(defvar-local claude-mcp--multiselect-selected nil
+  "Hash table of selected option indices.")
+
+(defvar-local claude-mcp--multiselect-first-line nil
+  "Line number of the first option.")
+
+(defvar claude-mcp--multiselect-results (make-hash-table :test 'equal)
+  "Hash table storing multi-select results by ID.")
+
+(defvar claude-mcp-multiselect-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "SPC") #'claude-mcp-multiselect--toggle)
+    (define-key map (kbd "x") #'claude-mcp-multiselect--toggle)
+    (define-key map (kbd "RET") #'claude-mcp-multiselect--confirm)
+    (define-key map (kbd "C-c C-c") #'claude-mcp-multiselect--confirm)
+    (define-key map (kbd "q") #'claude-mcp-multiselect--cancel)
+    (define-key map (kbd "C-g") #'claude-mcp-multiselect--cancel)
+    (define-key map (kbd "n") #'next-line)
+    (define-key map (kbd "p") #'previous-line)
+    (define-key map (kbd "j") #'next-line)
+    (define-key map (kbd "k") #'previous-line)
+    (define-key map (kbd "a") #'claude-mcp-multiselect--select-all)
+    (define-key map (kbd "u") #'claude-mcp-multiselect--unselect-all)
+    map)
+  "Keymap for multi-select buffer.")
+
+(define-derived-mode claude-mcp-multiselect-mode special-mode "MultiSelect"
+  "Major mode for multi-select prompts."
+  :interactive nil
+  (setq buffer-read-only t
+        truncate-lines t))
+
+(with-eval-after-load 'evil
+  (evil-set-initial-state 'claude-mcp-multiselect-mode 'emacs))
+
+(defun claude-mcp-multiselect--get-option-index ()
+  "Get the option index at the current line."
+  (let ((line (line-number-at-pos)))
+    (when (>= line claude-mcp--multiselect-first-line)
+      (- line claude-mcp--multiselect-first-line))))
+
+(defun claude-mcp-multiselect--refresh ()
+  "Refresh the display of checkboxes."
+  (let ((inhibit-read-only t)
+        (pos (point)))
+    (save-excursion
+      (goto-char (point-min))
+      (forward-line (1- claude-mcp--multiselect-first-line))
+      (dotimes (i (length claude-mcp--multiselect-options))
+        (let ((option (nth i claude-mcp--multiselect-options))
+              (selected (gethash i claude-mcp--multiselect-selected)))
+          (delete-region (line-beginning-position) (line-end-position))
+          (insert (propertize (if selected "  [x] " "  [ ] ")
+                              'face (if selected
+                                        '(:foreground "#98c379" :weight bold)
+                                      '(:foreground "#5c6370"))))
+          (insert (propertize option
+                              'face (if selected
+                                        '(:foreground "#98c379")
+                                      '(:foreground "#abb2bf"))))
+          (forward-line 1))))
+    (goto-char pos)))
+
+(defun claude-mcp-multiselect--toggle ()
+  "Toggle selection of the current option."
+  (interactive)
+  (let ((idx (claude-mcp-multiselect--get-option-index)))
+    (when (and idx (< idx (length claude-mcp--multiselect-options)))
+      (puthash idx (not (gethash idx claude-mcp--multiselect-selected))
+               claude-mcp--multiselect-selected)
+      (claude-mcp-multiselect--refresh)
+      (forward-line 1))))
+
+(defun claude-mcp-multiselect--select-all ()
+  "Select all options."
+  (interactive)
+  (dotimes (i (length claude-mcp--multiselect-options))
+    (puthash i t claude-mcp--multiselect-selected))
+  (claude-mcp-multiselect--refresh))
+
+(defun claude-mcp-multiselect--unselect-all ()
+  "Unselect all options."
+  (interactive)
+  (clrhash claude-mcp--multiselect-selected)
+  (claude-mcp-multiselect--refresh))
+
+(defun claude-mcp-multiselect--confirm ()
+  "Confirm the selection."
+  (interactive)
+  (let ((selected-items '()))
+    (dotimes (i (length claude-mcp--multiselect-options))
+      (when (gethash i claude-mcp--multiselect-selected)
+        (push (nth i claude-mcp--multiselect-options) selected-items)))
+    (puthash claude-mcp--multiselect-id (nreverse selected-items)
+             claude-mcp--multiselect-results)
+    (quit-window t)
+    (exit-recursive-edit)))
+
+(defun claude-mcp-multiselect--cancel ()
+  "Cancel the multi-select."
+  (interactive)
+  (puthash claude-mcp--multiselect-id 'cancelled claude-mcp--multiselect-results)
+  (quit-window t)
+  (exit-recursive-edit))
+
+(defun claude-mcp-multiselect (prompt options)
+  "Present OPTIONS with checkboxes under PROMPT.
+OPTIONS can be a newline-separated string or a list.
+Returns a list of selected items or \"cancelled\"."
+  (let* ((id (format "multiselect-%s" (format-time-string "%s%N")))
+         (options-list (if (stringp options)
+                           (split-string options "\n" t)
+                         (if (listp options) options (list options))))
+         (buf (get-buffer-create "*claude-multiselect*")))
+    (with-current-buffer buf
+      (claude-mcp-multiselect-mode)
+      (setq claude-mcp--multiselect-id id
+            claude-mcp--multiselect-options options-list
+            claude-mcp--multiselect-selected (make-hash-table :test 'equal))
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert "\n")
+        (insert (propertize (concat "  " prompt "\n")
+                            'face '(:foreground "#61afef" :weight bold :height 1.2)))
+        (insert (propertize (concat "  " (make-string 50 ?─) "\n")
+                            'face '(:foreground "#5c6370")))
+        (insert (propertize "  SPC/x toggle  |  a select all  |  u unselect all  |  RET confirm  |  q cancel\n\n"
+                            'face '(:foreground "#5c6370" :slant italic)))
+        (setq claude-mcp--multiselect-first-line (line-number-at-pos))
+        (let ((start-pos (point)))
+          (dolist (option options-list)
+            (insert (propertize "  [ ] " 'face '(:foreground "#5c6370")))
+            (insert (propertize (concat option "\n") 'face '(:foreground "#abb2bf"))))
+          (goto-char start-pos))))
+    (pop-to-buffer buf '((display-buffer-below-selected)
+                         (window-height . fit-window-to-buffer)))
+    (recursive-edit)
+    ;; Return the result
+    (let ((result (gethash id claude-mcp--multiselect-results)))
+      (remhash id claude-mcp--multiselect-results)
+      (if (eq result 'cancelled)
+          "cancelled"
+        (or result '())))))
+
+(claude-mcp-deftool multiselect
+  "Present a list of options with checkboxes for multi-selection. User can toggle items with SPC/x, select all with 'a', unselect all with 'u'. Returns a list of selected items or 'cancelled'."
+  :function #'claude-mcp-multiselect
+  :safe t
+  :args ((prompt string :required "The prompt to display above the options")
+         (options string :required "Newline-separated list of options")))
+
+;;;; File Picker
+;;
+;; Let user select a file from the project using popup buffer.
+
+(defvar-local claude-mcp--picker-id nil
+  "Unique ID for the current file picker buffer.")
+
+(defvar-local claude-mcp--picker-files nil
+  "List of files for the current picker.")
+
+(defvar-local claude-mcp--picker-directory nil
+  "Base directory for the current picker.")
+
+(defvar claude-mcp--picker-results (make-hash-table :test 'equal)
+  "Hash table storing file picker results by ID.")
+
+(defvar claude-mcp-file-picker-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "RET") #'claude-mcp-picker--select)
+    (define-key map (kbd "C-g") #'claude-mcp-picker--cancel)
+    (define-key map (kbd "q") #'claude-mcp-picker--cancel)
+    (define-key map (kbd "n") #'next-line)
+    (define-key map (kbd "p") #'previous-line)
+    (define-key map (kbd "j") #'next-line)
+    (define-key map (kbd "k") #'previous-line)
+    map)
+  "Keymap for file picker buffer.")
+
+(define-derived-mode claude-mcp-file-picker-mode special-mode "FilePicker"
+  "Major mode for file picker prompts."
+  :interactive nil
+  (setq buffer-read-only t
+        truncate-lines t))
+
+(with-eval-after-load 'evil
+  (evil-set-initial-state 'claude-mcp-file-picker-mode 'emacs))
+
+(defvar-local claude-mcp--picker-first-file-line nil
+  "Line number of the first file in the picker.")
+
+(defun claude-mcp-picker--select ()
+  "Select the file at point."
+  (interactive)
+  (let* ((current-line (line-number-at-pos))
+         (file-index (- current-line claude-mcp--picker-first-file-line))
+         (file (when (>= file-index 0)
+                 (nth file-index claude-mcp--picker-files))))
+    (if file
+        (progn
+          (puthash claude-mcp--picker-id
+                   (expand-file-name file claude-mcp--picker-directory)
+                   claude-mcp--picker-results)
+          (quit-window t)
+          (exit-recursive-edit))
+      (message "No file selected"))))
+
+(defun claude-mcp-picker--cancel ()
+  "Cancel the file picker."
+  (interactive)
+  (puthash claude-mcp--picker-id "cancelled" claude-mcp--picker-results)
+  (quit-window t)
+  (exit-recursive-edit))
+
+(defun claude-mcp-pick-file (&optional prompt directory)
+  "Let user pick a file with completion.
+PROMPT is the prompt to display (default: \"Select file: \").
+DIRECTORY is the starting directory (default: current project root or default-directory).
+Returns the selected file path or \"cancelled\" if user cancels."
+  (let* ((id (format "picker-%s" (format-time-string "%s%N")))
+         (prompt (or prompt "Select file"))
+         (dir (or directory
+                  (when (fboundp 'project-root)
+                    (when-let ((proj (project-current)))
+                      (project-root proj)))
+                  default-directory))
+         ;; Get project files if in a project, otherwise list directory
+         (files (if (and (fboundp 'project-current) (project-current))
+                    (mapcar (lambda (f) (file-relative-name f dir))
+                            (project-files (project-current)))
+                  (directory-files dir nil "^[^.]")))
+         (buf (get-buffer-create "*claude-file-picker*")))
+    (with-current-buffer buf
+      (claude-mcp-file-picker-mode)
+      (setq claude-mcp--picker-id id
+            claude-mcp--picker-files files
+            claude-mcp--picker-directory dir)
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (propertize (concat "  " prompt "\n")
+                            'face '(:foreground "#61afef" :weight bold :height 1.2)))
+        (insert (propertize (concat "  " dir "\n")
+                            'face '(:foreground "#5c6370")))
+        (insert (propertize (concat "  " (make-string 50 ?─) "\n")
+                            'face '(:foreground "#5c6370")))
+        (insert (propertize "  Use j/k or n/p to navigate, RET to select, q to cancel\n\n"
+                            'face '(:foreground "#5c6370" :slant italic)))
+        ;; Store where file list starts (line number)
+        (setq claude-mcp--picker-first-file-line (line-number-at-pos))
+        (let ((file-start (point)))
+          (dolist (file files)
+            (insert (propertize (concat "  " file "\n")
+                                'face '(:foreground "#abb2bf"))))
+          (goto-char file-start))))
+    (pop-to-buffer buf '((display-buffer-below-selected)
+                         (window-height . 20)))
+    (recursive-edit)
+    ;; Return the result
+    (let ((result (gethash id claude-mcp--picker-results)))
+      (remhash id claude-mcp--picker-results)
+      (or result "cancelled"))))
+
+(claude-mcp-deftool pick-file
+  "Show a file picker for user to select a file from the project. Lists project files in a popup buffer. Returns the selected file path or 'cancelled'."
+  :function #'claude-mcp-pick-file
+  :safe t
+  :args ((prompt string "Prompt to display (default: 'Select file')")
+         (directory string "Starting directory (default: project root)")))
+
+;;;; Directory Picker
+;;
+;; Let user select a directory using popup buffer.
+
+(defun claude-mcp-pick-directory (&optional prompt directory)
+  "Let user pick a directory with completion.
+PROMPT is the prompt to display (default: \"Select directory\").
+DIRECTORY is the starting directory (default: current project root or default-directory).
+Returns the selected directory path or \"cancelled\" if user cancels."
+  (let* ((id (format "picker-%s" (format-time-string "%s%N")))
+         (prompt (or prompt "Select directory"))
+         (dir (or directory
+                  (when (fboundp 'project-root)
+                    (when-let ((proj (project-current)))
+                      (project-root proj)))
+                  default-directory))
+         ;; Get only directories
+         (dirs (cl-remove-if-not
+                (lambda (f) (file-directory-p (expand-file-name f dir)))
+                (directory-files dir nil "^[^.]")))
+         (buf (get-buffer-create "*claude-file-picker*")))
+    (with-current-buffer buf
+      (claude-mcp-file-picker-mode)
+      (setq claude-mcp--picker-id id
+            claude-mcp--picker-files dirs
+            claude-mcp--picker-directory dir)
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (propertize (concat "  " prompt "\n")
+                            'face '(:foreground "#61afef" :weight bold :height 1.2)))
+        (insert (propertize (concat "  " dir "\n")
+                            'face '(:foreground "#5c6370")))
+        (insert (propertize (concat "  " (make-string 50 ?─) "\n")
+                            'face '(:foreground "#5c6370")))
+        (insert (propertize "  Use j/k or n/p to navigate, RET to select, q to cancel\n\n"
+                            'face '(:foreground "#5c6370" :slant italic)))
+        ;; Track where directories start (including ./ option)
+        (setq claude-mcp--picker-first-file-line (line-number-at-pos))
+        ;; Add option to select current directory
+        (let ((current-dir-start (point)))
+          (insert (propertize "  ./ (current directory)\n"
+                              'face '(:foreground "#98c379")))
+          (dolist (d dirs)
+            (insert (propertize (concat "  " d "/\n")
+                                'face '(:foreground "#abb2bf"))))
+          ;; Store dirs with ./ as first option
+          (setq claude-mcp--picker-files (cons "./" dirs))
+          (goto-char current-dir-start))))
+    (pop-to-buffer buf '((display-buffer-below-selected)
+                         (window-height . 15)))
+    (recursive-edit)
+    ;; Return the result
+    (let ((result (gethash id claude-mcp--picker-results)))
+      (remhash id claude-mcp--picker-results)
+      (or result "cancelled"))))
+
+(claude-mcp-deftool pick-directory
+  "Show a directory picker for user to select a directory. Lists subdirectories in a popup buffer. Returns the selected directory path or 'cancelled'."
+  :function #'claude-mcp-pick-directory
+  :safe t
+  :args ((prompt string "Prompt to display (default: 'Select directory')")
+         (directory string "Starting directory (default: project root)")))
+
+;;;; Progress Indicator
+;;
+;; Updatable progress messages for long operations.
+
+(defvar claude-mcp--progress-indicators (make-hash-table :test 'equal)
+  "Hash table storing active progress indicators by ID.")
+
+(defface claude-mcp-progress-face
+  '((t :foreground "#61afef" :weight bold))
+  "Face for progress indicator messages.")
+
+(defface claude-mcp-progress-spinner-face
+  '((t :foreground "#c678dd"))
+  "Face for progress spinner.")
+
+(defvar claude-mcp--spinner-frames '("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
+  "Spinner animation frames.")
+
+(defun claude-mcp-progress-start (message &optional id)
+  "Start a progress indicator with MESSAGE.
+Returns the progress ID which can be used to update or stop it.
+Optional ID allows specifying a custom identifier."
+  (let* ((progress-id (or id (format "progress-%s" (format-time-string "%s%N"))))
+         (overlay (make-overlay (point-min) (point-min))))
+    ;; Store progress info
+    (puthash progress-id
+             (list :message message
+                   :overlay overlay
+                   :frame 0
+                   :timer nil)
+             claude-mcp--progress-indicators)
+    ;; Display in echo area
+    (message "[%s] %s" (nth 0 claude-mcp--spinner-frames) message)
+    ;; Start animation timer
+    (let ((timer (run-with-timer 0.1 0.1
+                                 (lambda ()
+                                   (when-let ((info (gethash progress-id claude-mcp--progress-indicators)))
+                                     (let* ((frame (1+ (plist-get info :frame)))
+                                            (frame-idx (mod frame (length claude-mcp--spinner-frames)))
+                                            (spinner (nth frame-idx claude-mcp--spinner-frames))
+                                            (msg (plist-get info :message)))
+                                       (plist-put info :frame frame)
+                                       (message "[%s] %s" spinner msg)))))))
+      (plist-put (gethash progress-id claude-mcp--progress-indicators) :timer timer))
+    progress-id))
+
+(defun claude-mcp-progress-update (id message)
+  "Update progress indicator ID with new MESSAGE."
+  (when-let ((info (gethash id claude-mcp--progress-indicators)))
+    (plist-put info :message message)
+    (let* ((frame (plist-get info :frame))
+           (frame-idx (mod frame (length claude-mcp--spinner-frames)))
+           (spinner (nth frame-idx claude-mcp--spinner-frames)))
+      (message "[%s] %s" spinner message)))
+  id)
+
+(defun claude-mcp-progress-stop (id &optional final-message)
+  "Stop progress indicator ID.
+Optional FINAL-MESSAGE is displayed briefly."
+  (when-let ((info (gethash id claude-mcp--progress-indicators)))
+    ;; Cancel timer
+    (when-let ((timer (plist-get info :timer)))
+      (cancel-timer timer))
+    ;; Remove overlay if any
+    (when-let ((overlay (plist-get info :overlay)))
+      (delete-overlay overlay))
+    ;; Show final message
+    (if final-message
+        (message "✓ %s" final-message)
+      (message nil))
+    ;; Clean up
+    (remhash id claude-mcp--progress-indicators))
+  "stopped")
+
+(claude-mcp-deftool progress-start
+  "Start a progress indicator with a spinner animation. Returns a progress ID that can be used to update or stop the indicator. Use this for long-running operations to provide feedback to the user."
+  :function #'claude-mcp-progress-start
+  :safe t
+  :args ((message string :required "The progress message to display")
+         (id string "Optional custom identifier for the progress indicator")))
+
+(claude-mcp-deftool progress-update
+  "Update an existing progress indicator with a new message. The spinner animation continues."
+  :function #'claude-mcp-progress-update
+  :safe t
+  :args ((id string :required "The progress indicator ID returned by progress-start")
+         (message string :required "The new progress message")))
+
+(claude-mcp-deftool progress-stop
+  "Stop a progress indicator. Optionally display a final completion message."
+  :function #'claude-mcp-progress-stop
+  :safe t
+  :args ((id string :required "The progress indicator ID to stop")
+         (final-message string "Optional final message to display (prefixed with ✓)")))
 
 (provide 'claude-mcp)
 ;;; claude-mcp.el ends here

@@ -1711,7 +1711,7 @@ Returns the path to the generated config file."
   (let* ((agent-dir (claude-agent--get-agent-dir))
          (emacs-mcp-dir (expand-file-name "../emacs_mcp" agent-dir))
          (config-file (make-temp-file "claude-mcp-config-" nil ".json"))
-         (server-socket (expand-file-name "server"
+         (server-socket (expand-file-name (or (bound-and-true-p server-name) "server")
                                           (or (bound-and-true-p server-socket-dir)
                                               (expand-file-name "emacs" (temporary-file-directory)))))
          (config `((mcpServers
@@ -1719,7 +1719,7 @@ Returns the path to the generated config file."
                         . ((command . "uv")
                            (args . ["run" "--directory" ,emacs-mcp-dir
                                     "python" "-m" "emacs_mcp.server"])
-                           (env . ((CLAUDEMACS_SOCKET . ,server-socket)
+                           (env . ((CLAUDE_AGENT_SOCKET . ,server-socket)
                                    (CLAUDE_AGENT_CWD . ,(expand-file-name work-dir))
                                    (CLAUDE_AGENT_BUFFER_NAME . ,buffer-name))))))))))
     (with-temp-file config-file
