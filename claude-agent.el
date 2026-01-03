@@ -337,6 +337,10 @@ Each entry is (MARKER . RESULT-STRING).")
     (define-key map (kbd "RET") #'claude-agent-goto-input)
     ;; Tool result viewing
     (define-key map (kbd "'") #'claude-agent-show-tool-result)
+    (define-key map (kbd "TAB") #'claude-agent-toggle-tool-popup)
+    ;; Navigation between messages/tool calls
+    (define-key map (kbd "{") #'claude-agent-previous-section)
+    (define-key map (kbd "}") #'claude-agent-next-section)
     ;; Help
     (define-key map (kbd "?") #'claude-agent-transient-menu)
     map)
@@ -394,6 +398,86 @@ This eliminates empty space below the input area."
       ;; Recenter with point near the bottom (negative arg = lines from bottom)
       (recenter -3))))
 
+(defun claude-agent--add-tool-tooltip (marker content)
+  "Add a tooltip with CONTENT preview to the tool call at MARKER."
+  (when (and marker (marker-position marker))
+    (let* ((line-end (save-excursion
+                       (goto-char (marker-position marker))
+                       (line-end-position)))
+           ;; Truncate content for tooltip (first 500 chars, max 10 lines)
+           (preview (if (> (length content) 500)
+                        (concat (substring content 0 500) "\n...")
+                      content))
+           (preview (let ((lines (split-string preview "\n")))
+                      (if (> (length lines) 10)
+                          (concat (string-join (seq-take lines 10) "\n") "\n...")
+                        preview))))
+      ;; Create overlay for the whole tool call line
+      (let ((ov (make-overlay (marker-position marker) line-end)))
+        (overlay-put ov 'help-echo preview)
+        (overlay-put ov 'claude-agent-tooltip t)
+        (overlay-put ov 'evaporate t)))))
+
+(defvar-local claude-agent--tool-popup-enabled t
+  "When non-nil, show tool result popup automatically when on a tool line.")
+
+(defvar claude-agent--tool-popup-buffer " *claude-tool-popup*"
+  "Buffer name for the tool result posframe.")
+
+(defun claude-agent-toggle-tool-popup ()
+  "Toggle automatic tool result popup display."
+  (interactive)
+  (setq claude-agent--tool-popup-enabled (not claude-agent--tool-popup-enabled))
+  (if claude-agent--tool-popup-enabled
+      (message "Tool popup enabled")
+    (claude-agent--hide-tool-popup)
+    (message "Tool popup disabled")))
+
+(defun claude-agent--hide-tool-popup ()
+  "Hide the tool result posframe."
+  (when (and (fboundp 'posframe-hide)
+             (get-buffer claude-agent--tool-popup-buffer))
+    (posframe-hide claude-agent--tool-popup-buffer)))
+
+(defface claude-agent-popup-hint-face
+  '((t :foreground "#5c6370" :slant italic))
+  "Face for hint text in tool popup."
+  :group 'claude-agent)
+
+(defun claude-agent--show-tool-popup (content)
+  "Show CONTENT in a posframe below the current line."
+  (when (fboundp 'posframe-show)
+    (let* ((max-lines 15)
+           (max-chars 1000)
+           ;; Truncate content
+           (preview (if (> (length content) max-chars)
+                        (concat (substring content 0 max-chars) "\n...")
+                      content))
+           (lines (split-string preview "\n"))
+           (preview (if (> (length lines) max-lines)
+                        (concat (string-join (seq-take lines max-lines) "\n") "\n...")
+                      preview))
+           ;; Add hints at the bottom
+           (hints "\n─────────────────────────────────\nC-c ' full result  |  TAB disable popup")
+           (full-content (concat preview hints)))
+      (posframe-show claude-agent--tool-popup-buffer
+                     :string full-content
+                     :position (line-end-position)
+                     :background-color "#1e1e1e"
+                     :foreground-color "#abb2bf"
+                     :border-color "#5c6370"
+                     :border-width 1
+                     :left-fringe 8
+                     :right-fringe 8))))
+
+(defun claude-agent--update-tool-popup ()
+  "Update tool popup based on current cursor position.
+Called from post-command-hook."
+  (when claude-agent--tool-popup-enabled
+    (if-let ((result (claude-agent--find-tool-result-at-point)))
+        (claude-agent--show-tool-popup result)
+      (claude-agent--hide-tool-popup))))
+
 (defun claude-agent--find-tool-result-at-point ()
   "Find the tool result for the tool call on the current line.
 Returns (NAME . RESULT) cons or nil if not found."
@@ -435,6 +519,48 @@ Like `org-edit-special' (C-c ') for source blocks."
     (when (and (bound-and-true-p evil-local-mode)
                (fboundp 'evil-insert-state))
       (evil-insert-state))))
+
+(defun claude-agent--section-header-p ()
+  "Return non-nil if current line is a section header (message or tool call)."
+  (save-excursion
+    (beginning-of-line)
+    (or (looking-at "^you> ")
+        (looking-at "^claude> ")
+        (looking-at "^[a-z-]+/[a-z-]+›")  ; MCP tool: server/tool›
+        (looking-at "^[a-z]+›"))))          ; Built-in tool: edit›, grep›, etc.
+
+(defun claude-agent-next-section ()
+  "Move to the next message or tool call."
+  (interactive)
+  (let ((start (point)))
+    (forward-line 1)
+    (while (and (not (eobp))
+                (not (claude-agent--section-header-p))
+                (< (point) (or claude-agent--input-start-marker (point-max))))
+      (forward-line 1))
+    (if (or (eobp)
+            (>= (point) (or claude-agent--input-start-marker (point-max))))
+        (progn
+          (goto-char start)
+          (message "No more sections"))
+      (beginning-of-line))))
+
+(defun claude-agent-previous-section ()
+  "Move to the previous message or tool call."
+  (interactive)
+  (let ((start (point)))
+    (beginning-of-line)
+    (when (claude-agent--section-header-p)
+      (forward-line -1))
+    (while (and (not (bobp))
+                (not (claude-agent--section-header-p)))
+      (forward-line -1))
+    (if (bobp)
+        (if (claude-agent--section-header-p)
+            (beginning-of-line)
+          (goto-char start)
+          (message "No more sections"))
+      (beginning-of-line))))
 
 (defvar-local claude-agent--in-log-area nil
   "Non-nil when cursor is in the log area (not input area).
@@ -529,7 +655,9 @@ and switches keymaps based on cursor position."
              claude-agent--input-start-marker)
     (goto-char claude-agent--input-start-marker))
   ;; Switch keymaps based on position (magit-style in log area)
-  (claude-agent--update-keymap))
+  (claude-agent--update-keymap)
+  ;; Update tool result popup
+  (claude-agent--update-tool-popup))
 
 ;;;; Section management
 ;;
@@ -1414,12 +1542,14 @@ If VIRTUAL-INDENT is non-nil, apply it as line-prefix/wrap-prefix."
              (copy-marker (or claude-agent--static-end-marker (point-max))))
        (claude-agent--insert-tool-call name args-str)))
 
-    ;; Tool result - store for later viewing with C-c '
+    ;; Tool result - store for later viewing with C-c ' and add tooltip
     ("tool_result"
      (let ((content (cdr (assq 'content msg))))
        (when (and claude-agent--last-tool-marker content)
          (push (cons claude-agent--last-tool-marker content)
-               claude-agent--tool-results))))
+               claude-agent--tool-results)
+         ;; Add tooltip to the tool call line
+         (claude-agent--add-tool-tooltip claude-agent--last-tool-marker content))))
 
     ;; Tool end
     ("tool_end"
