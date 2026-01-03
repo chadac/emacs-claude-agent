@@ -257,10 +257,13 @@ Each item is an alist with keys: content, status, activeForm.")
 
 (defvar-local claude-agent--tool-results nil
   "Alist mapping tool call positions to their results.
-Each entry is (MARKER . RESULT-STRING).")
+Each entry is (MARKER NAME . RESULT-STRING).")
 
 (defvar-local claude-agent--last-tool-marker nil
   "Marker for the last tool call, used to associate results.")
+
+(defvar-local claude-agent--last-tool-name nil
+  "Name of the last tool call, used to associate results.")
 
 (defvar-local claude-agent--placeholder-overlay nil
   "Overlay for the placeholder text in empty input area.")
@@ -472,11 +475,41 @@ This eliminates empty space below the input area."
 
 (defun claude-agent--update-tool-popup ()
   "Update tool popup based on current cursor position.
-Called from post-command-hook."
-  (when claude-agent--tool-popup-enabled
-    (if-let ((result (claude-agent--find-tool-result-at-point)))
-        (claude-agent--show-tool-popup result)
-      (claude-agent--hide-tool-popup))))
+Called from `post-command-hook'."
+  (when (and claude-agent--tool-popup-enabled
+             ;; Don't update during buffer modifications
+             (not inhibit-read-only)
+             ;; Only in claude-agent buffers
+             (eq major-mode 'claude-agent-mode))
+    (condition-case nil
+        (if-let ((result (claude-agent--find-tool-result-at-point)))
+            (let* ((name (car result))
+                   (content (cdr result))
+                   (formatter (cdr (assoc name claude-agent-tool-formatters)))
+                   (formatted (if formatter (funcall formatter content) content)))
+              (claude-agent--show-tool-popup formatted))
+          (claude-agent--hide-tool-popup))
+      ;; Silently ignore errors to prevent buffer corruption
+      (error (claude-agent--hide-tool-popup)))))
+
+(defvar claude-agent-tool-formatters
+  '(("mcp__claudemacs__edit" . claude-agent--format-diff-output)
+    ("Edit" . claude-agent--format-diff-output))
+  "Alist mapping tool names to formatter functions.
+Each formatter takes a result string and returns a propertized string.")
+
+(defun claude-agent--format-diff-output (content)
+  "Format CONTENT as a diff with colored +/- lines."
+  (let ((lines (split-string content "\n")))
+    (mapconcat
+     (lambda (line)
+       (cond
+        ((string-prefix-p "- " line)
+         (propertize line 'face 'claude-agent-diff-removed))
+        ((string-prefix-p "+ " line)
+         (propertize line 'face 'claude-agent-diff-added))
+        (t line)))
+     lines "\n")))
 
 (defun claude-agent--find-tool-result-at-point ()
   "Find the tool result for the tool call on the current line.
@@ -491,19 +524,24 @@ Returns (NAME . RESULT) cons or nil if not found."
                    (>= (marker-position marker) line-start)
                    (<= (marker-position marker) line-end))
           (setq result entry))))
-    ;; Return just the result string for now
-    (cdr result)))
+    ;; Return (NAME . RESULT) or nil
+    (when result
+      (cons (nth 1 result) (nth 2 result)))))
 
 (defun claude-agent-show-tool-result ()
   "Show the result of the tool call at point in a popup buffer.
 Like `org-edit-special' (C-c ') for source blocks."
   (interactive)
   (if-let ((result (claude-agent--find-tool-result-at-point)))
-      (let ((buf (get-buffer-create "*claude-tool-result*")))
+      (let* ((name (car result))
+             (content (cdr result))
+             (formatter (cdr (assoc name claude-agent-tool-formatters)))
+             (formatted (if formatter (funcall formatter content) content))
+             (buf (get-buffer-create "*claude-tool-result*")))
         (with-current-buffer buf
           (let ((inhibit-read-only t))
             (erase-buffer)
-            (insert result)
+            (insert formatted)
             (goto-char (point-min))
             (special-mode)))
         (display-buffer buf '(display-buffer-below-selected
@@ -1537,16 +1575,19 @@ If VIRTUAL-INDENT is non-nil, apply it as line-prefix/wrap-prefix."
             (input (cdr (assq 'input msg)))
             (args-str (claude-agent--format-tool-input-for-display name input)))
        (setq claude-agent--parse-state 'tool)
-       ;; Mark position before inserting so we can associate result later
+       ;; Mark position and name before inserting so we can associate result later
        (setq claude-agent--last-tool-marker
              (copy-marker (or claude-agent--static-end-marker (point-max))))
+       (setq claude-agent--last-tool-name name)
        (claude-agent--insert-tool-call name args-str)))
 
     ;; Tool result - store for later viewing with C-c ' and add tooltip
     ("tool_result"
      (let ((content (cdr (assq 'content msg))))
        (when (and claude-agent--last-tool-marker content)
-         (push (cons claude-agent--last-tool-marker content)
+         (push (list claude-agent--last-tool-marker
+                     claude-agent--last-tool-name
+                     content)
                claude-agent--tool-results)
          ;; Add tooltip to the tool call line
          (claude-agent--add-tool-tooltip claude-agent--last-tool-marker content))))
