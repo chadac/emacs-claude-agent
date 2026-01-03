@@ -2464,6 +2464,21 @@ This reloads the MCP server and Python agent while preserving the session."
      (let ((proc (claude-agent--start-process work-dir buf nil t)))
        (setq claude-agent--process proc))
      (claude-agent--render-dynamic-section)
+     ;; Send a message to the agent after a short delay to let it initialize
+     (run-with-timer
+      2 nil
+      (lambda (buffer)
+        (when (buffer-live-p buffer)
+          (with-current-buffer buffer
+            (when (and claude-agent--process
+                       (process-live-p claude-agent--process))
+              (process-send-string
+               claude-agent--process
+               (concat (json-encode
+                        '((type . "message")
+                          (text . "Session restarted. MCP server reloaded with any code changes. Please continue.")))
+                       "\n"))))))
+      buf)
      (message "Session restarted, MCP server reloaded."))))
 
 (defun claude-agent-show-pending-commit ()
