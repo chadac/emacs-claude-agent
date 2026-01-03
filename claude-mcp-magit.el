@@ -259,8 +259,16 @@ COUNT defaults to 5. DIRECTORY defaults to claude-session-cwd."
 (defvar claude-mcp-magit--pending-commit nil
   "Pending commit proposal: (directory message files).")
 
-(defvar claude-mcp-magit--insert-proposed-message nil
-  "Temporary function for inserting proposed commit message.")
+(defvar claude-mcp-magit--pending-message nil
+  "Pending commit message to insert into COMMIT_EDITMSG.")
+
+(defun claude-mcp-magit--insert-pending-message ()
+  "Insert pending commit message and remove self from hook."
+  (when claude-mcp-magit--pending-message
+    (goto-char (point-min))
+    (insert claude-mcp-magit--pending-message)
+    (setq claude-mcp-magit--pending-message nil)
+    (remove-hook 'git-commit-setup-hook #'claude-mcp-magit--insert-pending-message)))
 
 (defun claude-mcp-magit-commit-propose (message &optional directory)
   "Propose a commit with MESSAGE for user approval.
@@ -300,26 +308,11 @@ This populates COMMIT_EDITMSG with the proposed message for editing."
         (error "Staged files have changed since proposal. Please re-stage and propose again.")))
     ;; Clear pending commit
     (setq claude-mcp-magit--pending-commit nil)
-    ;; Use a one-shot hook to insert the message after git-commit-setup
-    (let ((insert-message-fn
-           (lambda ()
-             (goto-char (point-min))
-             (insert proposed-message)
-             (remove-hook 'git-commit-setup-hook #'claude-mcp-magit--insert-proposed-message))))
-      ;; Store the function so we can reference it in the hook
-      (setq claude-mcp-magit--insert-proposed-message insert-message-fn)
-      (add-hook 'git-commit-setup-hook insert-message-fn 90))
+    ;; Store message and add hook (hook removes itself after running)
+    (setq claude-mcp-magit--pending-message proposed-message)
+    (add-hook 'git-commit-setup-hook #'claude-mcp-magit--insert-pending-message 90)
     ;; Open the commit buffer for review
     (magit-commit-create)))
-
-(defun claude-mcp-magit-commit-reject ()
-  "Reject the pending commit proposal."
-  (interactive)
-  (if claude-mcp-magit--pending-commit
-      (progn
-        (setq claude-mcp-magit--pending-commit nil)
-        (message "Commit proposal rejected."))
-    (message "No pending commit to reject.")))
 
 (defun claude-mcp-magit-commit-status ()
   "Check if there's a pending commit proposal.

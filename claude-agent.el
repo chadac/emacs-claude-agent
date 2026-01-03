@@ -2481,27 +2481,7 @@ This reloads the MCP server and Python agent while preserving the session."
       buf)
      (message "Session restarted, MCP server reloaded."))))
 
-(defun claude-agent-show-pending-commit ()
-  "Show details of the pending commit proposal."
-  (interactive)
-  (if claude-mcp-magit--pending-commit
-      (let* ((info claude-mcp-magit--pending-commit)
-             (directory (nth 0 info))
-             (message (nth 1 info))
-             (files (nth 2 info)))
-        (with-help-window "*Pending Commit*"
-          (princ "Pending Commit Proposal\n")
-          (princ "=======================\n\n")
-          (princ (format "Directory: %s\n\n" directory))
-          (princ "Files:\n")
-          (dolist (file files)
-            (princ (format "  - %s\n" file)))
-          (princ "\nMessage:\n")
-          (princ "--------\n")
-          (princ message)
-          (princ "\n\n--------\n")
-          (princ "Use C-c C-a g a to approve, C-c C-a g r to reject.")))
-    (message "No pending commit proposal.")))
+
 
 (defun claude-agent-show-cost ()
   "Show token usage and cost for current session."
@@ -2630,11 +2610,7 @@ Press 'i' or RET in the log area to jump to input."
     ("i" "Go to input" claude-agent-goto-input)
     ("RET" "Go to input" claude-agent-goto-input)]
    ["Git"
-    ("g a" "Approve commit" claude-mcp-magit-commit-approve
-     :if (lambda () claude-mcp-magit--pending-commit))
-    ("g r" "Reject commit" claude-mcp-magit-commit-reject
-     :if (lambda () claude-mcp-magit--pending-commit))
-    ("g s" "Show pending" claude-agent-show-pending-commit
+    ("g" "Approve commit" claude-mcp-magit-commit-approve
      :if (lambda () claude-mcp-magit--pending-commit))]])
 
 (provide 'claude-agent)
