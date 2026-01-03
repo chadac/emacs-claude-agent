@@ -1045,9 +1045,17 @@ TODO-ID can be a file path or title (defaults to current TODO)."
 (defun org-roam-todo-mcp-check-acceptance (item-text &optional checked todo-id)
   "Check or uncheck an acceptance criteria item in a TODO.
 ITEM-TEXT is the text of the checkbox item to find.
-CHECKED if non-nil, check the item; otherwise uncheck.
+CHECKED defaults to t (check the item).  Pass :json-false or nil to uncheck.
 TODO-ID can be a file path or title (defaults to current TODO)."
-  (let ((file (org-roam-todo-mcp--resolve-todo todo-id)))
+  ;; Handle the checked parameter:
+  ;; - nil (not provided) -> default to t (check the item)
+  ;; - :json-false (MCP sends this for false) -> uncheck
+  ;; - t or any truthy value -> check
+  (let ((should-check (cond
+                       ((null checked) t)  ; Default to checking
+                       ((eq checked :json-false) nil)  ; MCP false
+                       (t checked)))  ; Use provided value
+        (file (org-roam-todo-mcp--resolve-todo todo-id)))
     (unless file
       (error "TODO not found: %s" (or todo-id "current")))
     (with-current-buffer (find-file-noselect file)
@@ -1063,20 +1071,25 @@ TODO-ID can be a file path or title (defaults to current TODO)."
                                (point-max))))
               (found nil))
           (while (and (not found)
-                      (re-search-forward "^- \\[[ X]\\] \\(.+\\)$" section-end t))
-            (when (string-match-p (regexp-quote item-text) (match-string 1))
+                      (re-search-forward "^- \\[\\([ X]\\)\\] \\(.+\\)$" section-end t))
+            (when (string-match-p (regexp-quote item-text) (match-string 2))
               (setq found t)
-              (goto-char (match-beginning 0))
-              (if checked
-                  (progn
-                    (re-search-forward "\\[ \\]" (line-end-position) t)
-                    (replace-match "[X]"))
-                (re-search-forward "\\[X\\]" (line-end-position) t)
-                (replace-match "[ ]"))))
+              ;; Save the full line info before modifying
+              (let ((line-start (line-beginning-position))
+                    (current-state (match-string 1)))
+                (goto-char line-start)
+                ;; Only modify if state actually needs to change
+                (if should-check
+                    (when (string= current-state " ")
+                      (when (re-search-forward "\\[ \\]" (line-end-position) t)
+                        (replace-match "[X]")))
+                  (when (string= current-state "X")
+                    (when (re-search-forward "\\[X\\]" (line-end-position) t)
+                      (replace-match "[ ]")))))))
           (unless found
             (error "Acceptance criteria item not found: %s" item-text))
           (save-buffer))))
-    (format "%s: %s" (if checked "Checked" "Unchecked") item-text)))
+    (format "%s: %s" (if should-check "Checked" "Unchecked") item-text)))
 
 (defun org-roam-todo-mcp-create (project-root title &optional description acceptance-criteria)
   "Create a new TODO programmatically.
