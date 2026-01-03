@@ -343,17 +343,23 @@ Returns the TODO plist."
 
 ;;;; Send to Main Session
 
+(defun org-roam-todo--normalize-path (path)
+  "Normalize PATH by expanding, resolving symlinks, and removing trailing slash."
+  (directory-file-name (file-truename (expand-file-name path))))
+
 (defun org-roam-todo--find-main-session (project-root)
   "Find the main Claude buffer for PROJECT-ROOT."
-  (let ((expanded-root (expand-file-name project-root)))
+  (let ((normalized-root (org-roam-todo--normalize-path project-root)))
     (cl-find-if
      (lambda (buf)
-       (and (string-match-p "^\\*claude:" (buffer-name buf))
+       (and (string-match-p "^\\*claude" (buffer-name buf))
             ;; Exclude named agents (buffers with :agent-name suffix)
-            (not (string-match-p "^\\*claude:[^:]+:[^*]+\\*$" (buffer-name buf)))
+            (not (string-match-p "^\\*claude[^:]*:[^:]+:[^*]+\\*$" (buffer-name buf)))
             (with-current-buffer buf
-              (and (boundp 'claude--cwd)
-                   (string= (expand-file-name claude--cwd) expanded-root)))))
+              (and (boundp 'claude-agent--work-dir)
+                   claude-agent--work-dir
+                   (string= (org-roam-todo--normalize-path claude-agent--work-dir)
+                            normalized-root)))))
      (buffer-list))))
 
 (defun org-roam-todo--get-node-content ()
@@ -372,8 +378,8 @@ Use this for quick tasks that don't need worktree isolation."
   (interactive)
   (unless (org-roam-todo--node-p)
     (user-error "Not in an org-roam TODO node"))
-  (require 'claude)
   (let* ((project-root (org-roam-todo--get-property "PROJECT_ROOT"))
+         (todo-id (org-roam-todo--get-property "ID"))
          (title (save-excursion
                   (goto-char (point-min))
                   (when (re-search-forward "^#\\+title: \\(.+\\)$" nil t)
@@ -383,15 +389,26 @@ Use this for quick tasks that don't need worktree isolation."
     (unless project-root
       (user-error "No PROJECT_ROOT property found"))
     (unless claude-buffer
-      (user-error "No Claude session found for project: %s\nStart one with M-x claude-run in that project" project-root))
-    ;; Send to Claude
+      (user-error "No Claude session found for project: %s\nStart one with M-x claude in that project" project-root))
+    ;; Send to Claude using the new claude-agent process mechanism
     (with-current-buffer claude-buffer
-      (when (and (boundp 'eat-terminal) eat-terminal)
-        (let ((message (format "[TODO] %s\n\n%s" (or title "Task") content)))
-          (eat-term-send-string eat-terminal "\C-u")
-          (eat-term-send-string eat-terminal message)
-          (sit-for 0.1)
-          (eat-term-send-string eat-terminal "\r"))))
+      (when (and (boundp 'claude-agent--process)
+                 claude-agent--process
+                 (process-live-p claude-agent--process))
+        (let ((msg (format "[TODO: %s] %s
+
+%s
+
+---
+TODO Management:
+- Use `todo_acceptance_criteria` to see checklist items
+- Use `todo_check_acceptance` to mark items complete
+- Use `todo_add_progress` to log progress updates
+- Use `todo_update_status` with 'done' when finished"
+                           (or todo-id "unknown") (or title "Task") content)))
+          (process-send-string
+           claude-agent--process
+           (concat (json-encode `((type . "message") (text . ,msg))) "\n")))))
     ;; Update status
     (org-roam-todo--set-property "STATUS" "active")
     (save-buffer)
@@ -581,26 +598,28 @@ Works for both main session TODOs and worktree TODOs."
                             ;; Find worktree session
                             (cl-find-if
                              (lambda (buf)
-                               (and (string-match-p "^\\*claude:" (buffer-name buf))
+                               (and (string-match-p "^\\*claude" (buffer-name buf))
                                     (with-current-buffer buf
-                                      (and (boundp 'claude--cwd)
-                                           (string= (expand-file-name claude--cwd)
-                                                    (expand-file-name worktree-path))))))
+                                      (and (boundp 'claude-agent--work-dir)
+                                           claude-agent--work-dir
+                                           (string= (org-roam-todo--normalize-path claude-agent--work-dir)
+                                                    (org-roam-todo--normalize-path worktree-path))))))
                              (buffer-list))
                           ;; Find main session
                           (org-roam-todo--find-main-session project-root))))
     (unless claude-buffer
       (user-error "No Claude session found. Use C-c c t or C-c c w first"))
     (with-current-buffer claude-buffer
-      (when (and (boundp 'eat-terminal) eat-terminal)
-        (let ((message (if worktree-path
-                           (format "[WORKTREE TASK]\n\n%s\n\nWorktree: %s\nPlease help me with this task."
-                                   content worktree-path)
-                         (format "[TODO] %s\n\n%s" (or title "Task") content))))
-          (eat-term-send-string eat-terminal "\C-u")
-          (eat-term-send-string eat-terminal message)
-          (sit-for 0.1)
-          (eat-term-send-string eat-terminal "\r"))))
+      (when (and (boundp 'claude-agent--process)
+                 claude-agent--process
+                 (process-live-p claude-agent--process))
+        (let ((msg (if worktree-path
+                       (format "[WORKTREE TASK]\n\n%s\n\nWorktree: %s\nPlease help me with this task."
+                               content worktree-path)
+                     (format "[TODO] %s\n\n%s" (or title "Task") content))))
+          (process-send-string
+           claude-agent--process
+           (concat (json-encode `((type . "message") (text . ,msg))) "\n")))))
     (message "Resent TODO to Claude session")))
 
 ;;;; TODO List Buffer
