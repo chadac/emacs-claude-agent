@@ -520,6 +520,136 @@ Optional PROJECT-FILTER limits selection to a specific project."
   (interactive)
   (org-roam-todo-select-worktree (org-roam-todo--infer-project)))
 
+;;;; Close Worktree
+
+(defun org-roam-todo--kill-worktree-buffers (worktree-path)
+  "Kill all buffers visiting files in WORKTREE-PATH."
+  (let ((expanded-path (expand-file-name worktree-path))
+        (killed 0))
+    (dolist (buf (buffer-list))
+      (when-let ((file (buffer-file-name buf)))
+        (when (string-prefix-p expanded-path (expand-file-name file))
+          (kill-buffer buf)
+          (cl-incf killed))))
+    killed))
+
+(defun org-roam-todo--kill-claude-session (worktree-path)
+  "Kill any Claude agent session associated with WORKTREE-PATH."
+  (let ((expanded-path (expand-file-name worktree-path)))
+    (dolist (buf (buffer-list))
+      (with-current-buffer buf
+        (when (and (boundp 'claude-agent--directory)
+                   claude-agent--directory
+                   (string= (expand-file-name claude-agent--directory)
+                            expanded-path)
+                   (boundp 'claude-agent--process)
+                   claude-agent--process)
+          (when (process-live-p claude-agent--process)
+            (delete-process claude-agent--process))
+          (kill-buffer buf)
+          (cl-return t))))))
+
+(defun org-roam-todo--remove-worktree (project-root worktree-path &optional force)
+  "Remove worktree at WORKTREE-PATH from PROJECT-ROOT.
+If FORCE is non-nil, use --force flag."
+  (let ((default-directory project-root)
+        (args (if force
+                  (list "worktree" "remove" "--force" worktree-path)
+                (list "worktree" "remove" worktree-path))))
+    (apply #'call-process "git" nil "*org-roam-todo-worktree-output*" nil args)))
+
+(defun org-roam-todo--delete-branch (project-root branch-name &optional force)
+  "Delete BRANCH-NAME from PROJECT-ROOT.
+If FORCE is non-nil, use -D instead of -d."
+  (let ((default-directory project-root)
+        (flag (if force "-D" "-d")))
+    (call-process "git" nil "*org-roam-todo-worktree-output*" nil
+                  "branch" flag branch-name)))
+
+;;;###autoload
+(defun org-roam-todo-close-worktree (&optional force)
+  "Close the worktree associated with the current TODO.
+Removes the worktree, kills associated buffers and Claude session.
+With prefix arg FORCE, force removal even with uncommitted changes.
+Prompts to delete the branch if it hasn't been merged."
+  (interactive "P")
+  (unless (org-roam-todo--node-p)
+    (user-error "Not in an org-roam TODO node"))
+  (let* ((project-root (org-roam-todo--get-property "PROJECT_ROOT"))
+         (worktree-path (org-roam-todo--get-property "WORKTREE_PATH"))
+         (branch-name (org-roam-todo--get-property "WORKTREE_BRANCH")))
+    (unless worktree-path
+      (user-error "No worktree associated with this TODO"))
+    (unless (org-roam-todo--worktree-exists-p worktree-path)
+      ;; Worktree doesn't exist, just clear properties
+      (org-roam-todo--set-property "WORKTREE_PATH" nil)
+      (org-roam-todo--set-property "WORKTREE_BRANCH" nil)
+      (org-roam-todo--set-property "CLAUDE_AGENT_BUFFER" nil)
+      (save-buffer)
+      (user-error "Worktree no longer exists, cleared properties"))
+    ;; Confirm
+    (unless (yes-or-no-p (format "Close worktree at %s? " worktree-path))
+      (user-error "Cancelled"))
+    ;; Kill Claude session first
+    (when (org-roam-todo--kill-claude-session worktree-path)
+      (message "Killed Claude session"))
+    ;; Kill file buffers
+    (let ((killed (org-roam-todo--kill-worktree-buffers worktree-path)))
+      (when (> killed 0)
+        (message "Killed %d buffer(s)" killed)))
+    ;; Remove worktree
+    (let ((result (org-roam-todo--remove-worktree project-root worktree-path force)))
+      (unless (= 0 result)
+        (if (and (not force)
+                 (yes-or-no-p "Worktree has uncommitted changes. Force remove? "))
+            (setq result (org-roam-todo--remove-worktree project-root worktree-path t))
+          (user-error "Failed to remove worktree (exit code %d)" result)))
+      (unless (= 0 result)
+        (user-error "Failed to remove worktree (exit code %d)" result)))
+    ;; Clear worktree properties
+    (org-roam-todo--set-property "WORKTREE_PATH" nil)
+    (org-roam-todo--set-property "WORKTREE_BRANCH" nil)
+    (org-roam-todo--set-property "CLAUDE_AGENT_BUFFER" nil)
+    (save-buffer)
+    ;; Offer to delete branch
+    (when (and branch-name
+               (org-roam-todo--branch-exists-p project-root branch-name))
+      (when (yes-or-no-p (format "Delete branch '%s'? " branch-name))
+        (let ((result (org-roam-todo--delete-branch project-root branch-name)))
+          (if (= 0 result)
+              (message "Deleted branch '%s'" branch-name)
+            ;; Try force delete if regular delete failed (unmerged)
+            (when (yes-or-no-p (format "Branch '%s' is not fully merged. Force delete? " branch-name))
+              (if (= 0 (org-roam-todo--delete-branch project-root branch-name t))
+                  (message "Force deleted branch '%s'" branch-name)
+                (message "Failed to delete branch")))))))
+    (message "Closed worktree: %s" worktree-path)))
+
+;;;###autoload
+(defun org-roam-todo-select-close-worktree (&optional project-filter)
+  "Select a TODO with a worktree and close it.
+Optional PROJECT-FILTER limits selection to a specific project."
+  (interactive)
+  (let* ((todos (cl-remove-if-not
+                 (lambda (todo)
+                   (plist-get todo :worktree-path))
+                 (org-roam-todo--query-todos project-filter)))
+         (todo (when todos
+                 (let* ((candidates (mapcar (lambda (t)
+                                              (cons (format "[%s] %s"
+                                                            (plist-get t :project)
+                                                            (plist-get t :title))
+                                                    t))
+                                            todos))
+                        (choice (completing-read "Close worktree for: "
+                                                 (mapcar #'car candidates)
+                                                 nil t)))
+                   (cdr (assoc choice candidates))))))
+    (unless todo
+      (user-error "No TODOs with worktrees found"))
+    (find-file (plist-get todo :file))
+    (org-roam-todo-close-worktree)))
+
 ;;;; Start Claude on TODO
 
 (defun org-roam-todo--send-initial-message (buffer-name todo content)
@@ -1250,10 +1380,12 @@ TODO-ID can be a file path or title (defaults to current TODO)."
 ;; C-c n t t -> capture TODO
 ;; C-c n t l -> list all TODOs
 ;; C-c n t w -> select TODO, create worktree
+;; C-c n t x -> select TODO, close worktree
 ;; C-c n t c -> select TODO, start Claude
 (define-key org-roam-todo-global-map (kbd "t") #'org-roam-todo-capture)
 (define-key org-roam-todo-global-map (kbd "l") #'org-roam-todo-list)
 (define-key org-roam-todo-global-map (kbd "w") #'org-roam-todo-select-worktree)
+(define-key org-roam-todo-global-map (kbd "x") #'org-roam-todo-select-close-worktree)
 (define-key org-roam-todo-global-map (kbd "c") #'org-roam-todo-start-claude)
 
 ;; Set up the project-scoped keymap (C-c n p):
@@ -1273,6 +1405,7 @@ Binds:
   C-c n t t - Capture a new TODO
   C-c n t l - List all TODOs
   C-c n t w - Select TODO, create/open worktree
+  C-c n t x - Select TODO, close worktree
   C-c n t c - Select TODO, start Claude agent
   C-c n p t - Capture TODO (project inferred)
   C-c n p l - List project TODOs

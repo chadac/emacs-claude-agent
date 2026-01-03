@@ -40,7 +40,7 @@ Each entry is a plist with :key, :description, :command, :group, :if.")
                                                 "c" "C" "q" "k" "p" "t" "i" "RET" "g")
   "List of built-in keys in the agent menu.")
 
-(defvar claude-transient--builtin-pair-keys '("x" "t" "d" "f" "c" "C" "s" "r" "l" "w")
+(defvar claude-transient--builtin-pair-keys '("x" "t" "d" "f" "c" "C" "s" "r" "l")
   "List of built-in keys in the pair menu.")
 
 (defun claude-transient--key-exists-p (extensions key)
@@ -179,24 +179,9 @@ Press 'i' or RET in the log area to jump to input."
 
 ;;;; Pair Programming Transient Menu
 
-(defvar org-roam-todo-mode)
-
-;; Forward declarations for TODO commands
-(declare-function org-roam-todo-send-to-main "todo")
-(declare-function org-roam-todo-create-worktree "todo")
-(declare-function org-roam-todo-resend "todo")
-
 ;; Forward declarations for session commands
 (declare-function claude-agent-run "claude-agent")
 (declare-function claude-list-sessions "claude-sessions")
-
-(defun claude-transient--in-todo-buffer-p ()
-  "Return non-nil if current buffer has org-roam-todo-mode enabled."
-  (bound-and-true-p org-roam-todo-mode))
-
-(defun claude-transient--not-in-todo-buffer-p ()
-  "Return non-nil if current buffer does NOT have org-roam-todo-mode enabled."
-  (not (bound-and-true-p org-roam-todo-mode)))
 
 (defun claude-transient-start-session ()
   "Start a new Claude session for the current project."
@@ -239,15 +224,9 @@ Press 'i' or RET in the log area to jump to input."
    ("c" "Send CLAUDE: comments" claude-pair-send-comments)
    ("C" "Send project comments" (lambda () (interactive) (claude-pair-send-comments t)))]
   ["Sessions"
-   :if claude-transient--not-in-todo-buffer-p
    ("s" "Start session" claude-transient-start-session)
    ("r" "Switch session" claude-transient-switch-session)
-   ("l" "List sessions" claude-list-sessions)]
-  ["TODO Actions"
-   :if claude-transient--in-todo-buffer-p
-   ("s" "Send to main session" org-roam-todo-send-to-main)
-   ("w" "Create worktree" org-roam-todo-create-worktree)
-   ("r" "Resend to session" org-roam-todo-resend)])
+   ("l" "List sessions" claude-list-sessions)])
 
 ;;;; Unified Dispatcher
 
