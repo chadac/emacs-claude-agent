@@ -649,8 +649,10 @@ WORK-DIR can be either:
          (cli-dir (file-name-directory (claude-mcp-get-cli-path)))
          (claude-socket (when (and (boundp 'server-socket-dir)
                                         server-socket-dir
+                                        (boundp 'server-name)
+                                        server-name
                                         (server-running-p))
-                              (expand-file-name "server" server-socket-dir)))
+                              (expand-file-name server-name server-socket-dir)))
          (process-environment
           (append (list (format "PATH=%s:%s" cli-dir (getenv "PATH"))
                         "TERM=xterm-256color"

@@ -24,3 +24,11 @@ uv.lock
 # Runtime-generated notes files
 .claude/claudemacs-notes.org
 **/claudemacs-notes.org
+
+# Local/machine-specific config
+.claude/settings.local.json
+emacs_mcp/mcp-config.json
+
+# Log files
+*.log
+claude-agent.log

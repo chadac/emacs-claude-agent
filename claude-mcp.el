@@ -537,25 +537,14 @@ Returns a result with the edit status and any diagnostics from affected lines."
                  (rel-flymake (seq-filter in-range flymake-diags))
                  (rel-lsp (seq-filter in-range lsp-diags))
                  (has-diags (or rel-flycheck rel-flymake rel-lsp))
-                 ;; Get snippet of edited region with context
-                 (snippet-start (max 1 (- edit-start-line 2)))
-                 (snippet-end-line (min (+ edit-end-line 2) (count-lines (point-min) (point-max))))
-                 (line-width (length (number-to-string snippet-end-line)))
-                 (snippet (save-excursion
-                            (goto-char (point-min))
-                            (forward-line (1- snippet-start))
-                            (let ((lines '())
-                                  (ln snippet-start))
-                              (while (<= ln snippet-end-line)
-                                (push (format (format "%%%dd→%%s" line-width)
-                                              ln
-                                              (buffer-substring-no-properties
-                                               (line-beginning-position)
-                                               (line-end-position)))
-                                      lines)
-                                (setq ln (1+ ln))
-                                (forward-line 1))
-                              (string-join (nreverse lines) "\n")))))
+                 ;; Build diff showing old and new
+                 (diff-output
+                  (let ((old-lines (split-string old-string "\n"))
+                        (new-lines (split-string new-string "\n")))
+                    (concat
+                     (mapconcat (lambda (l) (concat "- " l)) old-lines "\n")
+                     "\n"
+                     (mapconcat (lambda (l) (concat "+ " l)) new-lines "\n")))))
 
             (setq result
                   (concat
@@ -563,7 +552,7 @@ Returns a result with the edit status and any diagnostics from affected lines."
                        (format "Replaced %d occurrence(s) in %s (lines %d-%d)"
                                replacements-made file-path edit-start-line edit-end-line)
                      (format "Edited %s (lines %d-%d)" file-path edit-start-line edit-end-line))
-                   "\n\n" snippet
+                   "\n\n" diff-output
                    (when has-diags
                      (concat "\n\n"
                              (or (claude-mcp--format-diagnostics rel-flycheck "Flycheck") "")
@@ -574,7 +563,7 @@ Returns a result with the edit status and any diagnostics from affected lines."
     result))
 
 (claude-mcp-deftool edit
-  "Edit a file by replacing old_string with new_string. Returns diagnostics from affected lines."
+  "Edit a file by replacing old_string with new_string. Returns colored diff and diagnostics."
   :function #'claude-mcp-edit-file
   :args ((file-path string :required "Path to the file to edit")
          (old_string string :required "The text to replace")
