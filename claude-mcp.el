@@ -2160,5 +2160,58 @@ The conversation will be continued from where it left off."
   :safe t
   :args ())
 
+;;;; Magit Integration Tools
+;;
+;; These tools provide git operations via magit with a commit approval workflow.
+;; The agent can stage files and propose commits, but the user must approve.
+
+(claude-mcp-deftool magit-status
+  "Get current git status including staged, unstaged, and untracked files. Returns branch name and file lists."
+  :function #'claude-mcp-magit-status
+  :safe t
+  :args ((directory string "Git repository directory (default: session working directory)")))
+
+(claude-mcp-deftool magit-stage
+  "Stage files for commit. Takes a list of file paths relative to the repository root."
+  :function #'claude-mcp-magit-stage
+  :safe nil
+  :args ((files array :required "Array of file paths to stage")
+         (directory string "Git repository directory (default: session working directory)")))
+
+(claude-mcp-deftool magit-unstage
+  "Unstage files (remove from staging area). Takes a list of file paths."
+  :function #'claude-mcp-magit-unstage
+  :safe nil
+  :args ((files array :required "Array of file paths to unstage")
+         (directory string "Git repository directory (default: session working directory)")))
+
+(claude-mcp-deftool magit-diff
+  "Get git diff output. Can get diff for a specific file or all changes. Use staged=true for staged changes."
+  :function #'claude-mcp-magit-diff
+  :safe t
+  :args ((file string "Specific file to diff (default: all files)")
+         (directory string "Git repository directory (default: session working directory)")
+         (staged boolean "If true, show staged diff; otherwise show unstaged diff")))
+
+(claude-mcp-deftool magit-log
+  "Get recent git commit log entries."
+  :function #'claude-mcp-magit-log
+  :safe t
+  :args ((count integer "Number of log entries to return (default: 5)")
+         (directory string "Git repository directory (default: session working directory)")))
+
+(claude-mcp-deftool magit-commit-propose
+  "Propose a commit for user approval. The user must call magit-commit-approve to actually create the commit. This allows the user to review and sign the commit with their GPG key."
+  :function #'claude-mcp-magit-commit-propose
+  :safe nil
+  :args ((message string :required "The commit message to propose")
+         (directory string "Git repository directory (default: session working directory)")))
+
+(claude-mcp-deftool magit-commit-status
+  "Check if there's a pending commit proposal awaiting user approval."
+  :function #'claude-mcp-magit-commit-status
+  :safe t
+  :args ())
+
 (provide 'claude-mcp)
 ;;; claude-mcp.el ends here

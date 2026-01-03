@@ -159,5 +159,180 @@ Designed to be called via emacsclient by Claude AI."
             (setq result (append result (list (buffer-substring-no-properties start-pos end-pos)))))
           result)))))
 
+;;;; Git Operations for Claude Agent
+;;
+;; These functions provide a commit workflow where the agent can:
+;; 1. Query git status
+;; 2. Stage/unstage files
+;; 3. Propose commits for user approval
+
+(defun claude-mcp-magit-status (&optional directory)
+  "Get current git status for DIRECTORY (or claude-session-cwd).
+Returns an alist with :staged, :unstaged, :untracked, and :branch keys.
+Does not open or switch to any buffers."
+  (let* ((start-dir (or directory claude-session-cwd default-directory))
+         (default-directory (or (magit-toplevel start-dir) start-dir)))
+    (unless (magit-toplevel)
+      (error "Not in a git repository: %s" default-directory))
+    ;; Use git directly to avoid opening magit buffers
+    (let ((staged '())
+          (unstaged '())
+          (untracked '())
+          (branch (magit-get-current-branch)))
+      ;; Get staged files using git diff --cached
+      (dolist (file (magit-staged-files))
+        (push file staged))
+      ;; Get unstaged (modified) files
+      (dolist (file (magit-unstaged-files))
+        (push file unstaged))
+      ;; Get untracked files
+      (dolist (file (magit-untracked-files))
+        (push file untracked))
+      ;; Return as JSON-friendly alist
+      `((branch . ,branch)
+        (staged . ,(nreverse staged))
+        (unstaged . ,(nreverse unstaged))
+        (untracked . ,(nreverse untracked))))))
+
+(defun claude-mcp-magit-stage (files &optional directory)
+  "Stage FILES (a list of file paths) for commit.
+DIRECTORY defaults to claude-session-cwd.
+Does not open or switch to any buffers."
+  (let* ((start-dir (or directory claude-session-cwd default-directory))
+         (default-directory (or (magit-toplevel start-dir) start-dir)))
+    (unless (magit-toplevel)
+      (error "Not in a git repository: %s" default-directory))
+    (let ((files-list (if (listp files) files (list files))))
+      ;; Use magit-call-git for each file (doesn't open buffers)
+      (dolist (file files-list)
+        (magit-call-git "add" "--" file))
+      (format "Staged %d file(s): %s" 
+              (length files-list)
+              (string-join files-list ", ")))))
+
+(defun claude-mcp-magit-unstage (files &optional directory)
+  "Unstage FILES (a list of file paths).
+DIRECTORY defaults to claude-session-cwd.
+Does not open or switch to any buffers."
+  (let* ((start-dir (or directory claude-session-cwd default-directory))
+         (default-directory (or (magit-toplevel start-dir) start-dir)))
+    (unless (magit-toplevel)
+      (error "Not in a git repository: %s" default-directory))
+    (let ((files-list (if (listp files) files (list files))))
+      ;; Use magit-call-git for each file (doesn't open buffers)
+      (dolist (file files-list)
+        (magit-call-git "reset" "HEAD" "--" file))
+      (format "Unstaged %d file(s): %s" 
+              (length files-list)
+              (string-join files-list ", ")))))
+
+(defun claude-mcp-magit-diff (&optional file directory staged)
+  "Get diff for FILE (or all changes if nil).
+If STAGED is non-nil, show staged diff. Otherwise show unstaged diff.
+DIRECTORY defaults to claude-session-cwd."
+  (let* ((start-dir (or directory claude-session-cwd default-directory))
+         (default-directory (or (magit-toplevel start-dir) start-dir)))
+    (unless (magit-toplevel)
+      (error "Not in a git repository: %s" default-directory))
+    (with-temp-buffer
+      (if staged
+          (if file
+              (magit-git-insert "diff" "--cached" "--" file)
+            (magit-git-insert "diff" "--cached"))
+        (if file
+            (magit-git-insert "diff" "--" file)
+          (magit-git-insert "diff")))
+      (buffer-string))))
+
+(defun claude-mcp-magit-log (&optional count directory)
+  "Get recent git log entries.
+COUNT defaults to 5. DIRECTORY defaults to claude-session-cwd."
+  (let* ((start-dir (or directory claude-session-cwd default-directory))
+         (default-directory (or (magit-toplevel start-dir) start-dir))
+         (n (or count 5)))
+    (unless (magit-toplevel)
+      (error "Not in a git repository: %s" default-directory))
+    (with-temp-buffer
+      (magit-git-insert "log" (format "-%d" n) "--oneline" "--no-decorate")
+      (buffer-string))))
+
+(defvar claude-mcp-magit--pending-commit nil
+  "Pending commit proposal: (directory message files).")
+
+(defvar claude-mcp-magit--insert-proposed-message nil
+  "Temporary function for inserting proposed commit message.")
+
+(defun claude-mcp-magit-commit-propose (message &optional directory)
+  "Propose a commit with MESSAGE for user approval.
+This stages the proposal but does not commit. User must approve.
+Returns instructions for the user."
+  (let* ((start-dir (or directory claude-session-cwd default-directory))
+         (default-directory (or (magit-toplevel start-dir) start-dir)))
+    (unless (magit-toplevel)
+      (error "Not in a git repository: %s" default-directory))
+    (let ((staged-files (magit-staged-files)))
+      (unless staged-files
+        (error "No files staged for commit"))
+      ;; Store the pending commit
+      (setq claude-mcp-magit--pending-commit
+            (list default-directory message staged-files))
+      ;; Return info about what's proposed
+      `((status . "pending_approval")
+        (message . ,message)
+        (files . ,staged-files)
+        (instructions . "Commit proposed. User should review and approve with claude-mcp-magit-commit-approve or reject with claude-mcp-magit-commit-reject.")))))
+
+(defun claude-mcp-magit-commit-approve ()
+  "Approve the pending commit and open magit commit buffer for final review.
+This populates COMMIT_EDITMSG with the proposed message for editing."
+  (interactive)
+  (unless claude-mcp-magit--pending-commit
+    (error "No pending commit to approve"))
+  (let* ((info claude-mcp-magit--pending-commit)
+         (directory (nth 0 info))
+         (proposed-message (nth 1 info))
+         (files (nth 2 info))
+         (default-directory directory))
+    ;; Verify files are still staged
+    (let ((currently-staged (magit-staged-files)))
+      (unless (equal (sort (copy-sequence files) #'string<)
+                     (sort (copy-sequence currently-staged) #'string<))
+        (error "Staged files have changed since proposal. Please re-stage and propose again.")))
+    ;; Clear pending commit
+    (setq claude-mcp-magit--pending-commit nil)
+    ;; Use a one-shot hook to insert the message after git-commit-setup
+    (let ((insert-message-fn
+           (lambda ()
+             (goto-char (point-min))
+             (insert proposed-message)
+             (remove-hook 'git-commit-setup-hook #'claude-mcp-magit--insert-proposed-message))))
+      ;; Store the function so we can reference it in the hook
+      (setq claude-mcp-magit--insert-proposed-message insert-message-fn)
+      (add-hook 'git-commit-setup-hook insert-message-fn 90))
+    ;; Open the commit buffer for review
+    (magit-commit-create)))
+
+(defun claude-mcp-magit-commit-reject ()
+  "Reject the pending commit proposal."
+  (interactive)
+  (if claude-mcp-magit--pending-commit
+      (progn
+        (setq claude-mcp-magit--pending-commit nil)
+        (message "Commit proposal rejected."))
+    (message "No pending commit to reject.")))
+
+(defun claude-mcp-magit-commit-status ()
+  "Check if there's a pending commit proposal.
+Returns the proposal details or nil."
+  (when claude-mcp-magit--pending-commit
+    (let* ((info claude-mcp-magit--pending-commit)
+           (directory (nth 0 info))
+           (message (nth 1 info))
+           (files (nth 2 info)))
+      `((status . "pending")
+        (directory . ,directory)
+        (message . ,message)
+        (files . ,files)))))
+
 (provide 'claude-mcp-magit)
 ;;; claude-mcp-magit.el ends here
