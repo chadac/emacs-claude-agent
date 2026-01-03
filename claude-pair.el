@@ -26,8 +26,13 @@
   :type 'string
   :group 'claude-pair)
 
-(defcustom claude-pair-context-lines 10
-  "Number of lines of context to include around each comment."
+(defcustom claude-pair-context-lines-before 2
+  "Number of lines of context to include before each comment."
+  :type 'integer
+  :group 'claude-pair)
+
+(defcustom claude-pair-context-lines-after 5
+  "Number of lines of context to include after each comment."
   :type 'integer
   :group 'claude-pair)
 
@@ -70,8 +75,8 @@ Returns a plist with :before, :line, and :after."
     (save-excursion
       (goto-char (point-min))
       (forward-line (1- line-num))
-      (let* ((start-line (max 1 (- line-num claude-pair-context-lines)))
-             (end-line (+ line-num claude-pair-context-lines))
+      (let* ((start-line (max 1 (- line-num claude-pair-context-lines-before)))
+             (end-line (+ line-num claude-pair-context-lines-after))
              (current-line (buffer-substring-no-properties
                             (line-beginning-position)
                             (line-end-position)))
