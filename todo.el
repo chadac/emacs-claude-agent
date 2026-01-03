@@ -55,6 +55,17 @@ Worktrees are created as {this-dir}/{project-name}/{branch-slug}/"
   :type 'directory
   :group 'org-roam-todo)
 
+(defcustom org-roam-todo-worktree-copy-patterns
+  '(".claude/settings.local.json")
+  "List of file paths (relative to project root) to copy to new worktrees.
+These files are copied after worktree creation to preserve permissions
+and settings.  Supports glob patterns like \".claude/*.json\".
+
+Common files to copy:
+- .claude/settings.local.json - Claude Code local permissions"
+  :type '(repeat string)
+  :group 'org-roam-todo)
+
 ;;;; Project Selection
 
 (defun org-roam-todo--worktree-main-repo (dir)
@@ -205,6 +216,42 @@ Calls the pretrust-directory.py script to add an entry to ~/.claude.json."
             (message "Warning: Failed to pre-trust worktree (exit %d)" result)))
       (message "Warning: pretrust-directory.py not found at %s" script-path))))
 
+(defun org-roam-todo--expand-glob-pattern (pattern directory)
+  "Expand glob PATTERN in DIRECTORY, returning list of matching files.
+If PATTERN contains no glob characters, returns a list with just that path
+if the file exists."
+  (let ((full-pattern (expand-file-name pattern directory)))
+    (if (string-match-p "[*?\\[]" pattern)
+        ;; Has glob characters - use file-expand-wildcards
+        (file-expand-wildcards full-pattern t)
+      ;; No glob - just check if file exists
+      (if (file-exists-p full-pattern)
+          (list full-pattern)
+        nil))))
+
+(defun org-roam-todo--copy-files-to-worktree (project-root worktree-path)
+  "Copy configured permission files from PROJECT-ROOT to WORKTREE-PATH.
+Files are specified in `org-roam-todo-worktree-copy-patterns'.
+Missing source files are silently skipped."
+  (let ((copied-count 0))
+    (dolist (pattern org-roam-todo-worktree-copy-patterns)
+      (let ((matching-files (org-roam-todo--expand-glob-pattern pattern project-root)))
+        (dolist (src matching-files)
+          (let* ((relative-path (file-relative-name src project-root))
+                 (dst (expand-file-name relative-path worktree-path)))
+            (condition-case err
+                (progn
+                  ;; Ensure destination directory exists
+                  (make-directory (file-name-directory dst) t)
+                  ;; Copy the file (overwrite if exists)
+                  (copy-file src dst t)
+                  (cl-incf copied-count)
+                  (message "Copied %s to worktree" relative-path))
+              (error
+               (message "Warning: Failed to copy %s: %s" relative-path (error-message-string err))))))))
+    (when (> copied-count 0)
+      (message "Copied %d permission file(s) to worktree" copied-count))))
+
 (defun org-roam-todo--worktree-path (project-root branch-name)
   "Calculate worktree path for PROJECT-ROOT and BRANCH-NAME."
   (let* ((project-name (org-roam-todo--project-name project-root))
@@ -225,7 +272,8 @@ Calls the pretrust-directory.py script to add an entry to ~/.claude.json."
 
 (defun org-roam-todo--create-worktree (project-root branch-name worktree-path)
   "Create a git worktree at WORKTREE-PATH for BRANCH-NAME from PROJECT-ROOT.
-Creates the branch if it doesn't exist."
+Creates the branch if it doesn't exist.  Also copies permission files
+configured in `org-roam-todo-worktree-copy-patterns'."
   (let ((default-directory project-root))
     ;; Ensure parent directory exists
     (make-directory (file-name-directory worktree-path) t)
@@ -240,7 +288,9 @@ Creates the branch if it doesn't exist."
       (let ((result (call-process "git" nil "*org-roam-todo-worktree-output*" nil
                                   "worktree" "add" "-b" branch-name worktree-path)))
         (unless (= 0 result)
-          (error "Failed to create worktree with new branch: see *org-roam-todo-worktree-output*"))))))
+          (error "Failed to create worktree with new branch: see *org-roam-todo-worktree-output*"))))
+    ;; Copy permission files to the new worktree
+    (org-roam-todo--copy-files-to-worktree project-root worktree-path)))
 
 ;;;; TODO Query & Selection
 
