@@ -925,9 +925,13 @@ Called by `render-dynamic-section'. Assumes point is positioned correctly."
   "Insert a diff display for FILE-PATH with OLD-STRING and NEW-STRING.
 Inserts directly at point with proper faces and clickable link."
   (let ((inhibit-read-only t))
-    ;; Tool header in new terse format
-    (insert (propertize "edit" 'face 'claude-agent-tool-name-face))
-    (insert (propertize "› " 'face 'claude-agent-tool-arrow-face))
+    ;; Tool header in new terse format (using overlays to survive font-lock)
+    (let ((start (point)))
+      (insert "edit")
+      (claude-agent--apply-face start (point) 'claude-agent-tool-name-face))
+    (let ((start (point)))
+      (insert "› ")
+      (claude-agent--apply-face start (point) 'claude-agent-tool-arrow-face))
     (insert-text-button file-path
                         'action (lambda (_btn)
                                   (find-file-other-window
@@ -951,12 +955,12 @@ Inserts directly at point with proper faces and clickable link."
           (claude-agent--apply-face line-start (point) 'claude-agent-diff-added))))))
 
 (defface claude-agent-tool-name-face
-  '((t :foreground "#5c6370"))
-  "Face for tool names in tool calls (dimmed)."
+  '((t :foreground "#e5c07b" :weight bold))
+  "Face for tool names in tool calls (orange, like headers)."
   :group 'claude-agent)
 
 (defface claude-agent-tool-arrow-face
-  '((t :foreground "#5c6370"))
+  '((t :foreground "#e5c07b"))
   "Face for the arrow separator in tool calls."
   :group 'claude-agent)
 
@@ -1026,21 +1030,26 @@ Uses terse format: toolname› args with appropriate faces."
     (delete-region claude-agent--static-end-marker (point-max))
     (goto-char claude-agent--static-end-marker)
 
-    ;; Insert tool name
-    (insert (propertize tool-lower 'face 'claude-agent-tool-name-face))
-    (insert (propertize "› " 'face 'claude-agent-tool-arrow-face))
-
-    ;; Insert args with appropriate face based on tool type
-    (cond
-     ((string= tool-name "Bash")
-      (insert (claude-agent--format-bash-multiline args-string)))
-     ((member tool-name '("Read" "Write" "Edit"))
-      (insert (propertize args-string 'face 'claude-agent-tool-file-face)))
-     ((member tool-name '("Glob" "Grep"))
-      (insert (propertize args-string 'face 'claude-agent-tool-pattern-face)))
-     (t
-      (insert (propertize args-string 'face 'claude-agent-tool-cmd-face))))
-
+    ;; Insert tool name with overlay (survives font-lock)
+    (let ((start (point)))
+      (insert tool-lower)
+      (claude-agent--apply-face start (point) 'claude-agent-tool-name-face))
+    ;; Insert arrow with overlay
+    (let ((start (point)))
+      (insert "› ")
+      (claude-agent--apply-face start (point) 'claude-agent-tool-arrow-face))
+    ;; Insert args with overlay based on tool type
+    (let ((start (point))
+          (face (cond
+                 ((string= tool-name "Bash") nil)
+                 ((member tool-name '("Read" "Write" "Edit")) 'claude-agent-tool-file-face)
+                 ((member tool-name '("Glob" "Grep")) 'claude-agent-tool-pattern-face)
+                 (t 'claude-agent-tool-cmd-face))))
+      (if (string= tool-name "Bash")
+          (insert (claude-agent--format-bash-multiline args-string))
+        (insert args-string))
+      (when face
+        (claude-agent--apply-face start (point) face)))
     (insert "\n")
 
     ;; Update static marker
