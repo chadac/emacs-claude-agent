@@ -15,6 +15,7 @@
 ;;; Code:
 
 (require 'project)
+(require 'transient)
 
 (defgroup claude-pair nil
   "Pair programming features for Claude."
@@ -199,31 +200,75 @@ With prefix arg PROJECT-WIDE, scan entire project instead of current buffer."
       (claude-pair--send-to-agent message-text)
       (message "Sent %d CLAUDE: comment(s) to agent." (length comments)))))
 
+(defun claude-pair--get-claude-buffers ()
+  "Get list of all active Claude agent buffers.
+Returns list of (buffer-name . buffer) pairs."
+  (let ((buffers nil))
+    (dolist (buf (buffer-list))
+      (when (and (string-match-p "^\\*claude" (buffer-name buf))
+                 (with-current-buffer buf
+                   (and (boundp 'claude-agent--process)
+                        claude-agent--process
+                        (process-live-p claude-agent--process))))
+        (push (cons (buffer-name buf) buf) buffers)))
+    (nreverse buffers)))
+
+(defun claude-pair--get-org-project-root ()
+  "Get PROJECT_ROOT property from current org buffer, if any."
+  (when (derived-mode-p 'org-mode)
+    (save-excursion
+      (goto-char (point-min))
+      (when (re-search-forward "^:PROJECT_ROOT:\\s-*\\(.+\\)$" nil t)
+        (let ((root (string-trim (match-string 1))))
+          (when (and root (not (string-empty-p root)))
+            (expand-file-name root)))))))
+
+(defun claude-pair--select-agent-buffer ()
+  "Select a Claude agent buffer, prompting if multiple are available.
+Returns the selected buffer or nil."
+  (let* ((claude-buffers (claude-pair--get-claude-buffers))
+         (count (length claude-buffers)))
+    (cond
+     ((= count 0) nil)
+     ((= count 1) (cdar claude-buffers))
+     (t
+      ;; Multiple agents - try to find one matching current context
+      (let* (;; First check for org PROJECT_ROOT property
+             (org-root (claude-pair--get-org-project-root))
+             ;; Then fall back to project.el
+             (project (project-current))
+             (project-root (when project (expand-file-name (project-root project))))
+             ;; Use org root if available, otherwise project root
+             (root (or org-root project-root))
+             (matching-buffer
+              (when root
+                (cl-find-if
+                 (lambda (pair)
+                   (with-current-buffer (cdr pair)
+                     (and (boundp 'claude-agent--work-dir)
+                          claude-agent--work-dir
+                          ;; Check if agent work-dir matches the root
+                          (string= (expand-file-name claude-agent--work-dir)
+                                   (expand-file-name root)))))
+                 claude-buffers))))
+        (if matching-buffer
+            (cdr matching-buffer)
+          ;; No match - prompt user to select
+          (let ((choice (completing-read "Select Claude agent: "
+                                         (mapcar #'car claude-buffers)
+                                         nil t)))
+            (cdr (assoc choice claude-buffers)))))))))
+
 (defun claude-pair--send-to-agent (text)
-  "Send TEXT to the Claude agent in the current project."
-  ;; Find the claude buffer for this project
-  (let* ((project (project-current))
-         (root (when project (project-root project)))
-         (claude-buffer (when root
-                          (cl-find-if
-                           (lambda (buf)
-                             (and (string-match-p "^\\*claude" (buffer-name buf))
-                                  (with-current-buffer buf
-                                    (and (boundp 'claude-agent--work-dir)
-                                         claude-agent--work-dir
-                                         (string-prefix-p
-                                          (expand-file-name claude-agent--work-dir)
-                                          (expand-file-name root))))))
-                           (buffer-list)))))
+  "Send TEXT to the Claude agent.
+If multiple agents are running, prompts for selection."
+  (let ((claude-buffer (claude-pair--select-agent-buffer)))
     (if claude-buffer
         (with-current-buffer claude-buffer
-          (when (and (boundp 'claude-agent--process)
-                     claude-agent--process
-                     (process-live-p claude-agent--process))
-            (process-send-string
-             claude-agent--process
-             (concat (json-encode `((type . "message") (text . ,text))) "\n"))))
-      (error "No Claude agent found for this project"))))
+          (process-send-string
+           claude-agent--process
+           (concat (json-encode `((type . "message") (text . ,text))) "\n")))
+      (error "No Claude agent found. Start one with M-x claude-agent"))))
 
 ;;;; Point-based Quick Actions
 
@@ -406,17 +451,37 @@ Returns a plist with location info and code context."
     (claude-pair--send-to-agent formatted)
     (message "Sent fix request to agent.")))
 
+;;;; Transient Menu
+
+(defvar claude-pair-transient-suffixes nil
+  "List of additional transient suffixes to add to the Claude menu.
+Each element should be a list suitable for `transient-append-suffix'.")
+
+(defun claude-pair--build-transient ()
+  "Build the Claude transient menu dynamically."
+  ;; Define the base transient
+  (transient-define-prefix claude-pair-menu ()
+    "Claude pair programming commands."
+    ["Point Actions"
+     ("x" "Action at point" claude-pair-point-action)
+     ("t" "Write test" claude-pair-point-action-test)
+     ("d" "Add documentation" claude-pair-point-action-doc)
+     ("f" "Fix issue" claude-pair-point-action-fix)]
+    ["Comments"
+     ("c" "Send CLAUDE: comments" claude-pair-send-comments)
+     ("C" "Send project comments" (lambda () (interactive) (claude-pair-send-comments t)))]))
+
+;; Build the transient on load
+(claude-pair--build-transient)
+
 ;;;; Keybindings
 
 (defvar claude-pair-mode-map
   (let ((map (make-sparse-keymap)))
-    ;; Claude Comments
+    ;; Main transient menu
+    (define-key map (kbd "C-c c") #'claude-pair-menu)
+    ;; Legacy binding for comments
     (define-key map (kbd "C-x c c") #'claude-pair-send-comments)
-    ;; Point-based Quick Actions
-    (define-key map (kbd "C-c c x") #'claude-pair-point-action)
-    (define-key map (kbd "C-c c t") #'claude-pair-point-action-test)
-    (define-key map (kbd "C-c c d") #'claude-pair-point-action-doc)
-    (define-key map (kbd "C-c c f") #'claude-pair-point-action-fix)
     map)
   "Keymap for claude-pair-mode.")
 

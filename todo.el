@@ -829,20 +829,47 @@ With prefix arg PROMPT, prompts for project selection."
       (tabulated-list-print))
     (pop-to-buffer buffer)))
 
-;;;; Minor Mode
+;;;; Minor Mode & Transient Integration
+
+(require 'transient)
+
+;; Define the TODO-specific transient menu
+(transient-define-prefix org-roam-todo-menu ()
+  "TODO node commands.
+Commands for working with org-roam TODO nodes."
+  ["TODO Actions"
+   ("s" "Send to main session" org-roam-todo-send-to-main)
+   ("w" "Create worktree" org-roam-todo-create-worktree)
+   ("r" "Resend to session" org-roam-todo-resend)])
 
 (defvar org-roam-todo-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "C-c c t") #'org-roam-todo-send-to-main)
-    (define-key map (kbd "C-c c w") #'org-roam-todo-create-worktree)
-    (define-key map (kbd "C-c c s") #'org-roam-todo-resend)
+    ;; Bind C-c c to show a combined menu when in TODO mode
+    (define-key map (kbd "C-c c") #'org-roam-todo--show-menu)
     map)
   "Keymap for `org-roam-todo-mode'.
 
-Key bindings:
-  C-c c t   Send TODO to main Claude session
-  C-c c w   Create worktree and spawn new Claude session
-  C-c c s   Resend TODO content to associated session")
+Press C-c c to show the Claude menu with TODO-specific commands.")
+
+(defun org-roam-todo--show-menu ()
+  "Show the Claude menu with TODO commands added."
+  (interactive)
+  ;; Dynamically define a combined transient
+  (transient-define-prefix org-roam-todo--combined-menu ()
+    "Claude commands (with TODO actions)."
+    ["Point Actions"
+     ("x" "Action at point" claude-pair-point-action)
+     ("t" "Write test" claude-pair-point-action-test)
+     ("d" "Add documentation" claude-pair-point-action-doc)
+     ("f" "Fix issue" claude-pair-point-action-fix)]
+    ["Comments"
+     ("c" "Send CLAUDE: comments" claude-pair-send-comments)
+     ("C" "Send project comments" (lambda () (interactive) (claude-pair-send-comments t)))]
+    ["TODO Actions"
+     ("s" "Send to main session" org-roam-todo-send-to-main)
+     ("w" "Create worktree" org-roam-todo-create-worktree)
+     ("r" "Resend to session" org-roam-todo-resend)])
+  (org-roam-todo--combined-menu))
 
 ;;;###autoload
 (define-minor-mode org-roam-todo-mode
@@ -850,7 +877,13 @@ Key bindings:
 
 \\{org-roam-todo-mode-map}"
   :lighter " OrgTODO"
-  :keymap org-roam-todo-mode-map)
+  :keymap org-roam-todo-mode-map
+  ;; Ensure our keymap takes precedence over claude-pair-mode
+  (when org-roam-todo-mode
+    (let ((entry (assq 'org-roam-todo-mode minor-mode-map-alist)))
+      (when entry
+        (setq minor-mode-map-alist
+              (cons entry (delq entry minor-mode-map-alist)))))))
 
 (defun org-roam-todo--maybe-enable-mode ()
   "Enable `org-roam-todo-mode' if this is an org-roam TODO node."
