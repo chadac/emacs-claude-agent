@@ -15,7 +15,6 @@
 ;;; Code:
 
 (require 'project)
-(require 'transient)
 
 (defgroup claude-pair nil
   "Pair programming features for Claude."
@@ -451,35 +450,16 @@ Returns a plist with location info and code context."
     (claude-pair--send-to-agent formatted)
     (message "Sent fix request to agent.")))
 
-;;;; Transient Menu
-
-(defvar claude-pair-transient-suffixes nil
-  "List of additional transient suffixes to add to the Claude menu.
-Each element should be a list suitable for `transient-append-suffix'.")
-
-(defun claude-pair--build-transient ()
-  "Build the Claude transient menu dynamically."
-  ;; Define the base transient
-  (transient-define-prefix claude-pair-menu ()
-    "Claude pair programming commands."
-    ["Point Actions"
-     ("x" "Action at point" claude-pair-point-action)
-     ("t" "Write test" claude-pair-point-action-test)
-     ("d" "Add documentation" claude-pair-point-action-doc)
-     ("f" "Fix issue" claude-pair-point-action-fix)]
-    ["Comments"
-     ("c" "Send CLAUDE: comments" claude-pair-send-comments)
-     ("C" "Send project comments" (lambda () (interactive) (claude-pair-send-comments t)))]))
-
-;; Build the transient on load
-(claude-pair--build-transient)
-
 ;;;; Keybindings
+
+;; Forward declarations
+(declare-function claude-menu "claude-transient")
+(defvar claude-agent-mode)
 
 (defvar claude-pair-mode-map
   (let ((map (make-sparse-keymap)))
-    ;; Main transient menu
-    (define-key map (kbd "C-c c") #'claude-pair-menu)
+    ;; Main transient menu (dispatches to pair or agent menu based on context)
+    (define-key map (kbd "C-c c") #'claude-menu)
     ;; Legacy binding for comments
     (define-key map (kbd "C-x c c") #'claude-pair-send-comments)
     map)
@@ -490,8 +470,18 @@ Each element should be a list suitable for `transient-append-suffix'.")
   "Minor mode for pair programming with Claude.
 \\{claude-pair-mode-map}"
   :lighter " Claude-Pair"
-  :keymap claude-pair-mode-map
-  :global t)
+  :keymap claude-pair-mode-map)
+
+;;;###autoload
+(define-globalized-minor-mode global-claude-pair-mode
+  claude-pair-mode
+  claude-pair--turn-on-maybe
+  :group 'claude-pair)
+
+(defun claude-pair--turn-on-maybe ()
+  "Turn on `claude-pair-mode' unless in a Claude agent buffer."
+  (unless (derived-mode-p 'claude-agent-mode)
+    (claude-pair-mode 1)))
 
 (provide 'claude-pair)
 ;;; claude-pair.el ends here

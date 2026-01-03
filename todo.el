@@ -38,8 +38,7 @@
 ;; Forward declarations
 (declare-function projectile-project-root "projectile")
 (declare-function projectile-known-projects "projectile")
-(declare-function claude-spawn-agent "claude")
-(declare-function eat-term-send-string "eat")
+(declare-function claude-agent-run "claude-agent")
 (declare-function claude-mcp-deftool "claude-mcp")
 
 ;;;; Customization
@@ -425,14 +424,15 @@ WORKTREE-PATH is included in the message for context."
                      (if (not buffer)
                          (message "ERROR: Buffer %s not found" buf-name)
                        (with-current-buffer buffer
-                         (if (not (and (boundp 'eat-terminal) eat-terminal))
-                             (message "ERROR: eat-terminal not ready in %s" buf-name)
+                         (if (not (and (boundp 'claude-agent--process)
+                                       claude-agent--process
+                                       (process-live-p claude-agent--process)))
+                             (message "ERROR: Claude agent not ready in %s" buf-name)
                            (let ((msg (format "[WORKTREE TASK]\n\n%s\n\nWorktree: %s\nPlease help me with this task."
                                               task-content wpath)))
-                             (eat-term-send-string eat-terminal "\C-u")
-                             (eat-term-send-string eat-terminal msg)
-                             (sit-for 0.1)
-                             (eat-term-send-string eat-terminal "\r")
+                             (process-send-string
+                              claude-agent--process
+                              (concat (json-encode `((type . "message") (text . ,msg))) "\n"))
                              (message "Task sent to %s" buf-name)))))))))
     (if delay
         (run-with-timer delay nil send-fn buffer-name content worktree-path)
@@ -446,7 +446,7 @@ If the worktree and session already exist, sends the task to the existing sessio
   (interactive)
   (unless (org-roam-todo--node-p)
     (user-error "Not in an org-roam TODO node"))
-  (require 'claude)
+  (require 'claude-agent)
   (let* ((project-root (org-roam-todo--get-property "PROJECT_ROOT"))
          (existing-worktree (org-roam-todo--get-property "WORKTREE_PATH"))
          (title (save-excursion
@@ -459,10 +459,16 @@ If the worktree and session already exist, sends the task to the existing sessio
          (worktree-path (or existing-worktree
                             (org-roam-todo--worktree-path project-root branch-name)))
          (content (org-roam-todo--get-node-content))
-         ;; Calculate expected buffer name
+         ;; Check for existing claude-agent buffer for this worktree
          (expanded-path (expand-file-name worktree-path))
-         (expected-buffer-name (format "*claude:%s:%s*" expanded-path branch-name))
-         (existing-buffer (get-buffer expected-buffer-name)))
+         (existing-buffer (cl-find-if
+                           (lambda (buf)
+                             (with-current-buffer buf
+                               (and (boundp 'claude-agent--directory)
+                                    claude-agent--directory
+                                    (string= (expand-file-name claude-agent--directory)
+                                             expanded-path))))
+                           (buffer-list))))
     (unless project-root
       (user-error "No PROJECT_ROOT property found"))
     ;; Create worktree if needed
@@ -477,14 +483,15 @@ If the worktree and session already exist, sends the task to the existing sessio
     (save-buffer)
     ;; Check if session already exists
     (if existing-buffer
-        (progn
+        (let ((buffer-name (buffer-name existing-buffer)))
           ;; Session exists - send task immediately (no delay needed)
-          (org-roam-todo--send-task-to-buffer expected-buffer-name content worktree-path)
+          (org-roam-todo--send-task-to-buffer buffer-name content worktree-path)
           (pop-to-buffer existing-buffer)
-          (message "Sent task to existing session: %s" expected-buffer-name))
+          (message "Sent task to existing session: %s" buffer-name))
       ;; New session - pre-trust and spawn
       (org-roam-todo--pre-trust-worktree worktree-path)
-      (let ((buffer-name (claude-spawn-agent worktree-path branch-name)))
+      (let* ((buf (claude-agent-run worktree-path))
+             (buffer-name (buffer-name buf)))
         ;; Store buffer name in node
         (org-roam-todo--set-property "CLAUDE_AGENT_BUFFER" buffer-name)
         (save-buffer)
@@ -520,7 +527,9 @@ Optional PROJECT-FILTER limits selection to a specific project."
 TODO is the todo plist, CONTENT is the full TODO content."
   (when-let ((buffer (get-buffer buffer-name)))
     (with-current-buffer buffer
-      (when (and (boundp 'eat-terminal) eat-terminal)
+      (when (and (boundp 'claude-agent--process)
+                 claude-agent--process
+                 (process-live-p claude-agent--process))
         (let ((msg (format "You are working on a TODO task.
 
 ## Task: %s
@@ -537,9 +546,9 @@ TODO is the todo plist, CONTENT is the full TODO content."
 Please start by reviewing the acceptance criteria and creating a plan."
                            (plist-get todo :title)
                            content)))
-          (eat-term-send-string eat-terminal msg)
-          (sit-for 0.1)
-          (eat-term-send-string eat-terminal "\r"))))))
+          (process-send-string
+           claude-agent--process
+           (concat (json-encode `((type . "message") (text . ,msg))) "\n")))))))
 
 ;;;###autoload
 (defun org-roam-todo-start-claude (&optional project-filter)
@@ -547,7 +556,7 @@ Please start by reviewing the acceptance criteria and creating a plan."
 Optional PROJECT-FILTER limits selection to a specific project.
 If TODO has a worktree, starts agent there; otherwise uses project root."
   (interactive)
-  (require 'claude)
+  (require 'claude-agent)
   (let* ((todo (org-roam-todo--completing-read project-filter "Start Claude on TODO: "))
          (worktree (plist-get todo :worktree-path))
          (project-root (plist-get todo :project-root))
@@ -556,21 +565,21 @@ If TODO has a worktree, starts agent there; otherwise uses project root."
                        worktree
                      project-root))
          (title (plist-get todo :title))
-         (content (org-roam-todo--get-full-content (plist-get todo :file)))
-         (agent-name (org-roam-todo--slugify title))
-         (buffer-name (claude-spawn-agent work-dir agent-name)))
+         (content (org-roam-todo--get-full-content (plist-get todo :file))))
     (unless todo
       (user-error "No TODO selected"))
-    ;; Update status in the TODO file
-    (with-current-buffer (find-file-noselect (plist-get todo :file))
-      (org-roam-todo--set-property "STATUS" "active")
-      (org-roam-todo--set-property "CLAUDE_AGENT_BUFFER" buffer-name)
-      (save-buffer))
-    ;; Send task message after delay for Claude to initialize
-    (run-with-timer 5 nil
-                    #'org-roam-todo--send-initial-message
-                    buffer-name todo content)
-    (message "Started Claude agent for: %s" title)))
+    (let* ((buf (claude-agent-run work-dir))
+           (buffer-name (buffer-name buf)))
+      ;; Update status in the TODO file
+      (with-current-buffer (find-file-noselect (plist-get todo :file))
+        (org-roam-todo--set-property "STATUS" "active")
+        (org-roam-todo--set-property "CLAUDE_AGENT_BUFFER" buffer-name)
+        (save-buffer))
+      ;; Send task message after delay for Claude to initialize
+      (run-with-timer 5 nil
+                      #'org-roam-todo--send-initial-message
+                      buffer-name todo content)
+      (message "Started Claude agent for: %s" title))))
 
 ;;;###autoload
 (defun org-roam-todo-start-claude-project ()
@@ -831,45 +840,17 @@ With prefix arg PROMPT, prompts for project selection."
 
 ;;;; Minor Mode & Transient Integration
 
-(require 'transient)
-
-;; Define the TODO-specific transient menu
-(transient-define-prefix org-roam-todo-menu ()
-  "TODO node commands.
-Commands for working with org-roam TODO nodes."
-  ["TODO Actions"
-   ("s" "Send to main session" org-roam-todo-send-to-main)
-   ("w" "Create worktree" org-roam-todo-create-worktree)
-   ("r" "Resend to session" org-roam-todo-resend)])
+;; Forward declaration for claude-menu
+(declare-function claude-menu "claude-transient")
 
 (defvar org-roam-todo-mode-map
   (let ((map (make-sparse-keymap)))
-    ;; Bind C-c c to show a combined menu when in TODO mode
-    (define-key map (kbd "C-c c") #'org-roam-todo--show-menu)
+    ;; Bind C-c c to the unified Claude menu
+    (define-key map (kbd "C-c c") #'claude-menu)
     map)
   "Keymap for `org-roam-todo-mode'.
 
-Press C-c c to show the Claude menu with TODO-specific commands.")
-
-(defun org-roam-todo--show-menu ()
-  "Show the Claude menu with TODO commands added."
-  (interactive)
-  ;; Dynamically define a combined transient
-  (transient-define-prefix org-roam-todo--combined-menu ()
-    "Claude commands (with TODO actions)."
-    ["Point Actions"
-     ("x" "Action at point" claude-pair-point-action)
-     ("t" "Write test" claude-pair-point-action-test)
-     ("d" "Add documentation" claude-pair-point-action-doc)
-     ("f" "Fix issue" claude-pair-point-action-fix)]
-    ["Comments"
-     ("c" "Send CLAUDE: comments" claude-pair-send-comments)
-     ("C" "Send project comments" (lambda () (interactive) (claude-pair-send-comments t)))]
-    ["TODO Actions"
-     ("s" "Send to main session" org-roam-todo-send-to-main)
-     ("w" "Create worktree" org-roam-todo-create-worktree)
-     ("r" "Resend to session" org-roam-todo-resend)])
-  (org-roam-todo--combined-menu))
+Press C-c c to show the Claude menu.")
 
 ;;;###autoload
 (define-minor-mode org-roam-todo-mode
@@ -877,13 +858,7 @@ Press C-c c to show the Claude menu with TODO-specific commands.")
 
 \\{org-roam-todo-mode-map}"
   :lighter " OrgTODO"
-  :keymap org-roam-todo-mode-map
-  ;; Ensure our keymap takes precedence over claude-pair-mode
-  (when org-roam-todo-mode
-    (let ((entry (assq 'org-roam-todo-mode minor-mode-map-alist)))
-      (when entry
-        (setq minor-mode-map-alist
-              (cons entry (delq entry minor-mode-map-alist)))))))
+  :keymap org-roam-todo-mode-map)
 
 (defun org-roam-todo--maybe-enable-mode ()
   "Enable `org-roam-todo-mode' if this is an org-roam TODO node."

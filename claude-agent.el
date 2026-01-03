@@ -21,6 +21,7 @@
 (require 'org)
 (require 'transient)
 (require 'claude-mcp)
+(require 'claude-transient)
 
 ;;;; Customization
 
@@ -314,8 +315,8 @@ Each entry is (MARKER NAME . RESULT-STRING).")
     (define-key map (kbd "C-c C-q") #'claude-agent-quit)
     (define-key map (kbd "M-p") #'claude-agent-previous-input)
     (define-key map (kbd "M-n") #'claude-agent-next-input)
-    ;; Transient menu (C-c C-a for "actions")
-    (define-key map (kbd "C-c C-a") #'claude-agent-transient-menu)
+    ;; Transient menu (C-c c for "claude")
+    (define-key map (kbd "C-c c") #'claude-menu)
     map)
   "Keymap for `claude-agent-mode'.")
 
@@ -345,7 +346,7 @@ Each entry is (MARKER NAME . RESULT-STRING).")
     (define-key map (kbd "{") #'claude-agent-previous-section)
     (define-key map (kbd "}") #'claude-agent-next-section)
     ;; Help
-    (define-key map (kbd "?") #'claude-agent-transient-menu)
+    (define-key map (kbd "?") #'claude-menu)
     map)
   "Keymap for the read-only log area in `claude-agent-mode'.
 These single-key bindings only apply outside the input area.")
@@ -383,8 +384,8 @@ These single-key bindings only apply outside the input area.")
   ;; Use after-change-major-mode-hook to ensure evil is loaded
   (add-hook 'evil-insert-state-entry-hook
             #'claude-agent--on-insert-state-entry nil t)
-  ;; Add C-c C-a for transient menu (works in all states)
-  (local-set-key (kbd "C-c C-a") #'claude-agent-transient-menu))
+  ;; Add C-c c for transient menu (works in all states)
+  (local-set-key (kbd "C-c c") #'claude-menu))
 
 ;;;; Helper functions
 
@@ -2568,50 +2569,6 @@ Optional FINAL-MESSAGE is displayed briefly in the echo area."
             (format "Session: %s" (substring session-id 0 (min 8 (length session-id))))
           "Active"))
     "No session"))
-
-;;;###autoload (autoload 'claude-agent-transient-menu "claude-agent" nil t)
-(transient-define-prefix claude-agent-transient-menu ()
-  "Claude Agent command menu.
-
-In the log area, single-key bindings are active (like magit).
-In the input area, keys insert text normally.
-Press 'i' or RET in the log area to jump to input."
-  [:description
-   (lambda () (concat "Claude Agent  "
-                      (propertize (claude-agent--session-description) 'face 'transient-value)))
-   ""]
-  [["Model"
-    ("m" "Change model" claude-agent-set-model
-     :description (lambda () (concat "Model  " (propertize (or (claude-agent--format-model-for-display
-                                                                 (or (claude-agent--current-model) ""))
-                                                               "none")
-                                                           'face 'transient-value))))
-    ("$" "Show cost/tokens" claude-agent-show-cost)]
-   ["MCP Servers  (M prefix)"
-    ("M l" "List servers" claude-agent-mcp-list)
-    ("M s" "Show status" claude-agent-show-mcp-status)
-    ("M a" "Add server" claude-agent-mcp-add)
-    ("M r" "Remove server" claude-agent-mcp-remove)]
-   ["Session"
-    ("c" "Compact history" claude-agent-compact)
-    ("C" "Clear history" claude-agent-clear)
-    ("q" "Quit session" claude-agent-quit)
-    ("k" "Interrupt" claude-agent-interrupt)]
-   ["View"
-    ("p" "Toggle progress" claude-agent-toggle-progress
-     :description (lambda () (concat "Progress "
-                                     (propertize (if claude-agent--progress-visible "visible" "hidden")
-                                                 'face 'transient-value))))
-    ("t" "Toggle todos" claude-agent-toggle-todos
-     :description (lambda () (concat "Todos "
-                                     (propertize (if claude-agent--todos-visible "visible" "hidden")
-                                                 'face 'transient-value))))]
-   ["Navigation"
-    ("i" "Go to input" claude-agent-goto-input)
-    ("RET" "Go to input" claude-agent-goto-input)]
-   ["Git"
-    ("g" "Approve commit" claude-mcp-magit-commit-approve
-     :if (lambda () claude-mcp-magit--pending-commit))]])
 
 (provide 'claude-agent)
 ;;; claude-agent.el ends here
