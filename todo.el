@@ -150,8 +150,8 @@ If PROJECT-ROOT is nil, prompts for project selection."
   (let* ((project-root (or project-root (org-roam-todo--select-project)))
          (project-name (org-roam-todo--project-name project-root))
          (project-dir (expand-file-name (concat "projects/" project-name) org-roam-directory))
-         ;; Generate timestamps directly to avoid escaping issues
-         (id-timestamp (format-time-string "%Y%m%dT%H%M%S"))
+         ;; Generate timestamps with random suffix to ensure uniqueness
+         (id-timestamp (format "%s%04x" (format-time-string "%Y%m%dT%H%M%S") (random 65536)))
          (date-stamp (format-time-string "%Y-%m-%d")))
     ;; Ensure project directory exists
     (unless (file-directory-p project-dir)
@@ -1040,7 +1040,7 @@ Returns JSON with the created TODO's file path and ID."
   (let* ((project-name (org-roam-todo--project-name project-root))
          (project-dir (expand-file-name (concat "projects/" project-name) org-roam-directory))
          (slug (org-roam-todo--slugify title))
-         (id-timestamp (format-time-string "%Y%m%dT%H%M%S"))
+         (id-timestamp (format "%s%04x" (format-time-string "%Y%m%dT%H%M%S") (random 65536)))
          (date-stamp (format-time-string "%Y-%m-%d"))
          (file-path (expand-file-name (format "todo-%s.org" slug) project-dir))
          ;; Format acceptance criteria as org checkboxes

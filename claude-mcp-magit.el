@@ -268,7 +268,9 @@ COUNT defaults to 5. DIRECTORY defaults to claude-session-cwd."
     (goto-char (point-min))
     (insert claude-mcp-magit--pending-message)
     (setq claude-mcp-magit--pending-message nil)
-    (remove-hook 'git-commit-setup-hook #'claude-mcp-magit--insert-pending-message)))
+    (remove-hook 'git-commit-setup-hook #'claude-mcp-magit--insert-pending-message)
+    ;; Save the buffer so the commit message isn't empty
+    (save-buffer)))
 
 (defun claude-mcp-magit-commit-propose (message &optional directory)
   "Propose a commit with MESSAGE for user approval.
