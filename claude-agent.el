@@ -1088,6 +1088,31 @@ Called by `render-dynamic-section'. Assumes point is positioned correctly."
 
 ;;;; Content helpers
 
+(defun claude-agent--count-diff-lines (old-string new-string)
+  "Count lines removed and added from OLD-STRING and NEW-STRING.
+Returns a cons cell (REMOVED . ADDED)."
+  (let ((removed (if (and old-string (not (string-empty-p old-string)))
+                     (length (split-string old-string "\n"))
+                   0))
+        (added (if (and new-string (not (string-empty-p new-string)))
+                   (length (split-string new-string "\n"))
+                 0)))
+    (cons removed added)))
+
+(defun claude-agent--format-diff-content (old-string new-string)
+  "Format OLD-STRING and NEW-STRING as a diff string for storage.
+Returns a string with - and + prefixed lines."
+  (let ((result ""))
+    ;; Old lines (removed)
+    (when (and old-string (not (string-empty-p old-string)))
+      (dolist (line (split-string old-string "\n"))
+        (setq result (concat result "- " line "\n"))))
+    ;; New lines (added)
+    (when (and new-string (not (string-empty-p new-string)))
+      (dolist (line (split-string new-string "\n"))
+        (setq result (concat result "+ " line "\n"))))
+    result))
+
 (defun claude-agent--insert-diff (file-path old-string new-string)
   "Insert a diff display for FILE-PATH with OLD-STRING and NEW-STRING.
 Inserts directly at point with proper faces and clickable link."
@@ -1120,6 +1145,34 @@ Inserts directly at point with proper faces and clickable link."
         (let ((line-start (point)))
           (insert "+ " line "\n")
           (claude-agent--apply-face line-start (point) 'claude-agent-diff-added))))))
+
+(defun claude-agent--insert-edit-summary (file-path old-string new-string)
+  "Insert a compact edit summary for FILE-PATH with line counts.
+Shows format: edit› filename.el (+N/-M)
+The full diff is stored in tool-results for popup display."
+  (let* ((inhibit-read-only t)
+         (counts (claude-agent--count-diff-lines old-string new-string))
+         (removed (car counts))
+         (added (cdr counts))
+         (filename (file-name-nondirectory file-path))
+         (summary (format "%s (+%d/-%d)" filename added removed)))
+    ;; Tool header
+    (let ((start (point)))
+      (insert "edit")
+      (claude-agent--apply-face start (point) 'claude-agent-tool-name-face))
+    (let ((start (point)))
+      (insert "› ")
+      (claude-agent--apply-face start (point) 'claude-agent-tool-arrow-face))
+    ;; Clickable filename with line counts
+    (insert-text-button summary
+                        'action (lambda (_btn)
+                                  (find-file-other-window
+                                   (button-get _btn 'file-path)))
+                        'file-path file-path
+                        'face 'claude-agent-tool-file-face
+                        'help-echo "Click to open file, hover for diff preview"
+                        'follow-link t)
+    (insert "\n")))
 
 (defface claude-agent-tool-name-face
   '((t :foreground "#e5c07b" :weight bold))
@@ -1598,36 +1651,44 @@ If VIRTUAL-INDENT is non-nil, apply it as line-prefix/wrap-prefix."
      (setq claude-agent--parse-state nil)
      (claude-agent--set-thinking "Thinking..."))
 
-    ;; Edit tool (special display)
+    ;; Edit tool (compact summary display with diff in popup)
     ("edit_tool"
      (let ((file-path (cdr (assq 'file_path msg)))
            (old-string (cdr (assq 'old_string msg)))
            (new-string (cdr (assq 'new_string msg))))
        (setq claude-agent--parse-state 'tool)
        (claude-agent--set-thinking (format "Editing: %s" (file-name-nondirectory file-path)))
-       ;; Mark position for tool result storage
+       ;; Mark position and name for tool result storage
        (setq claude-agent--last-tool-marker
              (copy-marker (or claude-agent--static-end-marker (point-max))))
-       ;; Insert the diff display
-       (let* ((inhibit-read-only t)
-              (saved-input (claude-agent--get-input-text))
-              (cursor-offset (when (and claude-agent--input-start-marker
-                                        (marker-position claude-agent--input-start-marker)
-                                        (>= (point) claude-agent--input-start-marker))
-                               (- (point) claude-agent--input-start-marker))))
-         (delete-region claude-agent--static-end-marker (point-max))
-         (goto-char claude-agent--static-end-marker)
-         (claude-agent--insert-diff file-path old-string new-string)
-         (set-marker claude-agent--static-end-marker (point))
-         (when claude-agent--has-conversation
-           (claude-agent--insert-status-bar))
-         (setq claude-agent--input-start-marker (point-marker))
-         (insert saved-input)
-         (claude-agent--update-read-only)
-         (claude-agent--update-placeholder)
-         (goto-char (if (and cursor-offset (>= cursor-offset 0))
-                        (min (+ claude-agent--input-start-marker cursor-offset) (point-max))
-                      claude-agent--input-start-marker)))))
+       (setq claude-agent--last-tool-name "Edit")
+       ;; Format diff content for storage in tool-results
+       (let ((diff-content (claude-agent--format-diff-content old-string new-string)))
+         ;; Store in tool-results for popup viewing (like other tools)
+         (push (list claude-agent--last-tool-marker "Edit" diff-content)
+               claude-agent--tool-results)
+         ;; Insert compact summary instead of full diff
+         (let* ((inhibit-read-only t)
+                (saved-input (claude-agent--get-input-text))
+                (cursor-offset (when (and claude-agent--input-start-marker
+                                          (marker-position claude-agent--input-start-marker)
+                                          (>= (point) claude-agent--input-start-marker))
+                                 (- (point) claude-agent--input-start-marker))))
+           (delete-region claude-agent--static-end-marker (point-max))
+           (goto-char claude-agent--static-end-marker)
+           (claude-agent--insert-edit-summary file-path old-string new-string)
+           (set-marker claude-agent--static-end-marker (point))
+           ;; Add tooltip to the summary line
+           (claude-agent--add-tool-tooltip claude-agent--last-tool-marker diff-content)
+           (when claude-agent--has-conversation
+             (claude-agent--insert-status-bar))
+           (setq claude-agent--input-start-marker (point-marker))
+           (insert saved-input)
+           (claude-agent--update-read-only)
+           (claude-agent--update-placeholder)
+           (goto-char (if (and cursor-offset (>= cursor-offset 0))
+                          (min (+ claude-agent--input-start-marker cursor-offset) (point-max))
+                        claude-agent--input-start-marker))))))
 
     ;; Write tool (special display)
     ("write_tool"
