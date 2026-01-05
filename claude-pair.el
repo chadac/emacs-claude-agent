@@ -358,7 +358,8 @@ Returns a plist with location info and code context."
           :context-lines context-lines)))
 
 (defun claude-pair--format-point-action (context message action-type)
-  "Format a point action request with CONTEXT, MESSAGE, and ACTION-TYPE."
+  "Format a point action request with CONTEXT, MESSAGE, and ACTION-TYPE.
+Uses org-mode formatting for display in Emacs."
   (let* ((file (plist-get context :file))
          (line (plist-get context :line))
          (column (plist-get context :column))
@@ -371,41 +372,38 @@ Returns a plist with location info and code context."
          (is-file-buffer (buffer-file-name))
          (parts '()))
     ;; Header with action type
-    (push (format "## Quick Action: %s\n\n" action-type) parts)
+    (push (format "** Quick Action: %s\n\n" action-type) parts)
     ;; Location info
     (if is-file-buffer
-        (push (format "**File:** `%s`\n" file) parts)
-      (push (format "**Buffer:** `%s`\n" file) parts))
+        (push (format "*File:* =%s=\n" file) parts)
+      (push (format "*Buffer:* =%s=\n" file) parts))
+    (unless has-region
+      (push (format "*Position:* Line %d, Column %d\n" line column) parts))
+    ;; Code context
     (if has-region
-        (push (format "**Selection:** Lines %d-%d\n" region-start region-end) parts)
-      (push (format "**Position:** Line %d, Column %d\n" line column) parts))
-    ;; User message
-    (push (format "\n**Request:** %s\n" message) parts)
-    ;; Context
-    (push "\n### Context\n\n" parts)
-    (if has-region
-        ;; Show selected region
+        ;; Show selected region with line numbers
         (progn
-          (push "**Selected code:**\n```\n" parts)
-          (push region-text parts)
-          (push "\n```\n" parts))
+          (push "\n*Selected code:*\n" parts)
+          (let ((lines (split-string region-text "\n"))
+                (line-num region-start))
+            (dolist (line-text lines)
+              (push (format "%4d→%s\n" line-num line-text) parts)
+              (cl-incf line-num))))
       ;; Show surrounding context with defun info
       (when defun-info
-        (push (format "**Inside function:** `%s` (lines %d-%d)\n\n"
+        (push (format "\n*Inside function:* =%s= (lines %d-%d)\n\n"
                       (plist-get defun-info :name)
                       (plist-get defun-info :start-line)
                       (plist-get defun-info :end-line))
               parts))
-      (push "```\n" parts)
       (dolist (ctx context-lines)
         (let ((ctx-line (car ctx))
               (ctx-text (cdr ctx)))
           (if (= ctx-line line)
-              (push (format "%4d: %s  <-- cursor here\n" ctx-line ctx-text) parts)
-            (push (format "%4d: %s\n" ctx-line ctx-text) parts))))
-      (push "```\n" parts))
-    ;; Instructions
-    (push "\nPlease make the requested edit at this location." parts)
+              (push (format "%4d→%s  <-- cursor here\n" ctx-line ctx-text) parts)
+            (push (format "%4d→%s\n" ctx-line ctx-text) parts)))))
+    ;; User request at the end
+    (push (format "\n*Request:* %s\n" message) parts)
     (apply #'concat (nreverse parts))))
 
 (defun claude-pair-point-action (message)

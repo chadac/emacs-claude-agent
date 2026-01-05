@@ -542,9 +542,6 @@ If the worktree and session already exist, sends the task to the existing sessio
       (org-roam-todo--pre-trust-worktree worktree-path)
       (let* ((buf (claude-agent-run worktree-path))
              (buffer-name (buffer-name buf)))
-        ;; Store buffer name in node
-        (org-roam-todo--set-property "CLAUDE_AGENT_BUFFER" buffer-name)
-        (save-buffer)
         ;; Wait for session to be ready (5 seconds for Claude to initialize)
         (org-roam-todo--send-task-to-buffer buffer-name content worktree-path 5)
         (message "Created worktree and spawned Claude session: %s" buffer-name)))))
@@ -621,32 +618,26 @@ If FORCE is non-nil, use -D instead of -d."
   "Close the worktree associated with the current TODO.
 Removes the worktree, kills associated buffers and Claude session.
 With prefix arg FORCE, force removal even with uncommitted changes.
-Prompts to delete the branch if it hasn't been merged."
+Also deletes the branch (prompting if unmerged) and marks TODO as done."
   (interactive "P")
   (unless (org-roam-todo--node-p)
     (user-error "Not in an org-roam TODO node"))
   (let* ((project-root (org-roam-todo--get-property "PROJECT_ROOT"))
          (worktree-path (org-roam-todo--get-property "WORKTREE_PATH"))
-         (branch-name (org-roam-todo--get-property "WORKTREE_BRANCH")))
+         (branch-name (org-roam-todo--get-property "WORKTREE_BRANCH"))
+         (current-status (org-roam-todo--get-property "STATUS")))
     (unless worktree-path
       (user-error "No worktree associated with this TODO"))
     (unless (org-roam-todo--worktree-exists-p worktree-path)
       ;; Worktree doesn't exist, just clear properties
       (org-roam-todo--set-property "WORKTREE_PATH" nil)
       (org-roam-todo--set-property "WORKTREE_BRANCH" nil)
-      (org-roam-todo--set-property "CLAUDE_AGENT_BUFFER" nil)
       (save-buffer)
       (user-error "Worktree no longer exists, cleared properties"))
-    ;; Confirm
-    (unless (yes-or-no-p (format "Close worktree at %s? " worktree-path))
-      (user-error "Cancelled"))
-    ;; Kill Claude session first
-    (when (org-roam-todo--kill-claude-session worktree-path)
-      (message "Killed Claude session"))
+    ;; Kill Claude session first (no prompt needed)
+    (org-roam-todo--kill-claude-session worktree-path)
     ;; Kill file buffers
-    (let ((killed (org-roam-todo--kill-worktree-buffers worktree-path)))
-      (when (> killed 0)
-        (message "Killed %d buffer(s)" killed)))
+    (org-roam-todo--kill-worktree-buffers worktree-path)
     ;; Remove worktree
     (let ((result (org-roam-todo--remove-worktree project-root worktree-path force)))
       (unless (= 0 result)
@@ -659,21 +650,20 @@ Prompts to delete the branch if it hasn't been merged."
     ;; Clear worktree properties
     (org-roam-todo--set-property "WORKTREE_PATH" nil)
     (org-roam-todo--set-property "WORKTREE_BRANCH" nil)
-    (org-roam-todo--set-property "CLAUDE_AGENT_BUFFER" nil)
-    (save-buffer)
-    ;; Offer to delete branch
+    ;; Delete branch automatically (prompt only if unmerged)
     (when (and branch-name
                (org-roam-todo--branch-exists-p project-root branch-name))
-      (when (yes-or-no-p (format "Delete branch '%s'? " branch-name))
-        (let ((result (org-roam-todo--delete-branch project-root branch-name)))
-          (if (= 0 result)
-              (message "Deleted branch '%s'" branch-name)
-            ;; Try force delete if regular delete failed (unmerged)
-            (when (yes-or-no-p (format "Branch '%s' is not fully merged. Force delete? " branch-name))
-              (if (= 0 (org-roam-todo--delete-branch project-root branch-name t))
-                  (message "Force deleted branch '%s'" branch-name)
-                (message "Failed to delete branch")))))))
-    (message "Closed worktree: %s" worktree-path)))
+      (let ((result (org-roam-todo--delete-branch project-root branch-name)))
+        (if (= 0 result)
+            (message "Deleted branch '%s'" branch-name)
+          ;; Branch is unmerged - prompt for force delete
+          (when (yes-or-no-p (format "Branch '%s' is not fully merged. Force delete? " branch-name))
+            (org-roam-todo--delete-branch project-root branch-name t)))))
+    ;; Mark TODO as done (unless already done/rejected)
+    (unless (member current-status '("done" "rejected"))
+      (org-roam-todo--set-property "STATUS" "done"))
+    (save-buffer)
+    (message "Closed worktree and marked TODO as done: %s" worktree-path)))
 
 ;;;###autoload
 (defun org-roam-todo-select-close-worktree (&optional project-filter)
@@ -753,7 +743,6 @@ If TODO has a worktree, starts agent there; otherwise uses project root."
       ;; Update status in the TODO file
       (with-current-buffer (find-file-noselect (plist-get todo :file))
         (org-roam-todo--set-property "STATUS" "active")
-        (org-roam-todo--set-property "CLAUDE_AGENT_BUFFER" buffer-name)
         (save-buffer))
       ;; Send task message after delay for Claude to initialize
       (run-with-timer 5 nil
