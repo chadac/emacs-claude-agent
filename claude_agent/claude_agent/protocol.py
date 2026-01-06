@@ -102,7 +102,7 @@ class EditToolMessage(TypedDict):
 
 
 class WriteToolMessage(TypedDict):
-    """Write tool with content preview."""
+    """Write tool with content for diff-like popup display."""
     type: Literal["write_tool"]
     file_path: str
     content: str

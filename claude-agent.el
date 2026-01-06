@@ -530,7 +530,8 @@ Called from `post-command-hook'."
 
 (defvar claude-agent-tool-formatters
   '(("mcp__emacs__edit" . claude-agent--format-diff-output)
-    ("Edit" . claude-agent--format-diff-output))
+    ("Edit" . claude-agent--format-diff-output)
+    ("Write" . claude-agent--format-diff-output))
   "Alist mapping tool names to formatter functions.
 Each formatter takes a result string and returns a propertized string.")
 
@@ -1148,6 +1149,15 @@ Returns a string with - and + prefixed lines."
         (setq result (concat result "+ " line "\n"))))
     result))
 
+(defun claude-agent--format-write-content (content)
+  "Format CONTENT as diff-like output for Write tool popup.
+Returns a string with + prefixed lines (all additions)."
+  (let ((result ""))
+    (when (and content (not (string-empty-p content)))
+      (dolist (line (split-string content "\n"))
+        (setq result (concat result "+ " line "\n"))))
+    result))
+
 (defun claude-agent--insert-diff (file-path old-string new-string)
   "Insert a diff display for FILE-PATH with OLD-STRING and NEW-STRING.
 Inserts directly at point with proper faces and clickable link."
@@ -1372,12 +1382,6 @@ The status icon (○) is updated to ✓ or ✗ when tool result arrives."
 (defvar-local claude-agent--current-read-file nil
   "File path for current Read tool being displayed.")
 
-(defvar-local claude-agent--current-write-file nil
-  "File path for current Write tool being displayed.")
-
-(defvar-local claude-agent--current-write-content nil
-  "Content for current Write tool being displayed.")
-
 (defun claude-agent--insert-read-tool (file-path)
   "Insert a Read tool call with FILE-PATH."
   (setq claude-agent--current-read-file file-path)
@@ -1427,55 +1431,6 @@ Expects content in the format from Claude's Read tool."
               (insert (cdr parsed) "\n"))
           ;; Plain line (no number)
           (insert " " (cdr parsed) "\n"))))
-    ;; Update static marker
-    (set-marker claude-agent--static-end-marker (point))
-    ;; Rebuild dynamic section
-    (when claude-agent--has-conversation
-      (claude-agent--insert-status-bar))
-    (setq claude-agent--input-start-marker (point-marker))
-    (insert saved-input)
-    (claude-agent--update-read-only)
-    (claude-agent--update-placeholder)
-    (goto-char (if (and cursor-offset (>= cursor-offset 0))
-                   (min (+ claude-agent--input-start-marker cursor-offset) (point-max))
-                 claude-agent--input-start-marker))))
-
-(defun claude-agent--insert-write-tool (file-path)
-  "Insert a Write tool header with FILE-PATH as clickable link."
-  (setq claude-agent--current-write-file file-path)
-  ;; Use standard tool call format
-  (claude-agent--insert-tool-call "Write" file-path))
-
-(defun claude-agent--insert-write-content (content)
-  "Insert Write tool CONTENT with line numbers showing additions.
-Follows same pattern as `claude-agent--insert-read-content'."
-  (setq claude-agent--current-write-content content)
-  (let* ((inhibit-read-only t)
-         (saved-input (if (eq claude-agent--input-mode 'text)
-                          (claude-agent--get-input-text)
-                        claude-agent--saved-input))
-         (cursor-offset (when (and (eq claude-agent--input-mode 'text)
-                                   claude-agent--input-start-marker
-                                   (marker-position claude-agent--input-start-marker)
-                                   (>= (point) claude-agent--input-start-marker))
-                          (- (point) claude-agent--input-start-marker)))
-         (lines (split-string content "\n"))
-         ;; Remove trailing empty lines
-         (trimmed-lines (let ((result lines))
-                          (while (and result (string-empty-p (car (last result))))
-                            (setq result (butlast result)))
-                          result))
-         (line-num 0))
-    ;; Delete dynamic section
-    (delete-region claude-agent--static-end-marker (point-max))
-    (goto-char claude-agent--static-end-marker)
-    ;; Insert each line with line numbers and + prefix
-    (dolist (line trimmed-lines)
-      (cl-incf line-num)
-      (let ((num-start (point)))
-        (insert (format " %4d│+ " line-num))
-        (claude-agent--apply-face num-start (point) 'claude-agent-diff-added))
-      (insert line "\n"))
     ;; Update static marker
     (set-marker claude-agent--static-end-marker (point))
     ;; Rebuild dynamic section
@@ -1764,17 +1719,24 @@ If VIRTUAL-INDENT is non-nil, apply it as line-prefix/wrap-prefix."
                           (min (+ claude-agent--input-start-marker cursor-offset) (point-max))
                         claude-agent--input-start-marker))))))
 
-    ;; Write tool (special display)
+    ;; Write tool (compact display with content stored for popup)
     ("write_tool"
-     (let ((file-path (cdr (assq 'file_path msg)))
-           (content (cdr (assq 'content msg))))
+     (let* ((file-path (cdr (assq 'file_path msg)))
+            (content (cdr (assq 'content msg)))
+            (write-content (claude-agent--format-write-content content)))
        (setq claude-agent--parse-state 'tool)
        (claude-agent--set-thinking (format "Writing: %s" (file-name-nondirectory file-path)))
-       ;; Mark position for tool result storage
+       ;; Mark position and name for tool result storage
        (setq claude-agent--last-tool-marker
              (copy-marker (or claude-agent--static-end-marker (point-max))))
-       (claude-agent--insert-write-tool file-path)
-       (claude-agent--insert-write-content content)))
+       (setq claude-agent--last-tool-name "Write")
+       ;; Store in tool-results for popup viewing
+       (push (list claude-agent--last-tool-marker "Write" write-content)
+             claude-agent--tool-results)
+       ;; Insert compact tool call line
+       (claude-agent--insert-tool-call "Write" file-path)
+       ;; Add tooltip
+       (claude-agent--add-tool-tooltip claude-agent--last-tool-marker write-content)))
 
     ;; Session message (system notifications)
     ("session_message_start"

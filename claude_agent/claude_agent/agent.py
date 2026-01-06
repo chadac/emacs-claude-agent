@@ -606,7 +606,7 @@ class ClaudeAgent:
                                     "old_string": tool_input.get("old_string", ""),
                                     "new_string": tool_input.get("new_string", ""),
                                 })
-                            # Special handling for Write tool - emit content for diff
+                            # Write tool - emit with content for diff-like popup display
                             elif tool_name == "Write":
                                 self._emit({
                                     "type": "write_tool",
