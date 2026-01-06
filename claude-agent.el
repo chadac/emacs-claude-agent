@@ -529,7 +529,7 @@ Called from `post-command-hook'."
       (error (claude-agent--hide-tool-popup)))))
 
 (defvar claude-agent-tool-formatters
-  '(("mcp__claudemacs__edit" . claude-agent--format-diff-output)
+  '(("mcp__emacs__edit" . claude-agent--format-diff-output)
     ("Edit" . claude-agent--format-diff-output))
   "Alist mapping tool names to formatter functions.
 Each formatter takes a result string and returns a propertized string.")
@@ -1284,7 +1284,7 @@ The full diff is stored in tool-results for popup display."
 
 (defun claude-agent--format-tool-name (tool-name)
   "Format TOOL-NAME for display.
-Converts MCP tools like 'mcp__claudemacs__reload_file' to 'claudemacs/reload-file'."
+Converts MCP tools like 'mcp__emacs__reload_file' to 'emacs/reload-file'."
   (if (string-prefix-p "mcp__" tool-name)
       ;; MCP tool: mcp__server__tool_name -> server/tool-name
       (let* ((without-prefix (substring tool-name 5))  ; Remove "mcp__"
@@ -2183,7 +2183,7 @@ Returns the path to the generated config file."
                                           (or (bound-and-true-p server-socket-dir)
                                               (expand-file-name "emacs" (temporary-file-directory)))))
          (config `((mcpServers
-                    . ((claudemacs
+                    . ((emacs
                         . ((command . "uv")
                            (args . ["run" "--directory" ,emacs-mcp-dir
                                     "python" "-m" "emacs_mcp.server"])

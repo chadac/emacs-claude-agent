@@ -586,7 +586,7 @@ Returns the path to the generated config file."
                     env-vars))
          (config-json (json-encode
                        `((mcpServers
-                          . ((claudemacs
+                          . ((emacs
                               . ((command . "uv")
                                  (args . ["run" "--python-preference" "managed" "--directory" ,mcp-dir
                                           "-m" "emacs_mcp.server"])
