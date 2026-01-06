@@ -79,12 +79,14 @@ Called by Python server via emacsclient to get tool definitions."
   (let ((tools (make-hash-table :test 'equal)))
     (maphash
      (lambda (name def)
-       (puthash name
-                `((description . ,(or (plist-get def :description) ""))
-                  (function . ,(symbol-name (plist-get def :function)))
-                  (safe . ,(if (plist-get def :safe) t :json-false))
-                  (args . ,(claude-mcp--convert-args (plist-get def :args))))
-                tools))
+       (let ((tool-def `((description . ,(or (plist-get def :description) ""))
+                         (function . ,(symbol-name (plist-get def :function)))
+                         (safe . ,(if (plist-get def :safe) t :json-false))
+                         (args . ,(claude-mcp--convert-args (plist-get def :args))))))
+         ;; Add context hint if specified
+         (when-let ((context (plist-get def :context)))
+           (push (cons 'context context) tool-def))
+         (puthash name tool-def tools)))
      claude-mcp-tools)
     (json-encode tools)))
 
@@ -434,7 +436,7 @@ Returns a formatted string with metadata, diagnostics, and content."
 
     result))
 
-(claude-mcp-deftool read
+(claude-mcp-deftool read-file
   "Read a file with IDE diagnostics (flycheck/flymake errors). Use this for reading files."
   :function #'claude-mcp-read-file-with-context
   :safe t
@@ -562,13 +564,145 @@ Returns a result with the edit status and any diagnostics from affected lines."
                              (or (claude-mcp--format-diagnostics rel-lsp "LSP") ""))))))))))
     result))
 
-(claude-mcp-deftool edit
+(claude-mcp-deftool edit-file
   "Edit a file by replacing old_string with new_string. Returns colored diff and diagnostics."
   :function #'claude-mcp-edit-file
   :args ((file-path string :required "Path to the file to edit")
          (old_string string :required "The text to replace")
          (new_string string :required "The replacement text")
          (replace_all boolean "Replace all occurrences (default: false)")))
+
+;;;; Buffer Operations (read/edit/write buffers)
+;;
+;; These tools operate on Emacs buffers directly, complementing the file tools.
+
+(defun claude-mcp-read-buffer (buffer-name &optional offset limit)
+  "Read content from BUFFER-NAME with optional OFFSET and LIMIT.
+OFFSET is the line number to start reading from (1-indexed, default: 1).
+LIMIT is the number of lines to read (default: all remaining lines).
+Returns content with line numbers in the same format as read-file."
+  (unless (get-buffer buffer-name)
+    (error "Buffer '%s' does not exist" buffer-name))
+  (with-current-buffer buffer-name
+    (let* ((offset (or offset 1))
+           (total-lines (count-lines (point-min) (point-max)))
+           (start-line (max 1 offset))
+           (end-line (if limit
+                         (min total-lines (+ start-line limit -1))
+                       total-lines))
+           (content (save-excursion
+                      (goto-char (point-min))
+                      (forward-line (1- start-line))
+                      (let ((start-pos (point)))
+                        (forward-line (1+ (- end-line start-line)))
+                        (buffer-substring-no-properties start-pos (point)))))
+           (max-line-width (length (number-to-string end-line))))
+      ;; Format with line numbers like read-file
+      (let ((lines (split-string content "\n" t))
+            (line-num start-line)
+            (numbered-lines '()))
+        (dolist (line lines)
+          (push (format (format "%%%dd→%%s" max-line-width) line-num line)
+                numbered-lines)
+          (setq line-num (1+ line-num)))
+        (string-join (nreverse numbered-lines) "\n")))))
+
+(claude-mcp-deftool read-buffer
+  "Read content from an Emacs buffer. Similar to read-file but for buffers.
+Returns content with line numbers. Use this for reading buffer content that
+may not be saved to disk yet, or for special buffers like *scratch*."
+  :function #'claude-mcp-read-buffer
+  :safe t
+  :args ((buffer-name string :required "Name of the buffer to read")
+         (offset integer "Line number to start reading from (1-indexed, default: 1)")
+         (limit integer "Number of lines to read (default: all remaining lines)")))
+
+(defun claude-mcp-edit-buffer (buffer-name old-string new-string &optional replace-all)
+  "Edit BUFFER-NAME by replacing OLD-STRING with NEW-STRING.
+If REPLACE-ALL is non-nil, replace all occurrences.
+Returns a result with the edit status and diff."
+  (unless (get-buffer buffer-name)
+    (error "Buffer '%s' does not exist" buffer-name))
+  (with-current-buffer buffer-name
+    (let* ((content (buffer-substring-no-properties (point-min) (point-max)))
+           (occurrences (let ((positions '())
+                              (start 0)
+                              pos)
+                          (while (setq pos (cl-search old-string content :start2 start))
+                            (push pos positions)
+                            (setq start (1+ pos)))
+                          (nreverse positions))))
+      (cond
+       ;; No matches found
+       ((null occurrences)
+        (format "Error: old_string not found in buffer %s" buffer-name))
+       ;; Multiple matches but replace-all not set
+       ((and (> (length occurrences) 1) (not replace-all))
+        (format "Error: old_string found %d times. Use replace_all=true or provide more context."
+                (length occurrences)))
+       ;; Perform the replacement
+       (t
+        (let* ((first-pos (car occurrences))
+               (replacements-made (if replace-all (length occurrences) 1))
+               (edit-start-line (1+ (cl-count ?\n (substring content 0 first-pos)))))
+          ;; Perform the edit
+          (if replace-all
+              (progn
+                (goto-char (point-min))
+                (while (search-forward old-string nil t)
+                  (replace-match new-string t t)))
+            (goto-char (point-min))
+            (search-forward old-string)
+            (replace-match new-string t t))
+          ;; Build diff showing old and new
+          (let* ((old-lines (split-string old-string "\n"))
+                 (new-lines (split-string new-string "\n"))
+                 (diff-output (concat
+                               (mapconcat (lambda (l) (concat "- " l)) old-lines "\n")
+                               "\n"
+                               (mapconcat (lambda (l) (concat "+ " l)) new-lines "\n"))))
+            (format "%s in buffer %s (line %d)\n\n%s"
+                    (if replace-all
+                        (format "Replaced %d occurrence(s)" replacements-made)
+                      "Edited")
+                    buffer-name edit-start-line diff-output))))))))
+
+(claude-mcp-deftool edit-buffer
+  "Edit a buffer by replacing old_string with new_string. Similar to edit-file but for buffers.
+Use this for editing buffer content that may not be saved to disk yet."
+  :function #'claude-mcp-edit-buffer
+  :args ((buffer-name string :required "Name of the buffer to edit")
+         (old_string string :required "The text to replace")
+         (new_string string :required "The replacement text")
+         (replace_all boolean "Replace all occurrences (default: false)")))
+
+(defun claude-mcp-write-buffer (buffer-name content &optional mode)
+  "Create a new buffer BUFFER-NAME with CONTENT.
+If the buffer already exists, it will be replaced.
+Optional MODE is a major mode to apply (e.g., 'python-mode', 'org-mode').
+Returns the buffer name."
+  (let ((buf (get-buffer-create buffer-name)))
+    (with-current-buffer buf
+      (erase-buffer)
+      (insert content)
+      ;; Apply major mode if specified
+      (when mode
+        (let ((mode-fn (intern mode)))
+          (when (fboundp mode-fn)
+            (funcall mode-fn))))
+      (goto-char (point-min)))
+    ;; Display the buffer
+    (display-buffer buf)
+    (format "Created buffer '%s' with %d characters" buffer-name (length content))))
+
+(claude-mcp-deftool write-buffer
+  "Create a new buffer with the given content. If the buffer already exists, it will be replaced.
+Use this for creating scratch buffers, preview content, or temporary work areas."
+  :function #'claude-mcp-write-buffer
+  :context "none"
+  :args ((buffer-name string :required "Name for the new buffer")
+         (content string :required "Content to put in the buffer")
+         (mode string "Optional major mode to apply (e.g., 'python-mode', 'org-mode')")))
 
 ;;;; REPL Integration
 
