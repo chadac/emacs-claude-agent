@@ -134,6 +134,7 @@ class ClaudeAgent:
         resume_session: Optional[str] = None,
         continue_session: bool = False,
         model: Optional[str] = None,
+        system_prompt: Optional[str] = None,
     ):
         self.work_dir = work_dir
         self.mcp_config = mcp_config
@@ -146,6 +147,7 @@ class ClaudeAgent:
         self._resume_session = resume_session
         self._continue_session = continue_session
         self._model = model
+        self._system_prompt = system_prompt
         self._first_message = True  # Track if this is the first message
         if log_file:
             os.makedirs(os.path.dirname(log_file), exist_ok=True)
@@ -487,17 +489,22 @@ class ClaudeAgent:
             ]
         }
 
-        options = ClaudeAgentOptions(
-            cwd=self.work_dir,
-            can_use_tool=self._can_use_tool,
-            mcp_servers=self.mcp_config or {},  # Pass path string or empty dict
-            allowed_tools=self.allowed_tools if self.allowed_tools else [],
-            disallowed_tools=self.disallowed_tools if self.disallowed_tools else [],
-            resume=self._resume_session,
-            continue_conversation=self._continue_session,
-            hooks=hooks,
-            model=self._model,
-        )
+        options_kwargs = {
+            "cwd": self.work_dir,
+            "can_use_tool": self._can_use_tool,
+            "mcp_servers": self.mcp_config or {},  # Pass path string or empty dict
+            "allowed_tools": self.allowed_tools if self.allowed_tools else [],
+            "disallowed_tools": self.disallowed_tools if self.disallowed_tools else [],
+            "resume": self._resume_session,
+            "continue_conversation": self._continue_session,
+            "hooks": hooks,
+            "model": self._model,
+        }
+        # Add system prompt if provided (for oneshot agents)
+        if self._system_prompt:
+            options_kwargs["system_prompt"] = self._system_prompt
+
+        options = ClaudeAgentOptions(**options_kwargs)
 
         self._client = ClaudeSDKClient(options=options)
         await self._client.connect()
@@ -787,6 +794,7 @@ async def run_agent(
     disallowed_tools: Optional[list[str]] = None,
     log_file: Optional[str] = None,
     model: Optional[str] = None,
+    system_prompt: Optional[str] = None,
 ) -> None:
     """Run the agent, reading commands from stdin."""
     agent = ClaudeAgent(
@@ -798,6 +806,7 @@ async def run_agent(
         resume_session=resume_session,
         continue_session=continue_session,
         model=model,
+        system_prompt=system_prompt,
     )
 
     # Show initial session info
@@ -928,6 +937,16 @@ def main() -> None:
         default=None,
         help="Model to use (e.g., 'sonnet', 'opus', 'haiku')",
     )
+    parser.add_argument(
+        "--system-prompt",
+        default=None,
+        help="System prompt to use (overrides default Claude Code system prompt)",
+    )
+    parser.add_argument(
+        "--system-prompt-file",
+        default=None,
+        help="Path to file containing system prompt (for multiline prompts)",
+    )
     args = parser.parse_args()
 
     allowed_tools = None
@@ -937,6 +956,12 @@ def main() -> None:
     disallowed_tools = None
     if args.disallowed_tools:
         disallowed_tools = [t.strip() for t in args.disallowed_tools.split(",")]
+
+    # Load system prompt from file if specified
+    system_prompt = args.system_prompt
+    if args.system_prompt_file:
+        with open(args.system_prompt_file, "r") as f:
+            system_prompt = f.read()
 
     asyncio.run(
         run_agent(
@@ -948,6 +973,7 @@ def main() -> None:
             disallowed_tools=disallowed_tools,
             log_file=args.log_file,
             model=args.model,
+            system_prompt=system_prompt,
         )
     )
 

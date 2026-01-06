@@ -2181,11 +2181,13 @@ Returns nil if valid, or an error message string if validation fails."
      ;; All checks passed
      (t nil))))
 
-(defun claude-agent--start-process (work-dir buffer &optional resume-session continue-session model)
+(defun claude-agent--start-process (work-dir buffer &optional resume-session continue-session model system-prompt additional-allowed-tools)
   "Start the Python agent process for WORK-DIR with BUFFER.
 Optional RESUME-SESSION is a session ID to resume.
 Optional CONTINUE-SESSION, if non-nil, continues the most recent session.
-Optional MODEL is the model to use (e.g., 'sonnet', 'opus', 'haiku')."
+Optional MODEL is the model to use (e.g., 'sonnet', 'opus', 'haiku').
+Optional SYSTEM-PROMPT is a custom system prompt (for oneshot agents).
+Optional ADDITIONAL-ALLOWED-TOOLS is a list of extra tools to pre-authorize."
   ;; Validate prerequisites first
   (when-let ((error-msg (claude-agent--validate-prerequisites)))
     (error "Cannot start Claude agent:\n%s" error-msg))
@@ -2218,12 +2220,25 @@ Optional MODEL is the model to use (e.g., 'sonnet', 'opus', 'haiku')."
     ;; Add model if specified
     (when model
       (setq args (append args (list "--model" model))))
+    ;; Add system prompt if specified (for oneshot agents)
+    ;; Write to temp file to avoid shell escaping issues with multiline prompts
+    (when system-prompt
+      (let ((prompt-file (make-temp-file "claude-system-prompt-" nil ".txt")))
+        (with-temp-file prompt-file
+          (insert system-prompt))
+        (setq args (append args (list "--system-prompt-file" prompt-file)))
+        ;; Store for cleanup
+        (with-current-buffer buffer
+          (setq-local claude-agent--system-prompt-file prompt-file))))
     ;; Add safe MCP tools as --allowedTools (pre-authorized, no permission prompts)
-    (when claude-agent-enable-mcp
-      (let ((safe-tools (claude-mcp-get-safe-tools-for-cli)))
-        (when safe-tools
-          (setq args (append args (list "--allowed-tools"
-                                        (mapconcat #'identity safe-tools ",")))))))
+    ;; Also include any additional allowed tools passed by caller
+    (let ((all-allowed-tools
+           (append (when claude-agent-enable-mcp
+                     (claude-mcp-get-safe-tools-for-cli))
+                   additional-allowed-tools)))
+      (when all-allowed-tools
+        (setq args (append args (list "--allowed-tools"
+                                      (mapconcat #'identity all-allowed-tools ","))))))
     ;; Use pipe (nil) instead of PTY to avoid focus-related buffering issues
     ;; Bind default-directory so the process starts in work-dir
     (let ((default-directory work-dir)

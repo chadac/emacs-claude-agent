@@ -26,6 +26,48 @@
 
 (require 'transient)
 
+;;;; Faces
+
+(defgroup claude-transient nil
+  "Claude transient menu customization."
+  :group 'claude-agent)
+
+(defface claude-transient-oneshot-heading
+  '((((class color) (background dark))
+     :foreground "#e5c07b" :weight bold)
+    (((class color) (background light))
+     :foreground "#986801" :weight bold)
+    (t :weight bold))
+  "Face for Oneshot section heading in transient menu."
+  :group 'claude-transient)
+
+(defface claude-transient-sessions-heading
+  '((((class color) (background dark))
+     :foreground "#61afef" :weight bold)
+    (((class color) (background light))
+     :foreground "#4078f2" :weight bold)
+    (t :weight bold))
+  "Face for Sessions section heading in transient menu."
+  :group 'claude-transient)
+
+(defface claude-transient-actions-heading
+  '((((class color) (background dark))
+     :foreground "#c678dd" :weight bold)
+    (((class color) (background light))
+     :foreground "#a626a4" :weight bold)
+    (t :weight bold))
+  "Face for Point Actions section heading in transient menu."
+  :group 'claude-transient)
+
+(defface claude-transient-comments-heading
+  '((((class color) (background dark))
+     :foreground "#98c379" :weight bold)
+    (((class color) (background light))
+     :foreground "#50a14f" :weight bold)
+    (t :weight bold))
+  "Face for Comments section heading in transient menu."
+  :group 'claude-transient)
+
 ;;;; Extension Registry
 
 (defvar claude-transient--agent-extensions nil
@@ -40,7 +82,7 @@ Each entry is a plist with :key, :description, :command, :group, :if.")
                                                 "c" "C" "q" "k" "p" "t" "i" "RET" "g")
   "List of built-in keys in the agent menu.")
 
-(defvar claude-transient--builtin-pair-keys '("x" "t" "d" "f" "c" "C" "s" "r" "l")
+(defvar claude-transient--builtin-pair-keys '("c" "b" "d" "p" "o" "x" "t" "D" "f" "C" "P" "s" "r" "w" "l")
   "List of built-in keys in the pair menu.")
 
 (defun claude-transient--key-exists-p (extensions key)
@@ -126,6 +168,36 @@ Signals an error if KEY is already registered."
 (declare-function claude-pair-point-action-doc "claude-pair")
 (declare-function claude-pair-point-action-fix "claude-pair")
 (declare-function claude-pair-send-comments "claude-pair")
+;; Oneshot wrapper functions (lazy loading)
+(defun claude-transient-oneshot-line-or-region ()
+  "Start a oneshot agent scoped to the current line or region."
+  (interactive)
+  (require 'claude-oneshot)
+  (call-interactively #'claude-oneshot-line-or-region))
+
+(defun claude-transient-oneshot-buffer ()
+  "Start a oneshot agent scoped to the current buffer."
+  (interactive)
+  (require 'claude-oneshot)
+  (call-interactively #'claude-oneshot-buffer))
+
+(defun claude-transient-oneshot-directory ()
+  "Start a oneshot agent scoped to the current directory."
+  (interactive)
+  (require 'claude-oneshot)
+  (call-interactively #'claude-oneshot-directory))
+
+(defun claude-transient-oneshot-project ()
+  "Start a oneshot agent scoped to the current project."
+  (interactive)
+  (require 'claude-oneshot)
+  (call-interactively #'claude-oneshot-project))
+
+(defun claude-transient-oneshot-list ()
+  "List all active oneshot agents."
+  (interactive)
+  (require 'claude-oneshot)
+  (call-interactively #'claude-oneshot-list))
 
 ;;;; Agent Transient Menu
 
@@ -378,19 +450,27 @@ If a session already exists for this project, prompts for a slug."
 ;;;###autoload (autoload 'claude-pair-menu "claude-transient" nil t)
 (transient-define-prefix claude-pair-menu ()
   "Claude pair programming commands."
-  ["Point Actions"
-   ("x" "Action at point" claude-pair-point-action)
-   ("t" "Write test" claude-pair-point-action-test)
-   ("d" "Add documentation" claude-pair-point-action-doc)
-   ("f" "Fix issue" claude-pair-point-action-fix)]
-  ["Comments"
-   ("c" "Send CLAUDE: comments" claude-pair-send-comments)
-   ("C" "Send project comments" (lambda () (interactive) (claude-pair-send-comments t)))]
-  ["Sessions"
-   ("s" "Start session" claude-transient-start-session)
-   ("r" "Resume previous" claude-transient-resume-session)
-   ("w" "Switch active" claude-transient-switch-session)
-   ("l" "List sessions" claude-list-sessions)])
+  ;; All four columns in one row
+  [[:description "⚡ Oneshot"
+    ("c" "Line/Region" claude-transient-oneshot-line-or-region
+     :description (lambda () (if (use-region-p) "Region" "Line")))
+    ("b" "Buffer" claude-transient-oneshot-buffer)
+    ("d" "Directory" claude-transient-oneshot-directory)
+    ("p" "Project" claude-transient-oneshot-project)
+    ("o" "List" claude-transient-oneshot-list)]
+   [:description "📋 Sessions"
+    ("s" "Start" claude-transient-start-session)
+    ("r" "Resume" claude-transient-resume-session)
+    ("w" "Switch" claude-transient-switch-session)
+    ("l" "List" claude-list-sessions)]
+   [:description "🎯 Actions"
+    ("x" "At point" claude-pair-point-action)
+    ("t" "Test" claude-pair-point-action-test)
+    ("D" "Document" claude-pair-point-action-doc)
+    ("f" "Fix" claude-pair-point-action-fix)]
+   [:description "💬 Comments"
+    ("C" "CLAUDE:" claude-pair-send-comments)
+    ("P" "Project" (lambda () (interactive) (claude-pair-send-comments t)))]])
 
 ;;;; Unified Dispatcher
 
