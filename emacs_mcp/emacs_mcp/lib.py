@@ -1165,15 +1165,18 @@ async def message_agent_async(buffer_name: str, message: str, from_buffer: str |
     escaped_buffer = escape_elisp_string(buffer_name)
     escaped_message = escape_elisp_string(message)
 
-    # Use a simpler approach - directly send the string to the eat terminal
+    # Send JSON message to claude-agent-mode process
+    # Format: {"type": "message", "text": "..."}
     elisp = f'''(if (get-buffer "{escaped_buffer}")
         (with-current-buffer "{escaped_buffer}"
-          (if (and (boundp 'eat-terminal) eat-terminal)
+          (if (and (boundp 'claude-agent--process)
+                   claude-agent--process
+                   (process-live-p claude-agent--process))
               (progn
-                (eat-term-send-string eat-terminal "{escaped_message}")
-                (eat-term-input-event eat-terminal 1 'return)
+                (process-send-string claude-agent--process
+                  (concat (json-encode `((type . "message") (text . ,"{escaped_message}"))) "\\n"))
                 "Sent message to {escaped_buffer}")
-            (error "Buffer is not a Claude terminal")))
+            (error "Buffer does not have a live Claude agent process")))
       (error "Buffer does not exist"))'''
 
     result = await call_emacs_async(elisp, timeout=10)
