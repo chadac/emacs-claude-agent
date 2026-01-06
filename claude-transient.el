@@ -457,7 +457,8 @@ If a session already exists for this project, prompts for a slug."
     ("b" "Buffer" claude-transient-oneshot-buffer)
     ("d" "Directory" claude-transient-oneshot-directory)
     ("p" "Project" claude-transient-oneshot-project)
-    ("o" "List" claude-transient-oneshot-list)]
+    ("o" "List" claude-transient-oneshot-list)
+    ("y" "Dismiss tips" claude-oneshot-dismiss-tooltips)]
    [:description "📋 Sessions"
     ("s" "Start" claude-transient-start-session)
     ("r" "Resume" claude-transient-resume-session)

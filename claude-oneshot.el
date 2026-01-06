@@ -40,6 +40,12 @@ Agent will be killed if it doesn't complete within this time."
   :type 'integer
   :group 'claude-oneshot)
 
+(defcustom claude-oneshot-debug nil
+  "When non-nil, keep oneshot agent buffers after completion for debugging.
+The buffer will be renamed with a '-done' suffix instead of being killed."
+  :type 'boolean
+  :group 'claude-oneshot)
+
 ;;;; Faces
 
 (defface claude-oneshot-target-face
@@ -79,6 +85,16 @@ The :extend property ensures the background stretches across the buffer."
   "Face for the fringe indicator of oneshot target regions."
   :group 'claude-oneshot)
 
+(defface claude-oneshot-tooltip-face
+  '((((class color) (background dark))
+     :background "#2d4a2d" :foreground "#98c379" :extend t)
+    (((class color) (background light))
+     :background "#e6ffe6" :foreground "#2d5a2d" :extend t)
+    (t :inverse-video t :extend t))
+  "Face for oneshot completion tooltip messages.
+Uses a green tint to indicate success/completion."
+  :group 'claude-oneshot)
+
 ;;;; Variables
 
 (defvar claude-oneshot--counter 0
@@ -114,6 +130,12 @@ Used by source buffers to track which oneshot agents are working on them.")
 (defvar-local claude-oneshot--saved-header-line nil
   "Saved header-line-format before oneshot indicator was added.")
 
+(defvar-local claude-oneshot--tooltip-overlays nil
+  "List of tooltip overlays in this buffer from completed oneshot agents.")
+
+(defvar-local claude-oneshot--target-position nil
+  "Position where the oneshot was invoked (for tooltip placement).")
+
 ;;;; Fringe Bitmap
 
 (when (fboundp 'define-fringe-bitmap)
@@ -145,6 +167,7 @@ Used by source buffers to track which oneshot agents are working on them.")
 (defun claude-oneshot--get-scope-system-prompt (scope target-info)
   "Generate a system prompt explaining the SCOPE and TARGET-INFO to the agent."
   (let ((file (plist-get target-info :file))
+        (buffer-name (plist-get target-info :buffer-name))
         (start-line (plist-get target-info :start-line))
         (end-line (plist-get target-info :end-line))
         (content (plist-get target-info :content))
@@ -161,23 +184,44 @@ Used by source buffers to track which oneshot agents are working on them.")
      "- You are NOT watching any buffers\n"
      "- FORGET what you were doing before\n\n"
      "YOUR ONLY JOB: Complete the single task below, then call mcp__emacs__done.\n\n"
+     "CRITICAL: YOUR OUTPUT IS INVISIBLE TO THE USER!\n"
+     "- Your text responses go to a HIDDEN buffer the user cannot see\n"
+     "- The ONLY way to communicate with the user is via mcp__emacs__done\n"
+     "- If the user asks you to explain something, PUT THE EXPLANATION in the done message\n"
+     "- The done message appears as a tooltip in their buffer\n\n"
      "ONESHOT RULES:\n"
      "1. Do the ONE task described below - nothing else\n"
-     "2. Call mcp__emacs__done when finished (REQUIRED!)\n"
-     "3. If you need user input, use mcp__emacs__prompt_choice\n"
-     "4. Do NOT use watch_buffer, watch_for_pattern, or similar tools\n"
-     "5. You have pre-authorized access to Edit/Write/Read within your scope - use them freely\n\n"
+     "2. Call mcp__emacs__done with a message when finished (REQUIRED!)\n"
+     "3. If the user asked for an explanation, include it in the done message\n"
+     "4. If you need user input, use mcp__emacs__prompt_choice\n"
+     "5. Do NOT use watch_buffer, watch_for_pattern, or similar tools\n\n"
+     "TOOL ACCESS:\n"
+     "- For FILE-BACKED BUFFERS: Use the SDK's Edit/Write/Read tools (pre-authorized within your scope)\n"
+     "- For NON-FILE BUFFERS (like *scratch*, capture buffers, etc.):\n"
+     "  * Use mcp__emacs__edit_buffer(buffer_name, old_string, new_string) to edit\n"
+     "  * Use mcp__emacs__read_buffer(buffer_name) to read\n"
+     "  * The SDK Edit tool will NOT work on non-file buffers!\n"
+     "- You can also use mcp__emacs__edit_file and mcp__emacs__read_file for files\n\n"
      "═══════════════════════════════════════════════════════════════\n"
      "SCOPE: " (upcase (symbol-name scope)) "\n"
      (pcase scope
        ('line
-        (format "You may ONLY modify line %d in file %s.\n\nTarget content:\n```\n%s\n```\n"
-                start-line file content))
+        (if file
+            (format "You may ONLY modify line %d in file %s.\n\nTarget content:\n```\n%s\n```\n"
+                    start-line file content)
+          (format "You may ONLY modify line %d in buffer %s (not a file).\n\nTarget content:\n```\n%s\n```\n"
+                  start-line buffer-name content)))
        ('region
-        (format "You may ONLY modify lines %d-%d in file %s.\n\nTarget content:\n```\n%s\n```\n"
-                start-line end-line file content))
+        (if file
+            (format "You may ONLY modify lines %d-%d in file %s.\n\nTarget content:\n```\n%s\n```\n"
+                    start-line end-line file content)
+          (format "You may ONLY modify lines %d-%d in buffer %s (not a file).\n\nTarget content:\n```\n%s\n```\n"
+                  start-line end-line buffer-name content)))
        ('buffer
-        (format "You may ONLY modify the file %s.\n" file))
+        (if file
+            (format "You may ONLY modify the file %s.\n" file)
+          (format "You may ONLY modify buffer %s (not a file).\n\nBuffer content:\n```\n%s\n```\n"
+                  buffer-name content)))
        ('directory
         (format "You may ONLY modify files in directory: %s\n" directory))
        ('project
@@ -185,38 +229,55 @@ Used by source buffers to track which oneshot agents are working on them.")
        (_ "")))))
 
 (defun claude-oneshot--get-allowed-tools-for-scope (scope target-info)
-  "Return list of SDK tools to pre-authorize based on SCOPE and TARGET-INFO.
-These are the built-in Claude Code tools (Edit, Write, Read, etc.) that
-normally require permission but should be auto-allowed for oneshot agents
-within their defined scope.
+  "Return list of tools to pre-authorize based on SCOPE and TARGET-INFO.
+Includes SDK tools (Edit, Write, Read, Glob) and MCP tools for buffer editing.
 
 The format follows Claude Code's allowed tools syntax:
 - ToolName(path) for specific files
 - ToolName(dir/*) for directory
-- ToolName(dir/**) for recursive"
+- ToolName(dir/**) for recursive
+- mcp__server__tool(arg) for MCP tools"
   (let ((file (plist-get target-info :file))
+        (buffer-name (plist-get target-info :buffer-name))
         (directory (plist-get target-info :directory))
         (project (plist-get target-info :project)))
-    (pcase scope
-      ;; For line/region/buffer scope, allow Edit for that specific file
-      ((or 'line 'region 'buffer)
-       (when file
-         (list (format "Edit(%s)" file)
-               (format "Write(%s)" file)
-               (format "Read(%s)" file))))
-      ;; For directory scope, allow Edit for files in that directory
-      ('directory
-       (when directory
-         (list (format "Edit(%s*)" directory)
-               (format "Write(%s*)" directory)
-               (format "Read(%s*)" directory))))
-      ;; For project scope, allow Edit anywhere in project
-      ('project
-       (when project
-         (list (format "Edit(%s**)" project)
-               (format "Write(%s**)" project)
-               (format "Read(%s**)" project))))
-      (_ nil))))
+    (append
+     ;; Always allow done tool for oneshot completion
+     ;; NOTE: Plain tool names work; parameterized format (tool(arg)) doesn't seem to work
+     ;; for MCP tools. TODO: Investigate if SDK supports parameterized MCP tool permissions
+     (list "mcp__emacs__done"
+           "mcp__emacs__edit_buffer"
+           "mcp__emacs__read_buffer")
+     ;; SDK and MCP tools for file/scope editing
+     (pcase scope
+       ;; For line/region/buffer scope, allow Edit for that specific file
+       ((or 'line 'region 'buffer)
+        (when file
+          (list (format "Edit(%s)" file)
+                (format "Write(%s)" file)
+                (format "Read(%s)" file)
+                (format "Glob(%s)" (file-name-directory file))
+                (format "mcp__emacs__edit_file(%s)" file)
+                (format "mcp__emacs__read_file(%s)" file))))
+       ;; For directory scope, allow Edit for files in that directory
+       ('directory
+        (when directory
+          (list (format "Edit(%s*)" directory)
+                (format "Write(%s*)" directory)
+                (format "Read(%s*)" directory)
+                (format "Glob(%s)" directory)
+                (format "mcp__emacs__edit_file(%s*)" directory)
+                (format "mcp__emacs__read_file(%s*)" directory))))
+       ;; For project scope, allow Edit anywhere in project
+       ('project
+        (when project
+          (list (format "Edit(%s**)" project)
+                (format "Write(%s**)" project)
+                (format "Read(%s**)" project)
+                (format "Glob(%s)" project)
+                (format "mcp__emacs__edit_file(%s**)" project)
+                (format "mcp__emacs__read_file(%s**)" project))))
+       (_ nil)))))
 
 (defun claude-oneshot--create-border-string (label)
   "Create a border string with LABEL that stretches across the window.
@@ -301,6 +362,98 @@ Returns a string like \"-- claude oneshot ----------------\" that fills the widt
       ;; Update header (will restore if no agents left)
       (claude-oneshot--update-header-line source-buffer))))
 
+;;;; Tooltip Overlay
+
+(defun claude-oneshot--wrap-text (text width)
+  "Wrap TEXT to WIDTH characters, returning a list of lines."
+  (with-temp-buffer
+    (insert text)
+    (let ((fill-column width))
+      (fill-region (point-min) (point-max)))
+    (split-string (buffer-string) "\n" t)))
+
+(defun claude-oneshot--create-tooltip (buffer position message)
+  "Create a tooltip overlay in BUFFER at POSITION with MESSAGE.
+The tooltip shows the completion message and a hint to dismiss it.
+Long messages are wrapped to fit within the box."
+  (when (and (buffer-live-p buffer) message (not (string-empty-p message)))
+    (with-current-buffer buffer
+      (save-excursion
+        (goto-char position)
+        ;; Move to end of line to place tooltip after content
+        (end-of-line)
+        (let* ((ov (make-overlay (point) (point)))
+               (box-width 64)
+               ;; Inner width: box-width minus "│ " (2) and " │" (2) = 4
+               (content-width (- box-width 4))  ; Width for text between │ and │
+               (border-line (make-string (- box-width 2) ?─))
+               (hint-text "Press C-c c y to dismiss")
+               ;; Wrap the message - account for "✓ " prefix on first line
+               (wrapped-lines (claude-oneshot--wrap-text message (- content-width 2)))
+               ;; Build the content lines - first line gets checkmark
+               (first-line (car wrapped-lines))
+               (rest-lines (cdr wrapped-lines))
+               ;; Build all lines as plain strings
+               (lines
+                (append
+                 ;; Top border
+                 (list (concat "┌" border-line "┐"))
+                 ;; First line with checkmark
+                 (list (concat "│ ✓ " first-line
+                               (make-string (max 0 (- content-width 2 (length first-line))) ? )
+                               " │"))
+                 ;; Rest of wrapped lines (indented to align with first line)
+                 (mapcar (lambda (line)
+                           (concat "│   " line
+                                   (make-string (max 0 (- content-width 2 (length line))) ? )
+                                   " │"))
+                         rest-lines)
+                 ;; Hint line
+                 (list (concat "│ " hint-text
+                               (make-string (max 0 (- content-width (length hint-text))) ? )
+                               " │"))
+                 ;; Bottom border
+                 (list (concat "└" border-line "┘"))))
+               ;; Join all lines and apply single face to entire string
+               ;; Start with plain newline, then propertized content with trailing newline
+               (tooltip-content
+                (concat "\n"
+                        (propertize (concat (mapconcat #'identity lines "\n") "\n")
+                                    'face 'claude-oneshot-tooltip-face))))
+          (overlay-put ov 'after-string tooltip-content)
+          (overlay-put ov 'claude-oneshot-tooltip t)
+          (overlay-put ov 'priority 200)
+          ;; Track this overlay in the buffer
+          (push ov claude-oneshot--tooltip-overlays)
+          ov)))))
+
+(defun claude-oneshot--clear-tooltip (overlay)
+  "Remove a single tooltip OVERLAY."
+  (when (overlayp overlay)
+    (let ((buf (overlay-buffer overlay)))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf
+          (setq claude-oneshot--tooltip-overlays
+                (delq overlay claude-oneshot--tooltip-overlays))))
+      (delete-overlay overlay))))
+
+(defun claude-oneshot--clear-all-tooltips (&optional buffer)
+  "Clear all tooltip overlays in BUFFER or current buffer."
+  (let ((buf (or buffer (current-buffer))))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (dolist (ov claude-oneshot--tooltip-overlays)
+          (when (overlayp ov)
+            (delete-overlay ov)))
+        (setq claude-oneshot--tooltip-overlays nil)))))
+
+(defun claude-oneshot-dismiss-tooltips ()
+  "Dismiss all oneshot completion tooltips in the current buffer."
+  (interactive)
+  (let ((count (length claude-oneshot--tooltip-overlays)))
+    (claude-oneshot--clear-all-tooltips)
+    (message "Dismissed %d tooltip%s" count (if (= count 1) "" "s"))))
+
 (defun claude-oneshot--add-fringe-indicator (overlay)
   "Add a fringe indicator to OVERLAY."
   (when overlay
@@ -352,15 +505,21 @@ Returns the buffer of the new agent."
                        ((or 'line 'region)
                         (let ((region-info (claude-oneshot--get-region-info)))
                           (list :file source-file
+                                :buffer-name (buffer-name source-buffer)
                                 :start-line (plist-get region-info :start-line)
                                 :end-line (plist-get region-info :end-line)
                                 :content (plist-get region-info :content)
                                 :start (plist-get region-info :start)
                                 :end (plist-get region-info :end))))
                        ('buffer
-                        (list :file source-file))
+                        (list :file source-file
+                              :buffer-name (buffer-name source-buffer)
+                              :content (unless source-file
+                                         (buffer-substring-no-properties
+                                          (point-min) (point-max)))))
                        ('directory
-                        (list :directory (file-name-directory source-file)))
+                        (list :directory (file-name-directory
+                                          (or source-file default-directory))))
                        ('project
                         (list :project work-dir)))))
          ;; Create the buffer
@@ -380,7 +539,10 @@ Returns the buffer of the new agent."
             claude-oneshot--is-oneshot t
             claude-oneshot--source-buffer source-buffer
             claude-oneshot--scope scope
-            claude-oneshot--target-info target))
+            claude-oneshot--target-info target
+            ;; Save position for tooltip placement (use start of target or current point)
+            claude-oneshot--target-position (or (plist-get target :start)
+                                                (with-current-buffer source-buffer (point)))))
 
     ;; Create visual highlight in source buffer for line/region scope
     (when (and (memq scope '(line region))
@@ -498,20 +660,32 @@ Sends a reminder to call done or ask for input."
       (when result
         (message "Oneshot agent: %s" result))
 
-      ;; Kill the buffer
-      (kill-buffer buffer))))
+      ;; Kill or rename the buffer based on debug flag
+      (if claude-oneshot-debug
+          ;; Debug mode: rename buffer and keep it for inspection
+          (let ((new-name (concat (buffer-name buffer) "-done")))
+            (rename-buffer new-name t)
+            (message "Debug: oneshot buffer kept as %s" new-name))
+        ;; Normal mode: kill the buffer
+        (kill-buffer buffer)))))
 
 ;;;; MCP Tools for Oneshot
 
 (defun claude-mcp-done (&optional message)
   "Signal that a oneshot agent has completed its task.
-Optional MESSAGE is displayed to the user.
+Optional MESSAGE is displayed to the user and shown as a tooltip in the source buffer.
 This tool should be called by oneshot agents when they finish."
   (let ((buf (current-buffer)))
     ;; Check if we're actually in a oneshot buffer
     (if (and (boundp 'claude-oneshot--is-oneshot)
              claude-oneshot--is-oneshot)
-        (progn
+        (let ((source-buf claude-oneshot--source-buffer)
+              (tooltip-pos claude-oneshot--target-position)
+              (tooltip-msg message))
+          ;; Create tooltip in source buffer before cleanup
+          (when (and source-buf tooltip-pos tooltip-msg)
+            (claude-oneshot--create-tooltip source-buf tooltip-pos tooltip-msg))
+          ;; Clean up the oneshot agent
           (claude-oneshot--cleanup buf (or message "Task completed"))
           "Oneshot agent terminated successfully")
       ;; Not a oneshot buffer - just show the message
@@ -522,7 +696,7 @@ This tool should be called by oneshot agents when they finish."
 (claude-mcp-deftool done
   "Signal completion of a oneshot task. Call this when you have finished your assigned task. The oneshot agent will be terminated and the user notified."
   :function #'claude-mcp-done
-  :safe nil
+  :safe t
   :needs-session-cwd t
   :args ((message string "Optional completion message to show the user")))
 
@@ -564,10 +738,8 @@ START-LINE and END-LINE define the target region (optional)."
 ;;;###autoload
 (defun claude-oneshot-line-or-region ()
   "Start a oneshot agent scoped to the current line or region.
-Prompts for what you want done."
+Prompts for what you want done.  Works on any buffer, not just file-visiting ones."
   (interactive)
-  (unless (buffer-file-name)
-    (error "Buffer must be visiting a file"))
   (let* ((has-region (use-region-p))
          (scope (if has-region 'region 'line))
          (prompt (read-string (format "What should Claude do with this %s? "
@@ -575,16 +747,17 @@ Prompts for what you want done."
     (when (string-empty-p (string-trim prompt))
       (error "Prompt cannot be empty"))
     (claude-oneshot--start scope prompt)
+    ;; Deactivate region so the oneshot overlay is visible
+    (deactivate-mark)
     (message "Oneshot agent started (scope: %s)" scope)))
 
 ;;;###autoload
 (defun claude-oneshot-buffer ()
   "Start a oneshot agent scoped to the current buffer.
-Prompts for what you want done."
+Prompts for what you want done.  Works on any buffer, not just file-visiting ones."
   (interactive)
-  (unless (buffer-file-name)
-    (error "Buffer must be visiting a file"))
-  (let ((prompt (read-string "What should Claude do with this buffer? ")))
+  (let ((prompt (read-string (format "What should Claude do with buffer %s? "
+                                     (buffer-name)))))
     (when (string-empty-p (string-trim prompt))
       (error "Prompt cannot be empty"))
     (claude-oneshot--start 'buffer prompt)
@@ -672,19 +845,17 @@ ORIG-FUN is the original function, MSG-TYPE and MSG are the arguments."
   "Advice for `claude-agent--show-permission-prompt' to auto-deny for oneshot agents.
 ORIG-FUN is the original function, DATA is the permission request data."
   (if claude-oneshot--is-oneshot
-      ;; Auto-deny and notify the user
+      ;; Auto-deny and notify the user, but let the agent continue
       (let ((tool-name (cdr (assq 'tool_name data))))
-        (message "Oneshot agent requested permission for '%s' - auto-denied" tool-name)
-        ;; Send deny response directly
+        (message "Oneshot agent requested permission for '%s' - auto-denied (agent continues)" tool-name)
+        ;; Send deny response directly - agent will continue and may try another approach
         (when (and claude-agent--process (process-live-p claude-agent--process))
           (process-send-string
            claude-agent--process
            (concat (json-encode
                     `((type . "permission_response")
                       (action . "deny")))
-                   "\n")))
-        ;; Cleanup the oneshot since it shouldn't need permissions
-        (claude-oneshot--cleanup (current-buffer) "Permission request denied - oneshot agents should not require permissions"))
+                   "\n"))))
     ;; Not a oneshot - proceed normally
     (funcall orig-fun data)))
 
