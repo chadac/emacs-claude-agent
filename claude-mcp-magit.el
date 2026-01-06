@@ -166,46 +166,88 @@ Designed to be called via emacsclient by Claude AI."
 ;; 2. Stage/unstage files
 ;; 3. Propose commits for user approval
 
+;;; Worktree-aware helpers
+;;
+;; These helpers avoid using magit functions that could:
+;; 1. Return the main repo instead of the worktree root (magit-toplevel issue)
+;; 2. Create/pollute magit buffers (magit-call-git uses magit-process-buffer)
+;; 3. Fail if magit hasn't been initialized for the project
+
+(defun claude-mcp-magit--git-toplevel (&optional directory)
+  "Get the git working tree root for DIRECTORY using git directly.
+Unlike `magit-toplevel', this correctly returns the worktree root
+rather than the main repository root when in a git worktree.
+Returns nil if not in a git repository."
+  (let ((default-directory (or directory default-directory)))
+    (with-temp-buffer
+      (when (zerop (call-process "git" nil t nil "rev-parse" "--show-toplevel"))
+        (string-trim (buffer-string))))))
+
+(defun claude-mcp-magit--call-git (&rest args)
+  "Call git with ARGS synchronously without creating magit buffers.
+Returns a cons of (exit-code . output-string)."
+  (with-temp-buffer
+    (let ((exit-code (apply #'call-process "git" nil t nil args)))
+      (cons exit-code (buffer-string)))))
+
+(defun claude-mcp-magit--git-output (&rest args)
+  "Call git with ARGS and return trimmed output.
+Signals an error if git command fails."
+  (let ((result (apply #'claude-mcp-magit--call-git args)))
+    (unless (zerop (car result))
+      (error "Git command failed: git %s\n%s" 
+             (string-join args " ") 
+             (cdr result)))
+    (string-trim (cdr result))))
+
+(defun claude-mcp-magit--git-lines (&rest args)
+  "Call git with ARGS and return output as a list of lines.
+Empty lines are excluded."
+  (let ((output (apply #'claude-mcp-magit--git-output args)))
+    (if (string-empty-p output)
+        '()
+      (split-string output "\n" t))))
+
 (defun claude-mcp-magit-status (&optional directory)
   "Get current git status for DIRECTORY (or claude-session-cwd).
 Returns an alist with :staged, :unstaged, :untracked, and :branch keys.
-Does not open or switch to any buffers."
+Does not open or switch to any buffers.
+Works correctly in git worktrees."
   (let* ((start-dir (or directory claude-session-cwd default-directory))
-         (default-directory (or (magit-toplevel start-dir) start-dir)))
-    (unless (magit-toplevel)
-      (error "Not in a git repository: %s" default-directory))
+         (default-directory (or (claude-mcp-magit--git-toplevel start-dir) start-dir)))
+    (unless (claude-mcp-magit--git-toplevel)
+      (error "Not in a git repository: %s" start-dir))
     ;; Use git directly to avoid opening magit buffers
-    (let ((staged '())
-          (unstaged '())
-          (untracked '())
-          (branch (magit-get-current-branch)))
-      ;; Get staged files using git diff --cached
-      (dolist (file (magit-staged-files))
-        (push file staged))
-      ;; Get unstaged (modified) files
-      (dolist (file (magit-unstaged-files))
-        (push file unstaged))
-      ;; Get untracked files
-      (dolist (file (magit-untracked-files))
-        (push file untracked))
+    (let ((branch (string-trim 
+                   (or (ignore-errors 
+                         (claude-mcp-magit--git-output "symbolic-ref" "--short" "HEAD"))
+                       ;; Detached HEAD - get short commit hash
+                       (claude-mcp-magit--git-output "rev-parse" "--short" "HEAD"))))
+          ;; Get staged files
+          (staged (claude-mcp-magit--git-lines "diff" "--cached" "--name-only"))
+          ;; Get unstaged (modified) files
+          (unstaged (claude-mcp-magit--git-lines "diff" "--name-only"))
+          ;; Get untracked files
+          (untracked (claude-mcp-magit--git-lines "ls-files" "--others" "--exclude-standard")))
       ;; Return as JSON-friendly alist
       `((branch . ,branch)
-        (staged . ,(nreverse staged))
-        (unstaged . ,(nreverse unstaged))
-        (untracked . ,(nreverse untracked))))))
+        (staged . ,staged)
+        (unstaged . ,unstaged)
+        (untracked . ,untracked)))))
 
 (defun claude-mcp-magit-stage (files &optional directory)
   "Stage FILES (a list of file paths) for commit.
 DIRECTORY defaults to claude-session-cwd.
-Does not open or switch to any buffers."
+Does not open or switch to any buffers.
+Works correctly in git worktrees."
   (let* ((start-dir (or directory claude-session-cwd default-directory))
-         (default-directory (or (magit-toplevel start-dir) start-dir)))
-    (unless (magit-toplevel)
-      (error "Not in a git repository: %s" default-directory))
+         (default-directory (or (claude-mcp-magit--git-toplevel start-dir) start-dir)))
+    (unless (claude-mcp-magit--git-toplevel)
+      (error "Not in a git repository: %s" start-dir))
     (let ((files-list (if (listp files) files (list files))))
-      ;; Use magit-call-git for each file (doesn't open buffers)
+      ;; Use git directly to avoid opening magit buffers
       (dolist (file files-list)
-        (magit-call-git "add" "--" file))
+        (claude-mcp-magit--git-output "add" "--" file))
       (format "Staged %d file(s): %s" 
               (length files-list)
               (string-join files-list ", ")))))
@@ -213,48 +255,45 @@ Does not open or switch to any buffers."
 (defun claude-mcp-magit-unstage (files &optional directory)
   "Unstage FILES (a list of file paths).
 DIRECTORY defaults to claude-session-cwd.
-Does not open or switch to any buffers."
+Does not open or switch to any buffers.
+Works correctly in git worktrees."
   (let* ((start-dir (or directory claude-session-cwd default-directory))
-         (default-directory (or (magit-toplevel start-dir) start-dir)))
-    (unless (magit-toplevel)
-      (error "Not in a git repository: %s" default-directory))
+         (default-directory (or (claude-mcp-magit--git-toplevel start-dir) start-dir)))
+    (unless (claude-mcp-magit--git-toplevel)
+      (error "Not in a git repository: %s" start-dir))
     (let ((files-list (if (listp files) files (list files))))
-      ;; Use magit-call-git for each file (doesn't open buffers)
+      ;; Use git directly to avoid opening magit buffers
       (dolist (file files-list)
-        (magit-call-git "reset" "HEAD" "--" file))
+        (claude-mcp-magit--git-output "reset" "HEAD" "--" file))
       (format "Unstaged %d file(s): %s" 
               (length files-list)
               (string-join files-list ", ")))))
 
 (defun claude-mcp-magit-diff (&optional file directory staged)
   "Get diff for FILE (or all changes if nil).
-If STAGED is non-nil, show staged diff. Otherwise show unstaged diff.
-DIRECTORY defaults to claude-session-cwd."
+If STAGED is non-nil, show staged diff.  Otherwise show unstaged diff.
+DIRECTORY defaults to claude-session-cwd.
+Works correctly in git worktrees."
   (let* ((start-dir (or directory claude-session-cwd default-directory))
-         (default-directory (or (magit-toplevel start-dir) start-dir)))
-    (unless (magit-toplevel)
-      (error "Not in a git repository: %s" default-directory))
-    (with-temp-buffer
-      (if staged
-          (if file
-              (magit-git-insert "diff" "--cached" "--" file)
-            (magit-git-insert "diff" "--cached"))
-        (if file
-            (magit-git-insert "diff" "--" file)
-          (magit-git-insert "diff")))
-      (buffer-string))))
+         (default-directory (or (claude-mcp-magit--git-toplevel start-dir) start-dir)))
+    (unless (claude-mcp-magit--git-toplevel)
+      (error "Not in a git repository: %s" start-dir))
+    ;; Build args list for git diff
+    (let ((args (if staged '("diff" "--cached") '("diff"))))
+      (when file
+        (setq args (append args (list "--" file))))
+      (apply #'claude-mcp-magit--git-output args))))
 
 (defun claude-mcp-magit-log (&optional count directory)
   "Get recent git log entries.
-COUNT defaults to 5. DIRECTORY defaults to claude-session-cwd."
+COUNT defaults to 5.  DIRECTORY defaults to claude-session-cwd.
+Works correctly in git worktrees."
   (let* ((start-dir (or directory claude-session-cwd default-directory))
-         (default-directory (or (magit-toplevel start-dir) start-dir))
+         (default-directory (or (claude-mcp-magit--git-toplevel start-dir) start-dir))
          (n (or count 5)))
-    (unless (magit-toplevel)
-      (error "Not in a git repository: %s" default-directory))
-    (with-temp-buffer
-      (magit-git-insert "log" (format "-%d" n) "--oneline" "--no-decorate")
-      (buffer-string))))
+    (unless (claude-mcp-magit--git-toplevel)
+      (error "Not in a git repository: %s" start-dir))
+    (claude-mcp-magit--git-output "log" (format "-%d" n) "--oneline" "--no-decorate")))
 
 (defvar claude-mcp-magit--pending-commit nil
   "Pending commit proposal: (directory message files).")
@@ -274,13 +313,15 @@ COUNT defaults to 5. DIRECTORY defaults to claude-session-cwd."
 
 (defun claude-mcp-magit-commit-propose (message &optional directory)
   "Propose a commit with MESSAGE for user approval.
-This stages the proposal but does not commit. User must approve.
-Returns instructions for the user."
+This stages the proposal but does not commit.  User must approve.
+DIRECTORY defaults to claude-session-cwd.
+Returns instructions for the user.
+Works correctly in git worktrees."
   (let* ((start-dir (or directory claude-session-cwd default-directory))
-         (default-directory (or (magit-toplevel start-dir) start-dir)))
-    (unless (magit-toplevel)
-      (error "Not in a git repository: %s" default-directory))
-    (let ((staged-files (magit-staged-files)))
+         (default-directory (or (claude-mcp-magit--git-toplevel start-dir) start-dir)))
+    (unless (claude-mcp-magit--git-toplevel)
+      (error "Not in a git repository: %s" start-dir))
+    (let ((staged-files (claude-mcp-magit--git-lines "diff" "--cached" "--name-only")))
       (unless staged-files
         (error "No files staged for commit"))
       ;; Store the pending commit
@@ -304,10 +345,10 @@ This populates COMMIT_EDITMSG with the proposed message for editing."
          (files (nth 2 info))
          (default-directory directory))
     ;; Verify files are still staged
-    (let ((currently-staged (magit-staged-files)))
+    (let ((currently-staged (claude-mcp-magit--git-lines "diff" "--cached" "--name-only")))
       (unless (equal (sort (copy-sequence files) #'string<)
                      (sort (copy-sequence currently-staged) #'string<))
-        (error "Staged files have changed since proposal. Please re-stage and propose again.")))
+        (error "Staged files have changed since proposal.  Please re-stage and propose again")))
     ;; Clear pending commit
     (setq claude-mcp-magit--pending-commit nil)
     ;; Store message and add hook (hook removes itself after running)
