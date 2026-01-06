@@ -119,8 +119,39 @@ NATIVE_TOOLS: dict = {
 }
 
 
-def load_tools() -> dict:
-    """Load tool definitions from Emacs registry via emacsclient."""
+async def load_tools_async() -> dict:
+    """Load tool definitions from Emacs registry via emacsclient (async)."""
+    global TOOL_DEFS
+
+    # Query Emacs for registered tools
+    result = await lib.call_emacs_async("(claude-mcp-export-tools)")
+
+    # emacsclient returns elisp string representation, unescape it
+    result = lib.unescape_elisp_string(result)
+
+    try:
+        TOOL_DEFS = json.loads(result)
+    except json.JSONDecodeError as e:
+        # Provide helpful error context for debugging
+        context_start = max(0, e.pos - 50)
+        context_end = min(len(result), e.pos + 50)
+        context = result[context_start:context_end]
+        pointer = " " * min(50, e.pos - context_start) + "^"
+        raise RuntimeError(
+            f"Failed to parse tools JSON from Emacs:\n"
+            f"  Error: {e.msg} at position {e.pos}\n"
+            f"  Context: {repr(context)}\n"
+            f"           {pointer}\n"
+            f"  Hint: Check for unescaped special characters in tool descriptions"
+        ) from e
+
+    print(f"Loaded {len(TOOL_DEFS)} tools from Emacs registry", file=sys.stderr, flush=True)
+
+    return TOOL_DEFS
+
+
+def load_tools_sync() -> dict:
+    """Load tool definitions from Emacs registry via emacsclient (sync, for CLI use only)."""
     global TOOL_DEFS
 
     # Query Emacs for registered tools
@@ -177,7 +208,7 @@ def build_input_schema(tool_def: dict) -> dict:
 async def list_tools() -> list[Tool]:
     """List available Emacs interaction tools from registry and native definitions."""
     # Reload tools on each list_tools call to pick up changes
-    load_tools()
+    await load_tools_async()
 
     tools = []
     # Add Emacs-registered tools
@@ -661,7 +692,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             else:
                 elisp_expr = wrap_with_context(elisp_expr, cwd=session_cwd)
 
-        result = lib.call_emacs(elisp_expr)
+        result = await lib.call_emacs_async(elisp_expr)
 
         # Unescape string results
         if result.startswith('"') and result.endswith('"'):
@@ -729,7 +760,7 @@ async def main():
     SESSION_BUFFER_NAME = os.environ.get("CLAUDE_AGENT_BUFFER_NAME")
 
     # Load tools on startup
-    load_tools()
+    await load_tools_async()
 
     # Start HTTP server for bash command callbacks
     http_port, http_runner = await start_http_server()
@@ -753,7 +784,7 @@ async def main():
 
 def get_safe_tools() -> list[str]:
     """Return list of tool names marked as safe in the registry and native tools."""
-    load_tools()
+    load_tools_sync()
     safe = [name for name, defn in TOOL_DEFS.items() if defn.get("safe", False)]
     safe.extend([name for name, defn in NATIVE_TOOLS.items() if defn.get("safe", False)])
     return safe

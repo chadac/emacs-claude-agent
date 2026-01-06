@@ -183,14 +183,49 @@ Press 'i' or RET in the log area to jump to input."
 (declare-function claude-agent-run "claude-agent")
 (declare-function claude-list-sessions "claude-sessions")
 
+(defun claude-transient--session-exists-for-dir (dir)
+  "Check if a Claude session already exists for DIR.
+Returns the buffer if found, nil otherwise."
+  (let ((expanded-dir (expand-file-name dir)))
+    (cl-find-if
+     (lambda (buf)
+       (with-current-buffer buf
+         (and (boundp 'claude-agent--process)
+              claude-agent--process
+              (process-live-p claude-agent--process)
+              (boundp 'claude-agent--work-dir)
+              claude-agent--work-dir
+              (string= (expand-file-name claude-agent--work-dir)
+                       expanded-dir))))
+     (buffer-list))))
+
+(defun claude-transient--read-slug ()
+  "Read a slug from the user, allowing only lowercase letters and dashes."
+  (let ((slug (read-string "Session name (lowercase, dashes only): ")))
+    (if (string-match-p "^[a-z][a-z-]*$" slug)
+        slug
+      (message "Invalid slug: use only lowercase letters and dashes, starting with a letter")
+      (sit-for 1)
+      (claude-transient--read-slug))))
+
 (defun claude-transient-start-session ()
-  "Start a new Claude session for the current project."
+  "Start a new Claude session for the current project.
+If a session already exists for this project, always prompts for a slug
+to create a named session (e.g., *claude:project:my-slug*)."
   (interactive)
   (require 'claude-agent)
-  (let ((dir (or (when-let ((proj (project-current)))
-                   (project-root proj))
-                 default-directory)))
-    (claude-agent-run dir)))
+  (let* ((dir (or (when-let ((proj (project-current)))
+                    (project-root proj))
+                  default-directory))
+         (existing (claude-transient--session-exists-for-dir dir)))
+    (if existing
+        (let ((slug (claude-transient--read-slug)))
+          (claude-agent-run dir nil nil slug))
+      ;; No existing session - ask if they want a named session or default
+      (if (y-or-n-p "Create named session? ")
+          (let ((slug (claude-transient--read-slug)))
+            (claude-agent-run dir nil nil slug))
+        (claude-agent-run dir)))))
 
 (defun claude-transient-switch-session ()
   "Switch to an existing Claude session or list all sessions."
@@ -212,6 +247,134 @@ Press 'i' or RET in the log area to jump to input."
                                        nil t)))
           (pop-to-buffer choice))))))
 
+;;;; Resume Previous Sessions
+
+(defun claude-transient--get-project-sessions-dir ()
+  "Get the Claude projects directory for the current project.
+Returns nil if not in a project or directory doesn't exist."
+  (when-let* ((dir (or (when-let ((proj (project-current)))
+                         (project-root proj))
+                       default-directory))
+              (expanded (expand-file-name dir))
+              ;; Convert path to Claude's format:
+              ;; /home/foo/.bar/baz -> -home-foo--bar-baz
+              ;; 1. Remove trailing slash
+              ;; 2. Replace . with - (so /. becomes --)
+              ;; 3. Replace / with -
+              (no-trailing (directory-file-name expanded))
+              (dots-to-dash (replace-regexp-in-string "\\." "-" no-trailing))
+              (encoded (replace-regexp-in-string "/" "-" dots-to-dash))
+              (sessions-dir (expand-file-name encoded "~/.claude/projects/")))
+    (when (file-directory-p sessions-dir)
+      sessions-dir)))
+
+(defun claude-transient--parse-session-file (file)
+  "Parse a session JSONL FILE and extract metadata.
+Returns a plist with :id, :timestamp, :summary, :cwd, or nil if invalid."
+  (condition-case nil
+      (when (and (file-exists-p file)
+                 (> (file-attribute-size (file-attributes file)) 0))
+        (let* ((session-id (file-name-base file))
+               (first-user-msg nil)
+               (last-timestamp nil)
+               (cwd nil))
+          ;; Read first few lines to get metadata
+          (with-temp-buffer
+            (insert-file-contents file nil 0 50000) ; Read first 50KB
+            (goto-char (point-min))
+            (while (and (not (eobp)) (< (line-number-at-pos) 20))
+              (let* ((line (buffer-substring-no-properties
+                            (line-beginning-position) (line-end-position)))
+                     (json (condition-case nil
+                               (json-read-from-string line)
+                             (error nil))))
+                (when json
+                  (let ((type (cdr (assq 'type json)))
+                        (msg (cdr (assq 'message json)))
+                        (ts (cdr (assq 'timestamp json)))
+                        (dir (cdr (assq 'cwd json))))
+                    (when dir (setq cwd dir))
+                    (when ts (setq last-timestamp ts))
+                    ;; Get first user message as summary
+                    (when (and (equal type "user")
+                               (not first-user-msg)
+                               msg)
+                      (let ((content (cdr (assq 'content msg))))
+                        (when (stringp content)
+                          (setq first-user-msg
+                                (truncate-string-to-width
+                                 (replace-regexp-in-string "[\n\r]+" " " content)
+                                 60 nil nil "..."))))))))
+              (forward-line 1)))
+          (when (or first-user-msg last-timestamp)
+            (list :id session-id
+                  :timestamp last-timestamp
+                  :summary (or first-user-msg "(empty session)")
+                  :cwd cwd
+                  :file file))))
+    (error nil)))
+
+(defun claude-transient--format-session-for-display (session)
+  "Format SESSION plist for display in completing-read."
+  (let* ((id (plist-get session :id))
+         (summary (plist-get session :summary))
+         (timestamp (plist-get session :timestamp))
+         (short-id (substring id 0 8))
+         (time-str (if timestamp
+                       (format-time-string "%Y-%m-%d %H:%M"
+                                          (date-to-time timestamp))
+                     "unknown")))
+    (format "%s  %s  %s" short-id time-str summary)))
+
+(defun claude-transient--session-has-content-p (session)
+  "Return non-nil if SESSION has meaningful content.
+Filters out warmup sessions and empty sessions."
+  (let ((summary (plist-get session :summary)))
+    (and summary
+         (not (equal summary "(empty session)"))
+         (not (string-match-p "\\`[Ww]armup" summary)))))
+
+(defun claude-transient--get-previous-sessions ()
+  "Get list of previous sessions for the current project.
+Returns a list of (display-string . session-plist) pairs, sorted by date.
+Filters out warmup and empty sessions."
+  (when-let ((sessions-dir (claude-transient--get-project-sessions-dir)))
+    (let* ((files (directory-files sessions-dir t "\\.jsonl$"))
+           (sessions (delq nil (mapcar #'claude-transient--parse-session-file files)))
+           ;; Filter out warmup and empty sessions
+           (sessions (cl-remove-if-not #'claude-transient--session-has-content-p sessions)))
+      ;; Sort by timestamp, most recent first
+      (setq sessions (sort sessions
+                           (lambda (a b)
+                             (string> (or (plist-get a :timestamp) "")
+                                      (or (plist-get b :timestamp) "")))))
+      ;; Return as alist for completing-read
+      (mapcar (lambda (s)
+                (cons (claude-transient--format-session-for-display s) s))
+              sessions))))
+
+(defun claude-transient-resume-session ()
+  "Resume a previous Claude session from disk.
+Shows a dropdown of previous sessions with timestamps and summaries.
+If a session already exists for this project, prompts for a slug."
+  (interactive)
+  (require 'claude-agent)
+  (let* ((dir (or (when-let ((proj (project-current)))
+                    (project-root proj))
+                  default-directory))
+         (sessions (claude-transient--get-previous-sessions)))
+    (if (null sessions)
+        (message "No previous sessions found for this project")
+      (let* ((choice (completing-read "Resume session: "
+                                      (mapcar #'car sessions)
+                                      nil t))
+             (session (cdr (assoc choice sessions)))
+             (session-id (plist-get session :id))
+             (existing (claude-transient--session-exists-for-dir dir))
+             (slug (when existing (claude-transient--read-slug))))
+        (when session-id
+          (claude-agent-run dir session-id nil slug))))))
+
 ;;;###autoload (autoload 'claude-pair-menu "claude-transient" nil t)
 (transient-define-prefix claude-pair-menu ()
   "Claude pair programming commands."
@@ -225,7 +388,8 @@ Press 'i' or RET in the log area to jump to input."
    ("C" "Send project comments" (lambda () (interactive) (claude-pair-send-comments t)))]
   ["Sessions"
    ("s" "Start session" claude-transient-start-session)
-   ("r" "Switch session" claude-transient-switch-session)
+   ("r" "Resume previous" claude-transient-resume-session)
+   ("w" "Switch active" claude-transient-switch-session)
    ("l" "List sessions" claude-list-sessions)])
 
 ;;;; Unified Dispatcher

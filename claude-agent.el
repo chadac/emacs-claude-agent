@@ -2357,13 +2357,116 @@ Each element is an alist with keys: name, status."
            (message "MCP Servers:\n%s" msg))
        (message "No MCP status available (send a message first to initialize)")))))
 
+;;;; Session history loading
+
+(defun claude-agent--get-session-file (work-dir session-id)
+  "Get the session file path for SESSION-ID in WORK-DIR."
+  (let* ((encoded-dir (replace-regexp-in-string
+                       "/" "-"
+                       (directory-file-name (expand-file-name work-dir))))
+         (sessions-dir (expand-file-name encoded-dir "~/.claude/projects/")))
+    (expand-file-name (concat session-id ".jsonl") sessions-dir)))
+
+(defun claude-agent--load-session-history (work-dir session-id &optional max-messages)
+  "Load conversation history from SESSION-ID in WORK-DIR.
+Returns a list of message plists with :role, :content, :timestamp.
+Loads at most MAX-MESSAGES (default 50) most recent messages."
+  (let* ((file (claude-agent--get-session-file work-dir session-id))
+         (max-msgs (or max-messages 50))
+         (messages nil))
+    (when (and file (file-exists-p file))
+      (with-temp-buffer
+        (insert-file-contents file)
+        (goto-char (point-min))
+        (while (not (eobp))
+          (let* ((line (buffer-substring-no-properties
+                        (line-beginning-position) (line-end-position)))
+                 (json (condition-case nil
+                           (json-read-from-string line)
+                         (error nil))))
+            (when json
+              (let ((type (cdr (assq 'type json)))
+                    (msg (cdr (assq 'message json)))
+                    (ts (cdr (assq 'timestamp json))))
+                (when (and msg (member type '("user" "assistant")))
+                  (let* ((role (cdr (assq 'role msg)))
+                         (content (cdr (assq 'content msg)))
+                         ;; Handle content that's either a string or array
+                         (text-content
+                          (cond
+                           ((stringp content) content)
+                           ((vectorp content)
+                            ;; Extract text from content array
+                            (mapconcat
+                             (lambda (item)
+                               (when (equal (cdr (assq 'type item)) "text")
+                                 (cdr (assq 'text item))))
+                             content ""))
+                           (t nil))))
+                    (when (and role text-content (not (string-empty-p text-content)))
+                      (push (list :role role
+                                  :content text-content
+                                  :timestamp ts)
+                            messages)))))))
+          (forward-line 1)))
+      ;; Return most recent messages, in chronological order
+      (let ((recent (seq-take (nreverse messages) max-msgs)))
+        (nreverse recent)))))
+
+(defun claude-agent--format-history-message (msg)
+  "Format a history message MSG for display in the buffer."
+  (let* ((role (plist-get msg :role))
+         (content (plist-get msg :content))
+         (timestamp (plist-get msg :timestamp))
+         ;; Truncate very long messages for history display
+         (max-len 500)
+         (truncated (if (> (length content) max-len)
+                        (concat (substring content 0 max-len) "\n[...truncated...]")
+                      content)))
+    (concat
+     (if (equal role "user")
+         (propertize "┌─ You" 'face 'claude-agent-user-header-face)
+       (propertize "┌─ Claude" 'face 'claude-agent-assistant-header-face))
+     (when timestamp
+       (propertize (format " (%s)" (format-time-string "%m-%d %H:%M" (date-to-time timestamp)))
+                   'face 'claude-agent-session-face))
+     "\n"
+     (propertize truncated
+                 'face (if (equal role "user")
+                          'claude-agent-user-face
+                        'claude-agent-assistant-face))
+     "\n\n")))
+
+(defun claude-agent--insert-history-header ()
+  "Insert the history section header."
+  (let ((start (point)))
+    (insert "─── Previous Conversation History ───────────────────────────\n\n")
+    (claude-agent--apply-face start (point) 'claude-agent-session-face)))
+
+(defun claude-agent--insert-history-footer ()
+  "Insert the history section footer."
+  (let ((start (point)))
+    (insert "─── Resuming Session ────────────────────────────────────────\n\n")
+    (claude-agent--apply-face start (point) 'claude-agent-session-face)))
+
+(defun claude-agent--display-session-history (work-dir session-id)
+  "Display conversation history from SESSION-ID in the current buffer."
+  (let ((history (claude-agent--load-session-history work-dir session-id 20)))
+    (when history
+      (claude-agent--insert-history-header)
+      (dolist (msg history)
+        (let ((formatted (claude-agent--format-history-message msg)))
+          (claude-agent--append-to-log formatted nil nil)))
+      (claude-agent--insert-history-footer))))
+
 ;;;; Entry point
 
 ;;;###autoload
-(defun claude-agent-run (work-dir &optional resume-session continue-session)
+(defun claude-agent-run (work-dir &optional resume-session continue-session slug)
   "Start a Claude agent session for WORK-DIR.
 Optional RESUME-SESSION is a session ID to resume.
-Optional CONTINUE-SESSION, if non-nil, continues the most recent session."
+Optional CONTINUE-SESSION, if non-nil, continues the most recent session.
+Optional SLUG is a suffix for the buffer name (e.g., *claude:project:slug*)."
   (interactive
    (list (read-directory-name "Project directory: "
                               (or (vc-git-root default-directory)
@@ -2371,7 +2474,9 @@ Optional CONTINUE-SESSION, if non-nil, continues the most recent session."
   (let* ((expanded-dir (expand-file-name work-dir))
          (short-name (file-name-nondirectory
                       (directory-file-name expanded-dir)))
-         (buf-name (format "*claude:%s*" short-name))
+         (buf-name (if slug
+                       (format "*claude:%s:%s*" short-name slug)
+                     (format "*claude:%s*" short-name)))
          (buf (get-buffer-create buf-name)))
 
     ;; Set up buffer
@@ -2382,7 +2487,11 @@ Optional CONTINUE-SESSION, if non-nil, continues the most recent session."
             claude-agent--pending-output ""
             claude-agent--session-info nil
             claude-agent--has-conversation nil
-            claude-agent--work-dir expanded-dir))
+            claude-agent--work-dir expanded-dir)
+
+      ;; Display history if resuming a specific session
+      (when resume-session
+        (claude-agent--display-session-history expanded-dir resume-session)))
 
     ;; Start process with optional resume/continue
     (let ((proc (claude-agent--start-process expanded-dir buf resume-session continue-session)))

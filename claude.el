@@ -762,20 +762,34 @@ With prefix ARG, prompt for the project directory."
 ;;;###autoload
 (defun claude-run (&optional arg)
   "Start Claude Code or switch to existing session.
+If a session already exists for this project, prompts for a slug
+to create a named session (e.g., *claude:project:my-slug*).
 With prefix ARG, prompt for the project directory."
   (interactive "P")
+  (require 'claude-transient)
   (let* ((explicit-dir (when arg (read-directory-name "Project directory: ")))
-         (work-dir (or explicit-dir (claude--project-root))))
-    (claude-agent-run work-dir)))
+         (work-dir (or explicit-dir (claude--project-root)))
+         (existing (claude-transient--session-exists-for-dir work-dir)))
+    (if existing
+        ;; Session exists - prompt for slug
+        (let ((slug (claude-transient--read-slug)))
+          (claude-agent-run work-dir nil nil slug))
+      ;; No existing session - ask if they want a named session or default
+      (if (y-or-n-p "Create named session? ")
+          (let ((slug (claude-transient--read-slug)))
+            (claude-agent-run work-dir nil nil slug))
+        (claude-agent-run work-dir)))))
 
 ;;;###autoload
 (defun claude-resume (&optional arg)
-  "Start Claude Code with resume or switch to existing session.
+  "Resume a previous Claude session with session picker.
+Shows a dropdown of previous sessions with timestamps and summaries.
 With prefix ARG, prompt for the project directory."
   (interactive "P")
+  (require 'claude-transient)
   (let* ((explicit-dir (when arg (read-directory-name "Project directory: ")))
-         (work-dir (or explicit-dir (claude--project-root))))
-    (claude-agent-run work-dir nil t)))
+         (default-directory (or explicit-dir (claude--project-root))))
+    (claude-transient-resume-session)))
 
 ;;;###autoload
 (defun claude-kill ()
