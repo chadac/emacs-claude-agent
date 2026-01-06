@@ -1065,7 +1065,8 @@ Otherwise searches by title."
   (cond
    ;; No ID - try to infer from current worktree
    ((null todo-id)
-    (let* ((cwd (or (bound-and-true-p claude-session-cwd)
+    (let* ((cwd (or (bound-and-true-p claudemacs-session-cwd)
+                    (bound-and-true-p claude-session-cwd)
                     (bound-and-true-p claude--cwd)
                     default-directory))
            (expanded-cwd (expand-file-name cwd))

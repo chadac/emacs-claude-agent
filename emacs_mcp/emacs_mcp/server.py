@@ -456,7 +456,8 @@ def needs_session_cwd(name: str) -> bool:
     """Check if a tool needs the session cwd binding."""
     # Notes tools need cwd to identify the correct notes file
     # restart_and_resume needs cwd to identify which session to restart
-    return name.startswith("notes_") or name in {
+    # TODO tools need cwd to identify the current worktree/task
+    return name.startswith("notes_") or name.startswith("todo_") or name in {
         "get_notes", "set_notes", "append_notes", "clear_notes",
         "restart_and_resume"
     }
