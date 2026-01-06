@@ -452,15 +452,25 @@ def build_elisp_call(elisp_fn: str, args: dict, arg_defs: dict) -> str:
     return f"({elisp_fn})"
 
 
-def needs_session_cwd(name: str) -> bool:
-    """Check if a tool needs the session cwd binding."""
-    # Notes tools need cwd to identify the correct notes file
-    # restart_and_resume needs cwd to identify which session to restart
-    # TODO tools need cwd to identify the current worktree/task
-    return name.startswith("notes_") or name.startswith("todo_") or name in {
-        "get_notes", "set_notes", "append_notes", "clear_notes",
-        "restart_and_resume"
-    }
+def needs_session_cwd(name: str, tool_def: dict | None = None) -> bool:
+    """Check if a tool needs the session cwd binding.
+
+    First checks the tool definition for needs_session_cwd attribute.
+    Falls back to hardcoded list for backward compatibility.
+    """
+    # Check tool definition first (set via :needs-session-cwd t in elisp)
+    if tool_def and tool_def.get("needs_session_cwd"):
+        return True
+
+    # Fallback: hardcoded list for backward compatibility
+    # These can be removed once all tools use :needs-session-cwd attribute
+    return (name.startswith("notes_") or
+            name.startswith("todo_") or
+            name.startswith("kb_") or
+            name in {
+                "get_notes", "set_notes", "append_notes", "clear_notes",
+                "restart_and_resume"
+            })
 
 
 def wrap_with_context(elisp_expr: str, cwd: str | None = None, buffer_name: str | None = None, file_path: str | None = None) -> str:
@@ -626,9 +636,9 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             # Check tool definition for context hints
             context_hint = tool_def.get("context", "auto")  # Default to auto
 
-            # Notes tools should always use session context, not infer from arguments
+            # Tools that need session context should not infer from arguments
             # (e.g., file_path in notes_add_documentation is metadata, not execution context)
-            if needs_session_cwd(name):
+            if needs_session_cwd(name, tool_def):
                 context_hint = "none"
 
             # Always try to auto-detect unless explicitly disabled
@@ -685,7 +695,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             elisp_expr = wrap_with_context(elisp_expr, buffer_name=context_buffer)
         elif context_dir:
             elisp_expr = wrap_with_context(elisp_expr, cwd=context_dir)
-        elif needs_session_cwd(name) and session_cwd:
+        elif needs_session_cwd(name, tool_def) and session_cwd:
             # For tools that need session context, use session defaults
             # Prefer executing in the claudemacs buffer if available
             if session_buffer and name != "eval_elisp":

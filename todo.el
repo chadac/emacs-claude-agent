@@ -1365,18 +1365,21 @@ TODO-ID can be a file path or title (defaults to current TODO)."
     "Get the TODO assigned to the current session/worktree. Returns full task details including content."
     :function #'org-roam-todo-mcp-get-current
     :safe t
+    :needs-session-cwd t
     :args ())
 
   (claude-mcp-deftool todo-acceptance-criteria
     "Get acceptance criteria for a TODO. Returns array of {text, checked} objects."
     :function #'org-roam-todo-mcp-get-acceptance-criteria
     :safe t
+    :needs-session-cwd t
     :args ((todo-id string "TODO identifier (file path or title). Defaults to current TODO.")))
 
   (claude-mcp-deftool todo-list
     "List all TODOs, optionally filtered by project."
     :function #'org-roam-todo-mcp-list
     :safe t
+    :needs-session-cwd nil  ; todo_list doesn't use session context
     :args ((project string "Optional project name to filter by")))
 
   ;; Mutating tools (unsafe)
@@ -1384,6 +1387,7 @@ TODO-ID can be a file path or title (defaults to current TODO)."
     "Add a timestamped progress entry to a TODO's Progress Log section."
     :function #'org-roam-todo-mcp-add-progress
     :safe nil
+    :needs-session-cwd t
     :args ((message string :required "Progress message to add")
            (todo-id string "TODO identifier (file path or title). Defaults to current TODO.")))
 
@@ -1391,6 +1395,7 @@ TODO-ID can be a file path or title (defaults to current TODO)."
     "Update the status of a TODO."
     :function #'org-roam-todo-mcp-update-status
     :safe nil
+    :needs-session-cwd t
     :args ((status string :required "New status: draft, active, done, or rejected")
            (todo-id string "TODO identifier (file path or title). Defaults to current TODO.")))
 
@@ -1398,6 +1403,7 @@ TODO-ID can be a file path or title (defaults to current TODO)."
     "Check or uncheck an acceptance criteria item."
     :function #'org-roam-todo-mcp-check-acceptance
     :safe nil
+    :needs-session-cwd t
     :args ((item-text string :required "Text of the acceptance criteria item to find")
            (checked boolean "Whether to check (true) or uncheck (false). Defaults to true.")
            (todo-id string "TODO identifier (file path or title). Defaults to current TODO.")))
@@ -1406,6 +1412,7 @@ TODO-ID can be a file path or title (defaults to current TODO)."
     "Replace all acceptance criteria with new items."
     :function #'org-roam-todo-mcp-update-acceptance
     :safe nil
+    :needs-session-cwd t
     :args ((criteria array :required "Array of {text: string, checked: boolean} objects")
            (todo-id string "TODO identifier (file path or title). Defaults to current TODO.")))
 
@@ -1413,6 +1420,7 @@ TODO-ID can be a file path or title (defaults to current TODO)."
     "Create a new TODO for a project. Returns the created TODO's file path and metadata."
     :function #'org-roam-todo-mcp-create
     :safe nil
+    :needs-session-cwd nil  ; todo_create takes explicit project-root param
     :args ((project-root string :required "Path to the project root directory")
            (title string :required "Title of the TODO")
            (description string "Optional task description")

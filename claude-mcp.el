@@ -37,13 +37,17 @@
 (defmacro claude-mcp-deftool (name docstring &rest args)
   "Define an MCP tool NAME with DOCSTRING.
 NAME uses Lisp conventions (dashes), automatically converted to underscores for MCP.
-ARGS is a plist with :function, :safe, and :args keys.
+ARGS is a plist with :function, :safe, :needs-session-cwd, and :args keys.
+
+:safe t marks tool as safe (no side effects, can be pre-authorized)
+:needs-session-cwd t marks tool as needing session context (default-directory binding)
 
 Example:
   (claude-mcp-deftool get-buffer-content
     \"Get the content of an Emacs buffer.\"
     :function #\\='claude-mcp-get-buffer-content
     :safe t
+    :needs-session-cwd t
     :args ((buffer-name string :required \"Name of the buffer\")
            (tail-lines integer \"Optional: last N lines\")))"
   (declare (indent 2) (doc-string 2))
@@ -82,6 +86,7 @@ Called by Python server via emacsclient to get tool definitions."
        (let ((tool-def `((description . ,(or (plist-get def :description) ""))
                          (function . ,(symbol-name (plist-get def :function)))
                          (safe . ,(if (plist-get def :safe) t :json-false))
+                         (needs_session_cwd . ,(if (plist-get def :needs-session-cwd) t :json-false))
                          (args . ,(claude-mcp--convert-args (plist-get def :args))))))
          ;; Add context hint if specified
          (when-let ((context (plist-get def :context)))
