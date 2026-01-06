@@ -2582,6 +2582,9 @@ Optional MODEL is the model to use (e.g., 'sonnet', 'opus', 'haiku')."
 
     ;; Display buffer
     (pop-to-buffer buf)
+    ;; Ensure default-directory is set correctly (defensive - should already be set)
+    (with-current-buffer buf
+      (setq default-directory expanded-dir))
     buf))
 
 ;;;; Transient Menu

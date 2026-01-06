@@ -522,9 +522,9 @@ If the worktree and session already exist, sends the task to the existing sessio
          (existing-buffer (cl-find-if
                            (lambda (buf)
                              (with-current-buffer buf
-                               (and (boundp 'claude-agent--directory)
-                                    claude-agent--directory
-                                    (string= (expand-file-name claude-agent--directory)
+                               (and (boundp 'claude-agent--work-dir)
+                                    claude-agent--work-dir
+                                    (string= (expand-file-name claude-agent--work-dir)
                                              expanded-path))))
                            (buffer-list))))
     (unless project-root
@@ -596,9 +596,9 @@ Only shows TODOs with status 'draft' since active/done/rejected don't need workt
   (let ((expanded-path (expand-file-name worktree-path)))
     (dolist (buf (buffer-list))
       (with-current-buffer buf
-        (when (and (boundp 'claude-agent--directory)
-                   claude-agent--directory
-                   (string= (expand-file-name claude-agent--directory)
+        (when (and (boundp 'claude-agent--work-dir)
+                   claude-agent--work-dir
+                   (string= (expand-file-name claude-agent--work-dir)
                             expanded-path)
                    (boundp 'claude-agent--process)
                    claude-agent--process)
