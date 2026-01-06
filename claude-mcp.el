@@ -997,20 +997,7 @@ Designed to be called via MCP by Claude AI."
               (let ((inhibit-read-only t))
                 (insert formatted-message))
               (claude-agent-send)
-              (format "Sent message to %s" buffer-name))
-          ;; Fallback: try old eat-terminal system
-          (if (and (boundp 'eat-terminal) eat-terminal)
-              (let ((buf (current-buffer)))
-                (eat-term-send-string eat-terminal message)
-                (run-at-time 0.1 nil
-                             (lambda (b)
-                               (when (buffer-live-p b)
-                                 (with-current-buffer b
-                                   (when (and (boundp 'eat-terminal) eat-terminal)
-                                     (eat-term-input-event eat-terminal 1 'return)))))
-                             buf)
-                (format "Sent message to %s" buffer-name))
-            (error "Buffer '%s' is not a Claude agent buffer" buffer-name))))
+              (format "Sent message to %s" buffer-name))))
     (error "Buffer '%s' does not exist" buffer-name)))
 
 ;;;; Session Management

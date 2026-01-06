@@ -88,8 +88,9 @@ AGENT-NAME is an optional identifier for the agent (auto-generated if not provid
 INITIAL-PROMPT is an optional message to send after the agent starts.
 Returns the buffer name of the new agent.
 Designed to be called via MCP by Claude AI."
-  (require 'claude)
+  (require 'claude-agent)
   (let* ((expanded-dir (expand-file-name directory))
+         (short-name (file-name-nondirectory (directory-file-name expanded-dir)))
          ;; Auto-generate agent name if not provided
          (agent-id (or agent-name
                       (let ((existing-agents (claude-mcp-list-agents)))
@@ -97,17 +98,17 @@ Designed to be called via MCP by Claude AI."
                         ;; existing-agents is a vector of vectors
                         (let* ((same-dir-agents (seq-filter
                                                  (lambda (agent)
-                                                   (equal (aref agent 1) expanded-dir))
+                                                   (equal (aref agent 1) short-name))
                                                  existing-agents))
                                (count (length same-dir-agents)))
                           (if (zerop count)
                               nil  ; First agent, no suffix
                             (format "agent-%d" count))))))
-         ;; Generate buffer name
+         ;; Generate expected buffer name (matches claude-agent-run format)
          (buffer-name (if agent-id
-                         (format "*claude:%s:%s*" expanded-dir agent-id)
-                       (format "*claude:%s*" expanded-dir)))
-         (claude-switch-to-buffer-on-create nil))
+                         (format "*claude:%s:%s*" short-name agent-id)
+                       (format "*claude:%s*" short-name)))
+         (claude-agent-switch-to-buffer nil))
 
     ;; Check if buffer already exists
     (when (get-buffer buffer-name)
@@ -117,12 +118,8 @@ Designed to be called via MCP by Claude AI."
     (unless (file-directory-p expanded-dir)
       (error "Directory does not exist: %s" expanded-dir))
 
-    ;; Spawn the agent
-    (let ((default-directory expanded-dir))
-      ;; Temporarily override claude--get-buffer-name to return our custom name
-      (cl-letf (((symbol-function 'claude--get-buffer-name)
-                 (lambda () buffer-name)))
-        (claude--start expanded-dir)))
+    ;; Spawn the agent using claude-agent-run
+    (claude-agent-run expanded-dir nil nil agent-id)
 
     ;; Send initial prompt if provided
     (when initial-prompt

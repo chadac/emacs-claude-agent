@@ -294,16 +294,9 @@ Handles both new agent and old eat-based architectures."
   (when-let ((buffer-name (tabulated-list-get-id)))
     (if-let ((buffer (get-buffer buffer-name)))
         (when (yes-or-no-p (format "Restart session %s? " buffer-name))
-          (require 'claude)
-          ;; Get work-dir before killing buffer - check both architectures
-          (let ((work-dir (with-current-buffer buffer
-                           (or (and (boundp 'claude-agent--work-dir) claude-agent--work-dir)
-                               (and (boundp 'claude--cwd) claude--cwd)
-                               (when (string-match "^\\*claude:\\([^:*]+\\)" buffer-name)
-                                 (match-string 1 buffer-name))))))
-            ;; Use claude-restart to handle the restart properly
-            (claude-restart work-dir buffer-name)
-            (message "Restarting session %s..." buffer-name)))
+          (with-current-buffer buffer
+            (claude-agent-restart))
+          (message "Restarting session %s..." buffer-name))
       (message "Buffer %s no longer exists" buffer-name))))
 
 (defun claude-sessions-mark-for-kill ()
