@@ -1270,11 +1270,11 @@ Designed to be called via emacsclient by Claude AI."
 Assumes it's in the same directory as this file."
   (let* ((this-file (or load-file-name
                         buffer-file-name
-                        (locate-library "claude-ai")))
+                        (locate-library "claude-mcp")))
          (this-dir (when this-file (file-name-directory this-file))))
     (if this-dir
         (expand-file-name "claude-cli" this-dir)
-      (error "Cannot determine claude-ai.el location"))))
+      (error "Cannot determine claude-mcp.el location"))))
 
 (defun claude-mcp-setup-claude-environment ()
   "Add claude-cli to PATH and set up environment for Claude.

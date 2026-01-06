@@ -252,31 +252,33 @@ async def get_buffer_content_async(
     """
     escaped_name = escape_elisp_string(buffer_name)
 
-    # Build elisp call with optional parameters
-    args = [f'"{escaped_name}"']
-    if tail_lines is not None:
-        args.append(str(tail_lines))
+    # Build elisp to get buffer content directly
+    if start_line is not None and end_line is not None:
+        # Get specific line range
+        elisp = f'''(with-current-buffer "{escaped_name}"
+          (save-excursion
+            (goto-char (point-min))
+            (forward-line {start_line - 1})
+            (let ((start (point)))
+              (forward-line {end_line - start_line + 1})
+              (buffer-substring-no-properties start (point)))))'''
+    elif tail_lines is not None:
+        # Get last N lines
+        elisp = f'''(with-current-buffer "{escaped_name}"
+          (save-excursion
+            (goto-char (point-max))
+            (forward-line -{tail_lines})
+            (buffer-substring-no-properties (point) (point-max))))'''
+    elif head_lines is not None:
+        # Get first N lines
+        elisp = f'''(with-current-buffer "{escaped_name}"
+          (save-excursion
+            (goto-char (point-min))
+            (forward-line {head_lines})
+            (buffer-substring-no-properties (point-min) (point))))'''
     else:
-        args.append('nil')
-
-    if head_lines is not None:
-        args.append(str(head_lines))
-    elif start_line is not None or end_line is not None:
-        args.append('nil')
-    else:
-        # No further args needed
-        pass
-
-    if start_line is not None:
-        args.append(str(start_line))
-        if end_line is not None:
-            args.append(str(end_line))
-        else:
-            raise ValueError("start_line requires end_line")
-    elif end_line is not None:
-        raise ValueError("end_line requires start_line")
-
-    elisp = f'(claudemacs-ai-get-buffer-content {" ".join(args)})'
+        # Get entire buffer content
+        elisp = f'(with-current-buffer "{escaped_name}" (buffer-substring-no-properties (point-min) (point-max)))'
 
     result = await call_emacs_async(elisp)
     if result.startswith('"') and result.endswith('"'):
@@ -406,7 +408,14 @@ async def send_input_async(buffer_name: str, text: str) -> str:
     """Send input to a buffer asynchronously."""
     escaped_name = escape_elisp_string(buffer_name)
     escaped_text = escape_elisp_string(text)
-    elisp = f'(claudemacs-ai-send-input "{escaped_name}" "{escaped_text}")'
+    # Send input directly to eat terminal
+    elisp = f'''(with-current-buffer "{escaped_name}"
+      (if (and (boundp 'eat-terminal) eat-terminal)
+          (progn
+            (eat-term-send-string eat-terminal "{escaped_text}")
+            (eat-term-input-event eat-terminal 1 'return)
+            "Input sent")
+        (error "Buffer does not have an eat terminal")))'''
     result = await call_emacs_async(elisp)
     if result.startswith('"') and result.endswith('"'):
         return unescape_elisp_string(result)
@@ -459,147 +468,6 @@ async def send_and_watch_async(
         await watch_buffer_async(buffer_name, timeout, stable_time, poll_interval)
         content = await get_buffer_content_async(buffer_name)
         return content[start_len:]
-
-
-async def get_or_create_project_shell(directory: str) -> str:
-    """Get or create an eat shell for a directory.
-
-    Returns the buffer name.
-    """
-    escaped_dir = escape_elisp_string(directory)
-
-    # Pass HTTP server port if available
-    if http_server_port:
-        elisp = f'(claudemacs-ai-get-project-shell "{escaped_dir}" {http_server_port})'
-    else:
-        elisp = f'(claudemacs-ai-get-project-shell "{escaped_dir}")'
-
-    result = await call_emacs_async(elisp)
-    if result.startswith('"') and result.endswith('"'):
-        return unescape_elisp_string(result)
-    return result
-
-
-async def project_shell_ready(buffer_name: str) -> bool:
-    """Check if a project shell is ready (has active eat terminal)."""
-    escaped_name = escape_elisp_string(buffer_name)
-    elisp = f'(claudemacs-ai-project-shell-ready-p "{escaped_name}")'
-    result = await call_emacs_async(elisp)
-    return result == "t"
-
-
-async def wait_for_shell_ready(buffer_name: str, timeout: float = 10.0) -> bool:
-    """Wait for shell to be ready, polling until timeout."""
-    start_time = time.time()
-    while (time.time() - start_time) < timeout:
-        if await project_shell_ready(buffer_name):
-            return True
-        await asyncio.sleep(0.3)
-    return False
-
-
-async def interrupt_shell_async(buffer_name: str) -> str:
-    """Send interrupt signal (Ctrl+C) to a shell buffer.
-
-    This kills the currently running command and returns to the prompt.
-    Useful for recovering from stuck commands.
-
-    Args:
-        buffer_name: Name of the shell buffer (e.g., "*eat-shell:dirname*")
-
-    Returns:
-        Confirmation message
-    """
-    escaped_name = escape_elisp_string(buffer_name)
-    elisp = f'(claudemacs-ai-interrupt-shell "{escaped_name}")'
-    result = await call_emacs_async(elisp)
-    if result.startswith('"') and result.endswith('"'):
-        return unescape_elisp_string(result)
-    return result
-
-
-async def bash_async(
-    command: str,
-    directory: str,
-    timeout: float = 120.0
-) -> BashResult:
-    """Execute a bash command in a project shell and return the output.
-
-    Uses event-driven completion detection with shell hooks and HTTP callbacks.
-    Shell hooks (PROMPT_COMMAND/precmd_functions) POST to the MCP HTTP server
-    when commands complete, triggering asyncio.Event. No polling required!
-
-    Args:
-        command: The bash command to execute
-        directory: Working directory (used to get/create project shell)
-        timeout: Maximum seconds to wait for command completion
-
-    Returns:
-        Dict with 'output', 'exit_code', and 'buffer_name'
-    """
-    # Get or create project shell
-    buffer_name = await get_or_create_project_shell(directory)
-
-    # Wait for shell to be ready
-    if not await wait_for_shell_ready(buffer_name):
-        raise RuntimeError(f"Shell buffer {buffer_name} not ready after 10s")
-
-    # Wait for hooks to be injected (elisp injects them after 2s delay)
-    # Add small buffer time to ensure hooks are fully set up
-    await asyncio.sleep(2.5)
-
-    # Extract shell_id from buffer_name
-    # Buffer name format: *eat-shell:dirname*
-    # Shell ID format: shell_<md5>_<timestamp> (set in environment by elisp)
-    # We need to get it from the shell's environment
-    # Simplest: use buffer_name as the shell identifier
-    shell_id = buffer_name
-
-    # Register this shell as waiting for command completion
-    completion_event = command_tracker.register_shell(shell_id)
-
-    # Get buffer content before command (for output capture)
-    content_before = await get_buffer_content_async(buffer_name)
-    before_length = len(content_before)
-
-    # Send the command (just the command, no setup needed)
-    await send_input_async(buffer_name, command)
-
-    # Wait for completion event (with timeout)
-    try:
-        await asyncio.wait_for(completion_event.wait(), timeout=timeout)
-    except asyncio.TimeoutError:
-        # Timeout - try to get partial output
-        content_after = await get_buffer_content_async(buffer_name)
-        partial_output = content_after[before_length:].strip()
-
-        return {
-            'output': f"TIMEOUT after {timeout}s. Partial output:\n{partial_output}",
-            'exit_code': -1,
-            'buffer_name': buffer_name
-        }
-
-    # Command completed - get result from tracker
-    result = command_tracker.get_result(shell_id)
-    if not result:
-        raise RuntimeError(f"Shell {shell_id} completed but no result found")
-
-    # Get buffer content after command
-    content_after = await get_buffer_content_async(buffer_name)
-
-    # Extract new output (everything after our command)
-    output = content_after[before_length:].strip()
-
-    # Remove the command echo line if present
-    lines = output.split('\n')
-    if lines and lines[0].strip() == command.strip():
-        output = '\n'.join(lines[1:])
-
-    return {
-        'output': output.strip(),
-        'exit_code': result['exit_code'],
-        'buffer_name': buffer_name
-    }
 
 
 def get_line_indent(line: str) -> int:
@@ -1266,7 +1134,7 @@ async def list_agents_async() -> list:
         List of [buffer-name, directory, agent-id] tuples
     """
     # Use json-encode in elisp for reliable parsing
-    elisp = '(json-encode (claudemacs-ai-list-agents))'
+    elisp = '(json-encode (claude-mcp-list-agents))'
     result = await call_emacs_async(elisp, timeout=10)
 
     # Remove quotes if it's a quoted string
@@ -1305,7 +1173,7 @@ async def message_agent_async(buffer_name: str, message: str, from_buffer: str |
                 (eat-term-send-string eat-terminal "{escaped_message}")
                 (eat-term-input-event eat-terminal 1 'return)
                 "Sent message to {escaped_buffer}")
-            (error "Buffer is not a claudemacs terminal")))
+            (error "Buffer is not a Claude terminal")))
       (error "Buffer does not exist"))'''
 
     result = await call_emacs_async(elisp, timeout=10)
@@ -1329,7 +1197,7 @@ async def check_messages_async(buffer_name: str, clear: bool = False) -> str:
     """
     escaped_buffer = escape_elisp_string(buffer_name)
     clear_arg = 't' if clear else 'nil'
-    elisp = f'(claudemacs-ai-check-messages "{escaped_buffer}" {clear_arg})'
+    elisp = f'(claude-mcp-check-messages "{escaped_buffer}" {clear_arg})'
     result = await call_emacs_async(elisp, timeout=10)
 
     # Remove quotes from elisp string result
@@ -1345,7 +1213,7 @@ async def message_board_summary_async() -> str:
     Returns:
         Formatted string showing message counts
     """
-    elisp = '(claudemacs-ai-message-board-summary)'
+    elisp = '(claude-mcp-message-board-summary)'
     result = await call_emacs_async(elisp, timeout=10)
 
     # Remove quotes from elisp string result
