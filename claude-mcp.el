@@ -2347,5 +2347,34 @@ The conversation will be continued from where it left off."
   :safe t
   :args ())
 
+;;;; Safe Tools Query
+
+(defun claude-mcp-get-safe-tools ()
+  "Return list of tool names marked as safe.
+These tools can be pre-authorized via --allowedTools."
+  (let (safe-tools)
+    (maphash
+     (lambda (name def)
+       (when (plist-get def :safe)
+         (push name safe-tools)))
+     claude-mcp-tools)
+    (sort safe-tools #'string<)))
+
+(defconst claude-mcp-native-safe-tools
+  '("watch_buffer" "watch_for_pattern" "watch_for_change"
+    "spawn_agent" "list_agents" "message_agent" "check_messages"
+    "message_board_summary" "whoami")
+  "Native Python MCP tools that are safe (defined in server.py).")
+
+(defun claude-mcp-get-safe-tools-for-cli ()
+  "Return safe MCP tool names formatted for Claude CLI --allowedTools.
+Format: mcp__emacs__toolname
+Includes both elisp-defined tools and native Python tools."
+  (let ((elisp-tools (claude-mcp-get-safe-tools))
+        (native-tools claude-mcp-native-safe-tools))
+    (mapcar (lambda (name)
+              (format "mcp__emacs__%s" name))
+            (append elisp-tools native-tools))))
+
 (provide 'claude-mcp)
 ;;; claude-mcp.el ends here

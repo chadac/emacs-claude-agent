@@ -2256,6 +2256,12 @@ Optional MODEL is the model to use (e.g., 'sonnet', 'opus', 'haiku')."
     ;; Add model if specified
     (when model
       (setq args (append args (list "--model" model))))
+    ;; Add safe MCP tools as --allowedTools (pre-authorized, no permission prompts)
+    (when claude-agent-enable-mcp
+      (let ((safe-tools (claude-mcp-get-safe-tools-for-cli)))
+        (when safe-tools
+          (setq args (append args (list "--allowed-tools"
+                                        (mapconcat #'identity safe-tools ",")))))))
     ;; Use pipe (nil) instead of PTY to avoid focus-related buffering issues
     ;; Bind default-directory so the process starts in work-dir
     (let ((default-directory work-dir)
