@@ -83,13 +83,38 @@
 
 (defun claude-sessions--get-session-status (buffer)
   "Get the status of a Claude session BUFFER.
-Returns one of: `ready', `thinking', `waiting', or `dead'."
+Returns one of: `ready', `thinking', `waiting', or `dead'.
+Supports both the new agent architecture (claude-agent--process)
+and the old eat-based architecture."
   (unless (buffer-live-p buffer)
     (cl-return-from claude-sessions--get-session-status 'dead))
 
   (with-current-buffer buffer
-    (if (not (and (boundp 'eat-terminal) eat-terminal))
-        'dead
+    ;; Check for new agent architecture first
+    (cond
+     ;; New agent architecture: claude-agent--process
+     ((and (boundp 'claude-agent--process) claude-agent--process)
+      (if (not (process-live-p claude-agent--process))
+          'dead
+        ;; Process is running, check status
+        (cond
+         ;; Waiting for permission: input-mode is 'text-with-permission
+         ((and (boundp 'claude-agent--input-mode)
+               (eq claude-agent--input-mode 'text-with-permission))
+          'waiting)
+         ;; Thinking: claude-agent--thinking-status is set
+         ((and (boundp 'claude-agent--thinking-status)
+               claude-agent--thinking-status)
+          'thinking)
+         ;; Compacting: conversation being summarized
+         ((and (boundp 'claude-agent--compacting)
+               claude-agent--compacting)
+          'thinking)
+         ;; Ready: Not thinking, process alive
+         (t 'ready))))
+
+     ;; Old eat-based architecture
+     ((and (boundp 'eat-terminal) eat-terminal)
       (let* ((process (eat-term-parameter eat-terminal 'eat--process)))
         (if (not (and process (memq (process-status process) '(run open listen connect))))
             'dead
@@ -108,7 +133,10 @@ Returns one of: `ready', `thinking', `waiting', or `dead'."
              ((string-match-p "─\n>..\n─" tail-content)
               'ready)
              ;; Otherwise waiting for user input (edit approval, multi-select, etc.)
-             (t 'waiting))))))))
+             (t 'waiting))))))
+
+     ;; No recognized architecture - dead
+     (t 'dead))))
 
 (defun claude-sessions--format-status (status)
   "Format STATUS symbol into a display string with appropriate face."
@@ -233,17 +261,28 @@ Returns a list of plists with session information."
           (select-window (get-buffer-window buffer)))
       (message "Buffer %s no longer exists" buffer-name))))
 
+(defun claude-sessions--kill-session-process (buffer)
+  "Kill the process associated with session BUFFER.
+Handles both new agent and old eat-based architectures."
+  (with-current-buffer buffer
+    (cond
+     ;; New agent architecture
+     ((and (boundp 'claude-agent--process) claude-agent--process)
+      (when (process-live-p claude-agent--process)
+        (delete-process claude-agent--process)))
+     ;; Old eat-based architecture
+     ((and (boundp 'eat-terminal) eat-terminal)
+      (let ((process (eat-term-parameter eat-terminal 'eat--process)))
+        (when (and process (process-live-p process))
+          (kill-process process)))))))
+
 (defun claude-sessions-kill-session ()
   "Kill the session at point."
   (interactive)
   (when-let ((buffer-name (tabulated-list-get-id)))
     (if-let ((buffer (get-buffer buffer-name)))
         (when (yes-or-no-p (format "Kill session %s? " buffer-name))
-          (with-current-buffer buffer
-            (when (and (boundp 'eat-terminal) eat-terminal)
-              (let ((process (eat-term-parameter eat-terminal 'eat--process)))
-                (when (and process (process-live-p process))
-                  (kill-process process)))))
+          (claude-sessions--kill-session-process buffer)
           (kill-buffer buffer)
           (claude-sessions-refresh)
           (message "Killed session %s" buffer-name))
@@ -255,10 +294,11 @@ Returns a list of plists with session information."
   (when-let ((buffer-name (tabulated-list-get-id)))
     (if-let ((buffer (get-buffer buffer-name)))
         (when (yes-or-no-p (format "Restart session %s? " buffer-name))
-          (require 'Claude)
-          ;; Get work-dir before killing buffer
+          (require 'claude)
+          ;; Get work-dir before killing buffer - check both architectures
           (let ((work-dir (with-current-buffer buffer
-                           (or claude--cwd
+                           (or (and (boundp 'claude-agent--work-dir) claude-agent--work-dir)
+                               (and (boundp 'claude--cwd) claude--cwd)
                                (when (string-match "^\\*claude:\\([^:*]+\\)" buffer-name)
                                  (match-string 1 buffer-name))))))
             ;; Use claude-restart to handle the restart properly
@@ -290,11 +330,7 @@ Returns a list of plists with session information."
       (when (yes-or-no-p (format "Kill %d marked session(s)? " (length kill-list)))
         (dolist (buffer-name kill-list)
           (when-let ((buffer (get-buffer buffer-name)))
-            (with-current-buffer buffer
-              (when (and (boundp 'eat-terminal) eat-terminal)
-                (let ((process (eat-term-parameter eat-terminal 'eat--process)))
-                  (when (and process (process-live-p process))
-                    (kill-process process)))))
+            (claude-sessions--kill-session-process buffer)
             (kill-buffer buffer)))
         (claude-sessions-refresh)
         (message "Killed %d session(s)" (length kill-list))))))
