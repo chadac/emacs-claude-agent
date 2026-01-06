@@ -492,7 +492,7 @@ class ClaudeAgent:
             allowed_tools=self.allowed_tools if self.allowed_tools else [],
             disallowed_tools=self.disallowed_tools if self.disallowed_tools else [],
             resume=self._resume_session,
-            continue_conversation=self._continue_session or (not self._resume_session),
+            continue_conversation=self._continue_session,
             hooks=hooks,
         )
 

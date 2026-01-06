@@ -222,52 +222,85 @@ Returns list of (buffer-name . buffer) pairs."
           (when (and root (not (string-empty-p root)))
             (expand-file-name root)))))))
 
+(defun claude-pair--find-agent-for-dir (dir claude-buffers)
+  "Find a Claude agent buffer whose work-dir matches or contains DIR.
+Returns the buffer or nil."
+  (let ((expanded-dir (expand-file-name dir)))
+    (cdr (cl-find-if
+          (lambda (pair)
+            (with-current-buffer (cdr pair)
+              (and (boundp 'claude-agent--work-dir)
+                   claude-agent--work-dir
+                   (let ((work-dir (expand-file-name claude-agent--work-dir)))
+                     (or (string= work-dir expanded-dir)
+                         ;; Also match if file is inside agent's work-dir
+                         (string-prefix-p (file-name-as-directory work-dir)
+                                          expanded-dir))))))
+          claude-buffers))))
+
+(defun claude-pair--get-current-project-root ()
+  "Get the project root for the current context.
+First checks for org PROJECT_ROOT property, then falls back to project.el."
+  (or (claude-pair--get-org-project-root)
+      (when-let ((project (project-current)))
+        (expand-file-name (project-root project)))))
+
 (defun claude-pair--select-agent-buffer ()
-  "Select a Claude agent buffer, prompting if multiple are available.
-Returns the selected buffer or nil."
+  "Select a Claude agent buffer for the current project.
+If a matching agent exists, returns it.
+If no matching agent exists, starts a new one.
+Returns the selected buffer."
   (let* ((claude-buffers (claude-pair--get-claude-buffers))
-         (count (length claude-buffers)))
+         (root (claude-pair--get-current-project-root))
+         (matching-buffer (when root
+                            (claude-pair--find-agent-for-dir root claude-buffers))))
     (cond
-     ((= count 0) nil)
-     ((= count 1) (cdar claude-buffers))
-     (t
-      ;; Multiple agents - try to find one matching current context
-      (let* (;; First check for org PROJECT_ROOT property
-             (org-root (claude-pair--get-org-project-root))
-             ;; Then fall back to project.el
-             (project (project-current))
-             (project-root (when project (expand-file-name (project-root project))))
-             ;; Use org root if available, otherwise project root
-             (root (or org-root project-root))
-             (matching-buffer
-              (when root
-                (cl-find-if
-                 (lambda (pair)
-                   (with-current-buffer (cdr pair)
-                     (and (boundp 'claude-agent--work-dir)
-                          claude-agent--work-dir
-                          ;; Check if agent work-dir matches the root
-                          (string= (expand-file-name claude-agent--work-dir)
-                                   (expand-file-name root)))))
-                 claude-buffers))))
-        (if matching-buffer
-            (cdr matching-buffer)
-          ;; No match - prompt user to select
-          (let ((choice (completing-read "Select Claude agent: "
-                                         (mapcar #'car claude-buffers)
-                                         nil t)))
-            (cdr (assoc choice claude-buffers)))))))))
+     ;; Found a matching agent for current project
+     (matching-buffer matching-buffer)
+     ;; No matching agent - start a new one if we have a project root
+     (root
+      (require 'claude-agent)
+      (message "Starting Claude agent for %s..." root)
+      (claude-agent-run root))
+     ;; No project root - fall back to prompting or error
+     ((= (length claude-buffers) 1)
+      (cdar claude-buffers))
+     ((> (length claude-buffers) 1)
+      (let ((choice (completing-read "Select Claude agent: "
+                                     (mapcar #'car claude-buffers)
+                                     nil t)))
+        (cdr (assoc choice claude-buffers))))
+     (t nil))))
+
+(defun claude-pair--wait-for-process (buffer &optional timeout)
+  "Wait for Claude agent process in BUFFER to be ready.
+TIMEOUT is max seconds to wait (default 5).  Returns t if ready, nil if timeout."
+  (let ((deadline (+ (float-time) (or timeout 5))))
+    (while (and (< (float-time) deadline)
+                (not (with-current-buffer buffer
+                       (and (boundp 'claude-agent--process)
+                            claude-agent--process
+                            (process-live-p claude-agent--process)))))
+      (sit-for 0.1))
+    (with-current-buffer buffer
+      (and (boundp 'claude-agent--process)
+           claude-agent--process
+           (process-live-p claude-agent--process)))))
 
 (defun claude-pair--send-to-agent (text)
-  "Send TEXT to the Claude agent.
-If multiple agents are running, prompts for selection."
+  "Send TEXT to the Claude agent for the current project.
+Starts a new agent if one doesn't exist for this project."
   (let ((claude-buffer (claude-pair--select-agent-buffer)))
     (if claude-buffer
-        (with-current-buffer claude-buffer
-          (process-send-string
-           claude-agent--process
-           (concat (json-encode `((type . "message") (text . ,text))) "\n")))
-      (error "No Claude agent found. Start one with M-x claude-agent"))))
+        (progn
+          ;; Wait for agent process to be ready
+          (unless (claude-pair--wait-for-process claude-buffer)
+            (error "Timed out waiting for Claude agent to start"))
+          (with-current-buffer claude-buffer
+            (process-send-string
+             claude-agent--process
+             (concat (json-encode `((type . "message") (text . ,text))) "\n"))))
+      (error "No project found.  Open a file in a project first"))))
 
 ;;;; Point-based Quick Actions
 
@@ -452,14 +485,13 @@ Uses org-mode formatting for display in Emacs."
 
 ;; Forward declarations
 (declare-function claude-menu "claude-transient")
+(declare-function claude-agent-run "claude-agent")
 (defvar claude-agent-mode)
 
 (defvar claude-pair-mode-map
   (let ((map (make-sparse-keymap)))
     ;; Main transient menu (dispatches to pair or agent menu based on context)
     (define-key map (kbd "C-c c") #'claude-menu)
-    ;; Legacy binding for comments
-    (define-key map (kbd "C-x c c") #'claude-pair-send-comments)
     map)
   "Keymap for claude-pair-mode.")
 
