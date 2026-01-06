@@ -25,6 +25,7 @@
 (require 'claude-mcp-messaging)
 (require 'claude-mcp-magit)
 (require 'claude-mcp-notes)
+(require 'claude-kb)
 
 ;;;; Tool Registry
 ;;

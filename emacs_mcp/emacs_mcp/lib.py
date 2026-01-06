@@ -106,10 +106,11 @@ http_server_port: int | None = None
 def get_session_cwd() -> str | None:
     """Get the claudemacs session's working directory.
 
-    This is set by claudemacs.el via the CLAUDE_AGENT_CWD env var in the MCP config.
-    Returns None if not set.
+    Deprecated: Use get_session_buffer() and execute in the buffer context instead.
+    The buffer's default-directory is the authoritative source for session cwd.
     """
-    return os.environ.get('CLAUDE_AGENT_CWD')
+    # This env var is unreliable - Claude CLI may not pass it through to MCP server
+    return None
 
 
 def get_socket_path() -> str:

@@ -697,10 +697,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             elisp_expr = wrap_with_context(elisp_expr, cwd=context_dir)
         elif needs_session_cwd(name, tool_def) and session_cwd:
             # For tools that need session context, use session defaults
-            # Prefer executing in the claudemacs buffer if available
+            # Prefer executing in the claudemacs buffer if available (uses buffer's default-directory)
             if session_buffer and name != "eval_elisp":
                 elisp_expr = wrap_with_context(elisp_expr, buffer_name=session_buffer)
-            else:
+            elif session_cwd:
                 elisp_expr = wrap_with_context(elisp_expr, cwd=session_cwd)
 
         result = await lib.call_emacs_async(elisp_expr)
