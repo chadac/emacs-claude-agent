@@ -21,7 +21,7 @@ from . import lib
 
 
 # Create the MCP server
-app = Server("claudemacs")
+app = Server("emacs")
 
 # Store the buffer identity for this MCP server instance
 # This is set during server initialization from CLAUDE_AGENT_BUFFER_NAME env var
