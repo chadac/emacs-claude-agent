@@ -2183,7 +2183,9 @@ Optional MODEL is the model to use (e.g., 'sonnet', 'opus', 'haiku')."
     (when model
       (setq args (append args (list "--model" model))))
     ;; Use pipe (nil) instead of PTY to avoid focus-related buffering issues
-    (let ((process-connection-type nil)
+    ;; Bind default-directory so the process starts in work-dir
+    (let ((default-directory work-dir)
+          (process-connection-type nil)
           (process-environment (cons "PYTHONUNBUFFERED=1" process-environment)))
       (condition-case err
           (let ((proc (apply #'start-process
@@ -2492,7 +2494,8 @@ Optional MODEL is the model to use (e.g., 'sonnet', 'opus', 'haiku')."
             claude-agent--pending-output ""
             claude-agent--session-info nil
             claude-agent--has-conversation nil
-            claude-agent--work-dir expanded-dir)
+            claude-agent--work-dir expanded-dir
+            default-directory expanded-dir)
 
       ;; Display history if resuming a specific session
       (when resume-session

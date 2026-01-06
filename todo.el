@@ -363,12 +363,20 @@ Returns a list of plists with :id, :title, :project, :status, :file, :created."
   "Return sort key for STATUS (lower = first)."
   (or (cl-position (or status "draft") org-roam-todo-status-order :test #'string=) 99))
 
-(defun org-roam-todo--completing-read (&optional project-filter prompt)
+(defun org-roam-todo--completing-read (&optional project-filter prompt status-filter)
   "Select a TODO using completion.
 PROJECT-FILTER limits to a specific project.
 PROMPT is the prompt string.
+STATUS-FILTER limits to specific status(es) - can be a string or list of strings.
 Returns the TODO plist."
   (let* ((todos (org-roam-todo--query-todos project-filter))
+         ;; Apply status filter if provided
+         (todos (if status-filter
+                    (let ((statuses (if (listp status-filter) status-filter (list status-filter))))
+                      (cl-remove-if-not (lambda (todo)
+                                          (member (plist-get todo :status) statuses))
+                                        todos))
+                  todos))
          (candidates (mapcar (lambda (todo)
                                (cons (format "[%s] %s - %s"
                                             (plist-get todo :status)
@@ -550,13 +558,16 @@ If the worktree and session already exist, sends the task to the existing sessio
 
 ;;;###autoload
 (defun org-roam-todo-select-worktree (&optional project-filter)
-  "Select a TODO and create/open its worktree with a Claude session.
-Optional PROJECT-FILTER limits selection to a specific project."
+  "Select a draft TODO and create/open its worktree with a Claude session.
+Optional PROJECT-FILTER limits selection to a specific project.
+Only shows TODOs with status 'draft' since active/done/rejected don't need worktrees."
   (interactive)
-  (let* ((todo (org-roam-todo--completing-read project-filter "Create worktree for TODO: "))
+  (let* ((todo (org-roam-todo--completing-read project-filter
+                                               "Create worktree for TODO: "
+                                               "draft"))
          (file (plist-get todo :file)))
     (unless todo
-      (user-error "No TODO selected"))
+      (user-error "No draft TODOs found"))
     ;; Open the TODO file and run create-worktree
     (find-file file)
     (org-roam-todo-create-worktree)))
