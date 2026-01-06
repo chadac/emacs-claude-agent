@@ -2145,10 +2145,11 @@ Returns nil if valid, or an error message string if validation fails."
      ;; All checks passed
      (t nil))))
 
-(defun claude-agent--start-process (work-dir buffer &optional resume-session continue-session)
+(defun claude-agent--start-process (work-dir buffer &optional resume-session continue-session model)
   "Start the Python agent process for WORK-DIR with BUFFER.
 Optional RESUME-SESSION is a session ID to resume.
-Optional CONTINUE-SESSION, if non-nil, continues the most recent session."
+Optional CONTINUE-SESSION, if non-nil, continues the most recent session.
+Optional MODEL is the model to use (e.g., 'sonnet', 'opus', 'haiku')."
   ;; Validate prerequisites first
   (when-let ((error-msg (claude-agent--validate-prerequisites)))
     (error "Cannot start Claude agent:\n%s" error-msg))
@@ -2178,6 +2179,9 @@ Optional CONTINUE-SESSION, if non-nil, continues the most recent session."
       (setq args (append args (list "--resume" resume-session))))
     (when continue-session
       (setq args (append args (list "--continue"))))
+    ;; Add model if specified
+    (when model
+      (setq args (append args (list "--model" model))))
     ;; Use pipe (nil) instead of PTY to avoid focus-related buffering issues
     (let ((process-connection-type nil)
           (process-environment (cons "PYTHONUNBUFFERED=1" process-environment)))
@@ -2462,11 +2466,12 @@ Loads at most MAX-MESSAGES (default 50) most recent messages."
 ;;;; Entry point
 
 ;;;###autoload
-(defun claude-agent-run (work-dir &optional resume-session continue-session slug)
+(defun claude-agent-run (work-dir &optional resume-session continue-session slug model)
   "Start a Claude agent session for WORK-DIR.
 Optional RESUME-SESSION is a session ID to resume.
 Optional CONTINUE-SESSION, if non-nil, continues the most recent session.
-Optional SLUG is a suffix for the buffer name (e.g., *claude:project:slug*)."
+Optional SLUG is a suffix for the buffer name (e.g., *claude:project:slug*).
+Optional MODEL is the model to use (e.g., 'sonnet', 'opus', 'haiku')."
   (interactive
    (list (read-directory-name "Project directory: "
                               (or (vc-git-root default-directory)
@@ -2493,8 +2498,8 @@ Optional SLUG is a suffix for the buffer name (e.g., *claude:project:slug*)."
       (when resume-session
         (claude-agent--display-session-history expanded-dir resume-session)))
 
-    ;; Start process with optional resume/continue
-    (let ((proc (claude-agent--start-process expanded-dir buf resume-session continue-session)))
+    ;; Start process with optional resume/continue/model
+    (let ((proc (claude-agent--start-process expanded-dir buf resume-session continue-session model)))
       (with-current-buffer buf
         (setq claude-agent--process proc)))
 
@@ -2512,8 +2517,7 @@ Optional SLUG is a suffix for the buffer name (e.g., *claude:project:slug*)."
 
 (defun claude-agent--current-model ()
   "Get the current model from session info."
-  (when claude-agent--session-info
-    (cdr (assq 'model claude-agent--session-info))))
+  (plist-get claude-agent--session-info :model))
 
 (defun claude-agent--format-model-for-display (model-string)
   "Format MODEL-STRING for display, extracting key info."
@@ -2524,18 +2528,33 @@ Optional SLUG is a suffix for the buffer name (e.g., *claude:project:slug*)."
    (t model-string)))
 
 (defun claude-agent-set-model (model)
-  "Set the model for the current session to MODEL.
-MODEL should be an alias like 'sonnet' or 'opus'.
-Note: This sends /model as a message to Claude."
+  "Change the model for the current session to MODEL.
+MODEL should be an alias like 'sonnet', 'opus', or 'haiku'.
+This restarts the session with the new model while preserving the conversation."
   (interactive
    (list (completing-read "Model: "
                           (mapcar #'car claude-agent--available-models)
                           nil t)))
   (if (and claude-agent--process (process-live-p claude-agent--process))
-      (progn
-        ;; Send as a slash command message
-        (claude-agent--send-json `((type . "message") (text . ,(format "/model %s" model))))
-        (message "Requesting model change to %s..." model))
+      (let ((session-id (plist-get claude-agent--session-info :session-id))
+            (work-dir claude-agent--work-dir))
+        (if session-id
+            (progn
+              ;; Kill current process
+              (delete-process claude-agent--process)
+              (setq claude-agent--process nil)
+              ;; Clear thinking state
+              (claude-agent--set-thinking nil)
+              ;; Notify user
+              (claude-agent--append-to-log
+               (format "\n🔄 Switching to %s model...\n" model)
+               'claude-agent-session-face)
+              ;; Start new process with same session ID but new model
+              (let ((proc (claude-agent--start-process
+                           work-dir (current-buffer) session-id nil model)))
+                (setq claude-agent--process proc))
+              (message "Restarting session with %s model..." model))
+          (message "No session ID available - cannot switch model")))
     (message "No active Claude session")))
 
 (defun claude-agent-mcp-list ()
@@ -2657,15 +2676,13 @@ This reloads the MCP server and Python agent while preserving the session."
 (defun claude-agent-show-cost ()
   "Show token usage and cost for current session."
   (interactive)
-  (if claude-agent--session-info
-      (let ((cost (cdr (assq 'cost claude-agent--session-info)))
-            (input (cdr (assq 'input_tokens claude-agent--session-info)))
-            (output (cdr (assq 'output_tokens claude-agent--session-info))))
-        (message "Cost: $%.4f | Input: %s tokens | Output: %s tokens"
-                 (or cost 0)
-                 (or input "?")
-                 (or output "?")))
-    (message "No session info available")))
+  (let ((cost (plist-get claude-agent--session-info :cost))
+        (input claude-agent--input-tokens)
+        (output claude-agent--output-tokens))
+    (message "Session cost: $%.4f | Last turn: %s in / %s out tokens"
+             (or cost 0)
+             (or input 0)
+             (or output 0))))
 
 ;;;; Progress indicator management
 
@@ -2733,12 +2750,10 @@ Optional FINAL-MESSAGE is displayed briefly in the echo area."
 
 (defun claude-agent--session-description ()
   "Return session info description for transient."
-  (if claude-agent--session-info
-      (let ((session-id (cdr (assq 'session_id claude-agent--session-info))))
-        (if session-id
-            (format "Session: %s" (substring session-id 0 (min 8 (length session-id))))
-          "Active"))
-    "No session"))
+  (let ((session-id (plist-get claude-agent--session-info :session-id)))
+    (if session-id
+        (format "Session: %s" (substring session-id 0 (min 8 (length session-id))))
+      "No session")))
 
 (provide 'claude-agent)
 ;;; claude-agent.el ends here

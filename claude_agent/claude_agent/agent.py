@@ -133,6 +133,7 @@ class ClaudeAgent:
         log_file: Optional[str] = None,
         resume_session: Optional[str] = None,
         continue_session: bool = False,
+        model: Optional[str] = None,
     ):
         self.work_dir = work_dir
         self.mcp_config = mcp_config
@@ -144,6 +145,7 @@ class ClaudeAgent:
         self._log_handle = None
         self._resume_session = resume_session
         self._continue_session = continue_session
+        self._model = model
         self._first_message = True  # Track if this is the first message
         if log_file:
             os.makedirs(os.path.dirname(log_file), exist_ok=True)
@@ -494,6 +496,7 @@ class ClaudeAgent:
             resume=self._resume_session,
             continue_conversation=self._continue_session,
             hooks=hooks,
+            model=self._model,
         )
 
         self._client = ClaudeSDKClient(options=options)
@@ -783,6 +786,7 @@ async def run_agent(
     allowed_tools: Optional[list[str]] = None,
     disallowed_tools: Optional[list[str]] = None,
     log_file: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> None:
     """Run the agent, reading commands from stdin."""
     agent = ClaudeAgent(
@@ -793,6 +797,7 @@ async def run_agent(
         log_file=log_file,
         resume_session=resume_session,
         continue_session=continue_session,
+        model=model,
     )
 
     # Show initial session info
@@ -918,6 +923,11 @@ def main() -> None:
         default=None,
         help="Path to write JSON message log (for debugging)",
     )
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="Model to use (e.g., 'sonnet', 'opus', 'haiku')",
+    )
     args = parser.parse_args()
 
     allowed_tools = None
@@ -937,6 +947,7 @@ def main() -> None:
             allowed_tools=allowed_tools,
             disallowed_tools=disallowed_tools,
             log_file=args.log_file,
+            model=args.model,
         )
     )
 
