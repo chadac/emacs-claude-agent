@@ -342,20 +342,23 @@ This populates COMMIT_EDITMSG with the proposed message for editing."
   (let* ((info claude-mcp-magit--pending-commit)
          (directory (nth 0 info))
          (proposed-message (nth 1 info))
-         (files (nth 2 info))
-         (default-directory directory))
-    ;; Verify files are still staged
-    (let ((currently-staged (claude-mcp-magit--git-lines "diff" "--cached" "--name-only")))
-      (unless (equal (sort (copy-sequence files) #'string<)
-                     (sort (copy-sequence currently-staged) #'string<))
-        (error "Staged files have changed since proposal.  Please re-stage and propose again")))
+         (files (nth 2 info)))
+    ;; Verify files are still staged (need to bind default-directory for verification)
+    (let ((default-directory directory))
+      (let ((currently-staged (claude-mcp-magit--git-lines "diff" "--cached" "--name-only")))
+        (unless (equal (sort (copy-sequence files) #'string<)
+                       (sort (copy-sequence currently-staged) #'string<))
+          (error "Staged files have changed since proposal.  Please re-stage and propose again"))))
     ;; Clear pending commit
     (setq claude-mcp-magit--pending-commit nil)
     ;; Store message and add hook (hook removes itself after running)
     (setq claude-mcp-magit--pending-message proposed-message)
     (add-hook 'git-commit-setup-hook #'claude-mcp-magit--insert-pending-message 90)
-    ;; Open the commit buffer for review
-    (magit-commit-create)))
+    ;; Open the commit buffer for review - must set default-directory globally
+    ;; so it persists for the async magit-commit-create
+    (let ((default-directory directory))
+      (magit-status)
+      (magit-commit-create))))
 
 (defun claude-mcp-magit-commit-status ()
   "Check if there's a pending commit proposal.
