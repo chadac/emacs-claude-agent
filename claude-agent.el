@@ -266,6 +266,9 @@ Each entry is (MARKER NAME . RESULT-STRING).")
 (defvar-local claude-agent--last-tool-name nil
   "Name of the last tool call, used to associate results.")
 
+(defvar-local claude-agent--last-tool-status-overlay nil
+  "Overlay for the status icon of the last tool call.")
+
 (defvar-local claude-agent--placeholder-overlay nil
   "Overlay for the placeholder text in empty input area.")
 
@@ -421,6 +424,38 @@ This eliminates empty space below the input area."
         (overlay-put ov 'help-echo preview)
         (overlay-put ov 'claude-agent-tooltip t)
         (overlay-put ov 'evaporate t)))))
+
+(defun claude-agent--tool-result-is-error-p (content)
+  "Check if tool result CONTENT indicates an error."
+  (and content
+       (string-match-p
+        (rx (or (seq line-start (or "error" "Error" "ERROR"))
+                (seq line-start "<tool_use_error>")
+                (seq line-start "⚠")
+                (seq "Error:" (+ any))
+                (seq "failed" (+ any))
+                (seq "No " (or "files" "matches") " found")))
+        content)))
+
+(defun claude-agent--update-tool-status (overlay status)
+  "Update the tool status OVERLAY to show STATUS.
+STATUS should be `success' or `error'."
+  (when (and overlay (overlay-buffer overlay))
+    (let ((inhibit-read-only t)
+          (start (overlay-start overlay))
+          (end (overlay-end overlay)))
+      (save-excursion
+        (goto-char start)
+        (delete-region start end)
+        (pcase status
+          ('success
+           (insert "✓ ")
+           (move-overlay overlay start (point))
+           (overlay-put overlay 'face 'claude-agent-tool-status-success-face))
+          ('error
+           (insert "✗ ")
+           (move-overlay overlay start (point))
+           (overlay-put overlay 'face 'claude-agent-tool-status-error-face)))))))
 
 (defvar-local claude-agent--tool-popup-enabled t
   "When non-nil, show tool result popup automatically when on a tool line.")
@@ -1148,7 +1183,7 @@ Inserts directly at point with proper faces and clickable link."
 
 (defun claude-agent--insert-edit-summary (file-path old-string new-string)
   "Insert a compact edit summary for FILE-PATH with line counts.
-Shows format: edit› filename.el (+N/-M)
+Shows format: ✓ edit› filename.el (+N/-M)
 The full diff is stored in tool-results for popup display."
   (let* ((inhibit-read-only t)
          (counts (claude-agent--count-diff-lines old-string new-string))
@@ -1156,6 +1191,15 @@ The full diff is stored in tool-results for popup display."
          (added (cdr counts))
          (filename (file-name-nondirectory file-path))
          (summary (format "%s (+%d/-%d)" filename added removed)))
+    ;; Status icon (edits are considered successful when rendered)
+    (let ((icon-start (point)))
+      (insert "✓ ")
+      (let ((ov (make-overlay icon-start (point))))
+        (overlay-put ov 'face 'claude-agent-tool-status-success-face)
+        (overlay-put ov 'priority 100)
+        (overlay-put ov 'claude-tool-status t)
+        (overlay-put ov 'evaporate t)
+        (setq claude-agent--last-tool-status-overlay ov)))
     ;; Tool header
     (let ((start (point)))
       (insert "edit")
@@ -1204,6 +1248,21 @@ The full diff is stored in tool-results for popup display."
   "Face for continuation markers in multi-line tool calls."
   :group 'claude-agent)
 
+(defface claude-agent-tool-status-pending-face
+  '((t :foreground "#e5c07b"))
+  "Face for pending tool status icon (yellow circle)."
+  :group 'claude-agent)
+
+(defface claude-agent-tool-status-success-face
+  '((t :foreground "#98c379"))
+  "Face for successful tool status icon (green checkmark)."
+  :group 'claude-agent)
+
+(defface claude-agent-tool-status-error-face
+  '((t :foreground "#e06c75"))
+  "Face for error tool status icon (red X)."
+  :group 'claude-agent)
+
 (defun claude-agent--format-bash-multiline (command)
   "Format a multi-line bash COMMAND with pipe continuations."
   (let ((lines (split-string command "\n")))
@@ -1238,7 +1297,8 @@ Converts MCP tools like 'mcp__claudemacs__reload_file' to 'claudemacs/reload-fil
 
 (defun claude-agent--insert-tool-call (tool-name args-string)
   "Insert a tool call display for TOOL-NAME with ARGS-STRING.
-Uses terse format: toolname› args with appropriate faces."
+Uses terse format: ○ toolname› args with appropriate faces.
+The status icon (○) is updated to ✓ or ✗ when tool result arrives."
   (let* ((inhibit-read-only t)
          (tool-lower (claude-agent--format-tool-name tool-name))
          (saved-input (claude-agent--get-input-text))
@@ -1249,6 +1309,16 @@ Uses terse format: toolname› args with appropriate faces."
     ;; Delete dynamic section
     (delete-region claude-agent--static-end-marker (point-max))
     (goto-char claude-agent--static-end-marker)
+
+    ;; Insert pending status icon with overlay for later update
+    (let ((icon-start (point)))
+      (insert "○ ")
+      (let ((ov (make-overlay icon-start (point))))
+        (overlay-put ov 'face 'claude-agent-tool-status-pending-face)
+        (overlay-put ov 'priority 100)
+        (overlay-put ov 'claude-tool-status t)
+        (overlay-put ov 'evaporate t)
+        (setq claude-agent--last-tool-status-overlay ov)))
 
     ;; Insert tool name with overlay (survives font-lock)
     (let ((start (point)))
@@ -1643,6 +1713,10 @@ If VIRTUAL-INDENT is non-nil, apply it as line-prefix/wrap-prefix."
                      claude-agent--last-tool-name
                      content)
                claude-agent--tool-results)
+         ;; Update status icon based on whether result indicates error
+         (claude-agent--update-tool-status
+          claude-agent--last-tool-status-overlay
+          (if (claude-agent--tool-result-is-error-p content) 'error 'success))
          ;; Add tooltip to the tool call line
          (claude-agent--add-tool-tooltip claude-agent--last-tool-marker content))))
 
