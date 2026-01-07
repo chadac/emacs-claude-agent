@@ -1,515 +1,368 @@
-# Claudemacs
+# emacs-claude-agent
 
-AI pair programming with [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) in Emacs.
+A Claude/Emacs integration designed for collaborative pair programming.
 
-https://github.com/user-attachments/assets/a7a8348d-471c-4eec-85aa-946c3ef9d364
+emacs-claude-agent provides two core components:
 
-## What makes this project different? Simplicity
-- Let Claude Code shine in the terminal
-- No agents, MCP, or IDE integration -- these eat up context
+1. *claude-agent* — an interactive buffer with Claude that features org-mode-like capabilities; and
+2. *emacs-mcp* — an MCP server enabling agents to interact with the editor and access richer contextual information.
+
+> *Note:* This project evolved from a fork of [cpoile/claudemacs](https://github.com/cpoile/claudemacs) into its own thing that shares effectively no code; nonetheless, it was still influenced/motivated by claudemacs.
 
 ## Features
 
-- Project-based Claude Code, with Workspace-aware sessions (see [Sessions](#workspace-and-project-aware-sessions))
-- System notifications: Growl notifications with sound when waiting for input (see [System Notifications](#system-notifications) for setup)
-- Terminal fixes: Use `u` to unstick input box and reset buffer issues (see [Tips](#tips-and-tricks) section)
-- Session resume: Resume previous Claude Code sessions
-- Execute request with context: Send request to Claude, will add file and line/region context
-- Fix error at point: Will send flycheck error to Claude, with context
-- Implement comment at point: Extracts all comment text and sends it to Claude, with context
-- Add file or current file: Will add file with Claude's @ symbol convention
-- C-g sends Esc: Old habits die hard
-- Option: Swap RET and M-RET - Optionally swap keys (Claude maps RET to submit, and M-RET to newline)
-- Option: S-RET as newline - May be more natural (Claude maps S-RET to submit)
-- Option: Shell environment loading - Load shell rc files (.zshrc, .bashrc) for PATH and environment variables
-- Transient interface: Easy-to-use menu system (customizable keybinding; default: `C-c C-e`)
+- **Seamless buffer integration** - Claude reads, modifies, and navigates your buffers through MCP without context loss
+- **Org-mode-like editing** - Natural syntax for formatting, context, and special commands within conversation
+- **Multi-agent coordination** - Spawn parallel agents for complex tasks and communicate between them
+- **Scoped background editing** - Oneshot agents for permission-controlled, targeted edits
+- **Native Emacs prompts** - Choice menus, file pickers, and proposal review interfaces
+- **Git operations** - Stage, diff, and commit directly through Magit
+- **Progress tracking** - Visual indicators for long-running operations
+- **Knowledge base** - Store and retrieve project-specific learnings and patterns
+- **Self-extending** - Claude can define new tools, evaluate elisp, and expand its own capabilities on the fly
+- **Extensible tools** - Create custom MCP tools for project-specific workflows
 
-## Table of Contents
-
-- [Installation](#installation)
-  - [Prerequisites](#prerequisites)
-  - [Package Installation](#package-installation)
-  - [Setup](#setup)
-  - [System Notifications](#system-notifications)
-  - [Fonts](#fonts)
-- [Usage](#usage)
-  - [Workspace and Project-aware Sessions](#workspace-and-project-aware-sessions)
-  - [Commands](#commands)
-  - [Customization](#customization)
-    - [Basic Configuration](#basic-configuration)
-    - [System Notifications](#system-notifications)
-- [Buffer Naming](#buffer-naming)
-- [Tips and Tricks](#tips-and-tricks)
-  - [Using eat-mode effectively](#using-eat-mode-effectively)
-  - [Scroll-popping, input box sticking, input box border draw issues](#scroll-popping-input-box-sticking-input-box-border-draw-issues)
-  - [Buffer Toggle Edge Case](#buffer-toggle-edge-case)
-- [Requirements](#requirements)
-- [Credits](#credits)
-- [License](#license)
-
-## Installation
+## Quick Start
 
 ### Prerequisites
 
 1. Install [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code/overview)
 2. Install the [eat](https://codeberg.org/akib/emacs-eat) package in Emacs
+3. Ensure Emacs server is running (`M-x server-start`)
 
-### Package Installation
+### Installation
 
 #### Doom Emacs
 
 Add to your `packages.el`:
 
 ```elisp
-(package! claudemacs
-  :recipe (:host github :repo "cpoile/claudemacs"))
+(package! emacs-claude-agent
+  :recipe (:host github :repo "chadac/emacs-claude-agent"))
 ```
 
 Then in your `config.el`:
 
 ```elisp
-(use-package! claudemacs)
+(use-package! claude
+  :config
+  (require 'claude-mcp)
+  (require 'claude-agent))
 ```
 
 #### use-package with built-in :vc (Emacs 30+)
 
 ```elisp
-(use-package claudemacs
-  :vc (:url "https://github.com/cpoile/claudemacs"))
-```
-
-#### use-package with vc-use-package
-
-```elisp
-(use-package claudemacs
-  :vc (:fetcher github :repo "cpoile/claudemacs"))
+(use-package claude
+  :vc (:url "https://github.com/chadac/emacs-claude-agent")
+  :config
+  (require 'claude-mcp)
+  (require 'claude-agent))
 ```
 
 #### straight.el
 
 ```elisp
 (straight-use-package
- '(claudemacs :type git :host github :repo "cpoile/claudemacs"))
+ '(claude :type git :host github :repo "chadac/emacs-claude-agent"))
 ```
 
 #### Manual Installation
 
-Clone this repository and add to your Emacs configuration:
-
 ```elisp
-;; Add to load path
-(add-to-list 'load-path "/path/to/claudemacs")
-
-;; Load the package
-(require 'claudemacs)
+(add-to-list 'load-path "/path/to/emacs-claude-agent")
+(require 'claude)
+(require 'claude-mcp)
+(require 'claude-agent)
 ```
 
-## Setup
-
-Use your preferred keybinding (I use `C-c C-e`). I'd recommend adding it to the relevant mode-maps, instead of using a `global-set-key`, since that will override the very useful `C-c C-e` keybind in the `eat-semi-char-mode-map` (see [Using Eat Mode](#using-eat-mode-effectively) section below).
+### Basic Setup
 
 ```elisp
-(require 'claudemacs)
-(define-key prog-mode-map (kbd "C-c C-e") #'claudemacs-transient-menu)
-(define-key emacs-lisp-mode-map (kbd "C-c C-e") #'claudemacs-transient-menu)
-(define-key text-mode-map (kbd "C-c C-e") #'claudemacs-transient-menu)
-(define-key python-base-mode-map (kbd "C-c C-e") #'claudemacs-transient-menu)
+;; Set your preferred keybinding for the transient menu
+(define-key prog-mode-map (kbd "C-c C-e") #'claude-transient-menu)
 
-;; Set a big buffer so we can search our history.
+;; Enable global auto-revert (recommended - Claude modifies files)
+(global-auto-revert-mode t)
+
+;; Increase terminal scrollback for history searching
 (with-eval-after-load 'eat
   (setq eat-term-scrollback-size 400000))
 ```
 
-Other useful tweaks:
+## Core Features
+
+### MCP-Powered Buffer Operations
+
+Claude can directly interact with your Emacs buffers through MCP tools:
+
+| Tool | Description |
+|------|-------------|
+| `get_buffer_content` | Read buffer contents with line ranges |
+| `edit_buffer` | Modify buffer text directly |
+| `list_buffers` | List all open buffers |
+| `search_buffer` | Search with regex and context lines |
+| `eval` | Execute arbitrary elisp expressions |
+
+### Multi-Agent System
+
+Spawn and coordinate multiple Claude agents for complex tasks:
+
+```
+C-c C-e s    Start a new Claude agent
+C-c C-e S    Spawn agent in another directory
+```
+
+Agents can communicate via message passing:
+
+- `spawn_agent` - Create new agents in different directories
+- `message_agent` - Send messages between agents
+- `list_agents` - View all running agents
+- `check_messages` - Check message queue
+
+### Oneshot Background Agents
+
+Lightweight agents for quick, targeted edits:
+
+```
+C-c c c    Edit current line/region (most constrained)
+C-c c b    Edit current buffer
+C-c c d    Edit files in current directory
+C-c c p    Edit any file in project (least constrained)
+```
+
+Oneshot agents:
+- Run in the background without taking over your terminal
+- Auto-terminate when done
+- Have permission-scoped editing (can only touch what you specify)
+- Show visual highlighting of their target region
+
+### Interactive Prompts and Proposals
+
+Claude can ask for your input through native Emacs interfaces:
+
+- **Choice prompts**: Navigate with j/k, confirm with RET
+- **Multi-select**: Toggle with SPC, select all with 'a'
+- **File/directory pickers**: Quick selection from project files
+- **Proposals**: Review and edit Claude's suggestions before applying
+
+### Progress Tracking
+
+Visual progress indicators for long-running operations:
 
 ```elisp
-;; If you want it to pop up as a new buffer. Otherwise, it will use "other buffer."
-;; Personally, I use the default "other buffer" style.
+;; Claude uses these automatically
+(mcp__emacs__progress_start "Building project...")
+(mcp__emacs__progress_update "Compiling..." 50)
+(mcp__emacs__progress_stop "Build complete!")
+```
+
+### Magit Integration
+
+Git operations through Emacs's Magit:
+
+| Tool | Description |
+|------|-------------|
+| `magit_status` | View git status |
+| `magit_stage` | Stage files for commit |
+| `magit_diff` | View diffs |
+| `magit_commit_propose` | Propose commits for your approval |
+
+### Knowledge Base
+
+Store and retrieve learnings about your codebase:
+
+```elisp
+;; Claude can store gotchas, patterns, and architecture notes
+(mcp__emacs__kb_create
+  :title "Database connection gotcha"
+  :kb_type "gotcha"
+  :summary "Always close connections in finally block")
+```
+
+## Usage Examples
+
+### Basic Pair Programming
+
+```
+C-c C-e s    Start Claude session
+C-c C-e x    Send request with file/region context
+C-c C-e e    Fix error at point (uses flycheck)
+C-c C-e i    Implement comment at point
+```
+
+### Working with Context
+
+```elisp
+;; Add current file to conversation
+C-c C-e F
+
+;; Add specific file reference
+C-c C-e f
+
+;; Send context (file:line or file:line-range)
+C-c C-e a
+```
+
+### Quick Responses
+
+```
+C-c C-e y    Send "Yes" (approve)
+C-c C-e n    Send "No" (reject)
+```
+
+## Configuration
+
+### Core Settings
+
+```elisp
+;; Custom Claude executable path
+(setq claude-program "/usr/local/bin/claude")
+
+;; Command line switches
+(setq claude-program-switches '("--verbose"))
+
+;; Enable MCP integration (default: t)
+(setq claude-use-mcp t)
+
+;; Prefer projectile root over git root
+(setq claude-prefer-projectile-root t)
+```
+
+### Window Behavior
+
+```elisp
+;; Display Claude in a side window
 (add-to-list 'display-buffer-alist
-             '("^\\*claudemacs"
+             '("^\\*claude"
                (display-buffer-in-side-window)
                (side . right)
-               (window-width . 0.33)))
+               (window-width . 0.4)))
 
-;; Turn on autorevert because Claude modifies and saves buffers. Make it a habit to save
-;; before asking Claude anything, because it uses the file on disk as its source of truth.
-;; (And you don't want to lose edits after it modifies and saves the files.)
-(global-auto-revert-mode t)
+;; Control buffer switching behavior
+(setq claude-switch-to-buffer-on-create t)
+(setq claude-switch-to-buffer-on-toggle t)
 ```
 
 ### System Notifications
 
-First, set `claude config set --global preferredNotifChannel terminal_bell`.
+```elisp
+;; Enable notifications when Claude needs input
+(setq claude-notify-on-await t)
 
-#### -- Mac --
+;; Mac notification sound
+(setq claude-notification-sound-mac "Submarine")
 
-For Mac, you need to do some setup to make notifications work.
-1. Run the built in `Script Editor` program, start a new script, and run `display notification "Test notification" with title "Test Title" sound name "Frog"`
-1. Accept the notification permissions. (Or go into System Settings -> Notifications -> Script Editor and allow notifications there.)
+;; Linux notification settings
+(setq claude-notification-auto-dismiss-linux t)
+(setq claude-notification-sound-linux "message-new-instant")
+```
 
-Now you should receive System notifications when Claude Code is waiting for input, or when done.
+## Defining Custom Tools
 
-Unfortunately, clicking on the notification doesn't bring you to Emacs. Open to ideas on how to fix that.
-
-#### -- Linux --
-
-For Linux systems using `notify-send`, notifications will automatically dismiss by default instead of persisting in the system tray. You can control this behavior with:
+Custom MCP tools are defined in Elisp using `claude-mcp-deftool`:
 
 ```elisp
-;; Auto-dismiss notifications (default: t)
-(setq claudemacs-notification-auto-dismiss-linux t)
+(claude-mcp-deftool project-build
+  "Build the project using make."
+  :function #'my-project-build
+  :safe nil
+  :args ((directory string :required "Build directory")))
 
-;; Keep notifications in system tray
-(setq claudemacs-notification-auto-dismiss-linux nil)
-
-;; Play sound with notifications (requires canberra-gtk-play)
-;; Common sound IDs: "message-new-instant", "bell", "dialog-error", "dialog-warning"
-(setq claudemacs-notification-sound-linux "message-new-instant")
-
-;; Disable sound
-(setq claudemacs-notification-sound-linux "")
+(defun my-project-build (directory)
+  "Build project in DIRECTORY."
+  (let ((default-directory directory))
+    (compile "make")))
 ```
 
-#### -- Windows --
+Tools automatically become available to Claude agents. Key options:
 
-I have not tested on windows, so would appreciate any help there (PRs welcome).
+- `:function` - The elisp function to call
+- `:safe t` - Mark as safe to run (no need to request permissions)
+- `:needs-session-cwd t` - Bind `default-directory` to session's working directory
+- `:args` - Argument definitions: `(name type [:required] "description")`
 
-### Fonts
+See the [Custom Tools Guide](docs/guides/custom-tools.md) for more examples.
 
-Claude Code uses many non-standard unicode characters during its thinking animations, and emojis for its summaries. They look nice, but some of them aren't included in a typical font set (even one patched with Nerd Fonts). So you'll need to add fallbacks.
+## Self-Extending Capabilities
 
-The fallbacks will differ based on your system.
+One of the unique advantages of emacs-claude-agent is that Claude has full access to Emacs's introspection and extension capabilities. Through the `eval` MCP tool, Claude can:
 
-#### -- Mac --
+- **Define new tools on the fly** - Need a project-specific command? Claude can write and register it using `claude-mcp-deftool`
+- **Inspect and modify Emacs state** - Query variables, check modes, examine buffers
+- **Reload modified code** - After editing elisp files, Claude can reload them to test changes immediately
+- **Extend its own capabilities** - If Claude needs functionality that doesn't exist, it can create it
 
-``` elisp
-;;
-;; font insanity for Claudemacs
-;;
-(defun my/setup-custom-font-fallbacks-mac ()
-  (interactive)
-  "Configure font fallbacks on mac for symbols and emojis.
-This will need to be called every time you change your font size,
-to load the new symbol and emoji fonts."
+This makes emacs-claude-agent particularly powerful for:
 
-  (setq use-default-font-for-symbols nil)
-
-  ;; --- Configure for 'symbol' script ---
-  ;; We add fonts one by one. Since we use 'prepend',
-  ;; the last one added here will be the first one Emacs tries.
-  ;; So, list them in reverse order of your preference.
-
-  ;; Least preferred among this list for symbols (will be at the end of our preferred list)
-  (set-fontset-font t 'symbol "Hiragino Sans" nil 'prepend)
-  (set-fontset-font t 'symbol "STIX Two Math" nil 'prepend)
-  (set-fontset-font t 'symbol "Zapf Dingbats" nil 'prepend)
-  (set-fontset-font t 'symbol "Monaco" nil 'prepend)
-  (set-fontset-font t 'symbol "Menlo" nil 'prepend)
-  ;; Most preferred for symbols -- use your main font here
-  (set-fontset-font t 'symbol "JetBrainsMono Nerd Font Mono" nil 'prepend)
-
-
-  ;; --- Configure for 'emoji' script ---
-  ;; Add fonts one by one, in reverse order of preference.
-
-  ;; Least preferred among this list for emojis
-  (set-fontset-font t 'emoji "Hiragino Sans" nil 'prepend)
-  (set-fontset-font t 'emoji "STIX Two Math" nil 'prepend)
-  (set-fontset-font t 'emoji "Zapf Dingbats" nil 'prepend)
-  (set-fontset-font t 'emoji "Monaco" nil 'prepend)
-  (set-fontset-font t 'emoji "Menlo" nil 'prepend)
-  ;; (set-fontset-font t 'emoji "Noto Emoji" nil 'prepend) ;; If you install Noto Emoji
-  ;; Most preferred for emojis -- use your main font here
-  (set-fontset-font t 'emoji "JetBrainsMono Nerd Font Mono" nil 'prepend))
-  
-;; to test if you have a font family installed:
-;   (find-font (font-spec :family "Menlo"))
-
-;; Then, add the fonts after your setup is complete:
-(add-hook 'emacs-startup-hook
-          (lambda ()
-            (progn
-              (when (string-equal system-type "darwin")
-                (my/setup-custom-font-fallbacks-mac)))))
-```
-
-#### -- Linux --
-
-``` elisp
-(defun my/setup-custom-font-fallbacks-linux ()
-  (interactive)
-  "Configure font fallbacks on linux for symbols and emojis.
-This will need to be called every time you change your font size,
-to load the new symbol and emoji fonts."
-
-  (setq use-default-font-for-symbols nil)
-
-  ;; --- Configure for 'symbol' script ---
-  ;; We add fonts one by one. Since we use 'prepend',
-  ;; the last one added here will be the first one Emacs tries.
-  ;; So, list them in reverse order of your preference.
-
-  ;; Least preferred among this list for symbols (will be at the end of our preferred list)
-  ;; (set-fontset-font t 'symbol "FreeSerif" nil 'prepend)
-  ;; (set-fontset-font t 'symbol "NotoSansSymbols2" nil 'prepend)
-  ;; (set-fontset-font t 'symbol "NotoSansCJKJP" nil 'prepend)
-  ;; (set-fontset-font t 'symbol "unifont" nil 'prepend)
-  (set-fontset-font t 'symbol "DejaVu Sans Mono" nil 'prepend)
-  ;; Most preferred for symbols -- use your main font here
-  (set-fontset-font t 'symbol "JetBrainsMono Nerd Font Mono" nil 'prepend)
-
-
-  ;; --- Configure for 'emoji' script ---
-  ;; Add fonts one by one, in reverse order of preference.
-
-  ;; Least preferred among this list for emojis
-  ;; (set-fontset-font t 'emoji "FreeSerif" nil 'prepend)
-  ;; (set-fontset-font t 'emoji "NotoSansSymbols2" nil 'prepend)
-  ;; (set-fontset-font t 'emoji "NotoSansCJKJP" nil 'prepend)
-  ;; (set-fontset-font t 'emoji "unifont" nil 'prepend)
-  (set-fontset-font t 'emoji "DejaVuSans" nil 'prepend)
-  ;; (set-fontset-font t 'emoji "Noto Emoji" nil 'prepend) ;; If you install Noto Emoji
-  ;; Most preferred for emojis -- use your main font here
-  (set-fontset-font t 'emoji "JetBrainsMono Nerd Font Mono" nil 'prepend)
-  )
-
-;; to test if you have a font family installed:
-;;   (find-font (font-spec :family "DejaVu Sans Mono"))
-
-;; Then, add the fonts after your setup is complete:
-(add-hook 'emacs-startup-hook
-          (lambda ()
-            (progn
-              (when (string-equal system-type "gnu/linux")
-                  (my/setup-custom-font-fallbacks-linux)))))
-
-```
-
-#### -- Windows --
-
-I'm not sure of the built in fonts for Windows, or which ones should be used as fallbacks for Claude Code. PRs welcome.
-
-## Usage
-
-### Workspace and Project-aware Sessions
-
---- Session Names ---
-
-- The Claudemacs session is based on Doom/Perspective workspace, and the Claude Code's `cwd` is the project's git-root (by default -- see below). 
-- Why?
-  - This allows you to have multiple workspaces in a monorepo, and a separate Claudemacs session per workspace, but each session will be correctly rooted to the project's git root.
-- If you don't use workspaces, the decision sequence is: Workspace name -> Perspective name -> project root dir name
-- Open to adding other workspace package support, or options for other logic
-
---- Claude Code CWD ---
-
-- You can make Claude Code use your projectile root as it's `cwd` by setting:
-
-``` elisp
-(setq claudemacs-prefer-projectile-root t)
-```
-
-- Why?
-  - Claude Code is forbidden to auto-edit or auto-read files outside its `cwd`. This is annoying if you have the following repo structure:
-  
-```
-monorepo/
-├── backend/
-│   ├── .git/
-│   └── api/
-│       └── server.py
-└── frontend/
-    ├── .git/
-    └── src/
-        └── app.tsx
-```
-
-By putting a `.projectile` file in the parent and using `(setq claudemacs-prefer-projectile-root t)`, Claude Code will be able to read and edit all files, like so:
-
-```
-monorepo/
-├── .projectile
-├── backend/
-│   ├── .git/
-│   └── api/
-│       └── server.py
-└── frontend/
-    ├── .git/
-    └── src/
-        └── app.tsx
-```
-
-🎉 NOTE: Since implementing this feature there was a new Claude Code improvement that let's you manually add directories to a project's safe list. You could add them like:
-
-``` elisp
-(setq claudemacs-program-switches '("--add-dir ../apps ../libs"))
-```
-
-You could also add them to a project's `.dir-locals.el` and have it customized per project.
-
-
-### Commands
-
-Claudemacs provides a transient menu accessible via `C-c C-e` (or your own keybinding):
-
-Core Commands
-- `s` - Start Claude Code session (or switch to existing)
-- `r` - Start Claude Code with resume option (or switch to existing)
-- `k` - Kill active Claudemacs session
-- `t` - Toggle Claudemacs buffer visibility
-
-Action Commands
-- `e` - Fix error at point (using flycheck if available)
-- `x` - eXecute request with file context (current line or region)
-- `X` - eXecute request with no context
-- `i` - Implement comment (extracts comment text and asks Claude to implement it)
-- `f` - Add file reference (@file) to conversation
-- `F` - Add current file reference to conversation
-- `a` - Add context (sends file:line or file:line-range without newline)
-
-Quick Responses
-- `y` - Send Yes (RET)
-- `n` - Send No (ESC)
-
-Maintenance Commands
-- `u` - Unstick Claude input box (reset buffer tracking)
-
-The following commands are available via `M-x` but not in the transient menu:
-- `M-x claudemacs-setup-bell-handler` - Re-setup system notification handler if notifications stop working
-
-### Customization
-
-Claudemacs provides several customization variables to tailor the experience to your workflow:
-
-#### Basic Configuration
+- **Rapid prototyping** - Try new tools without leaving the conversation
+- **Project-specific automation** - Claude builds exactly the tools your workflow needs
+- **Self-improvement** - Claude can enhance its own integration with your Emacs setup
 
 ```elisp
-;; Custom Claude Code executable path (default: "claude")
-(setq claudemacs-program "/usr/local/bin/claude")
-
-;; Add command line switches (default: nil)
-(setq claudemacs-program-switches '("--verbose" "--dangerously-skip-permissions"))
+;; Example: Claude can define a tool mid-conversation
+(claude-mcp-deftool check-package-json
+  "Read and parse the project's package.json."
+  :function (lambda ()
+              (with-temp-buffer
+                (insert-file-contents "package.json")
+                (json-parse-buffer)))
+  :safe t
+  :needs-session-cwd t)
 ```
 
-```elisp
-;; Whether to switch to Claudemacs buffer when creating new session (default: t)
-(setq claudemacs-switch-to-buffer-on-create nil)
+## Documentation
 
-;; Whether to switch to Claudemacs buffer when toggling visibility (default: t)
-(setq claudemacs-switch-to-buffer-on-toggle nil)
+- [Custom Tools Guide](docs/guides/custom-tools.md) - Create project-specific MCP tools with `claude-mcp-deftool`
+- [MCP Overview](MCP-INTEGRATION.md) - Overview of MCP features (buffer ops, multi-agent, etc.)
+- [Full Documentation](docs/) - Comprehensive documentation (can be built with MkDocs)
 
-;; Whether to switch to Claudemacs buffer when adding file references (default: nil)
-(setq claudemacs-switch-to-buffer-on-file-add t)
+### Building the Documentation Site
 
-;; Whether to switch to Claudemacs buffer when sending error fix requests (default: nil)
-(setq claudemacs-switch-to-buffer-on-send-error t)
+The `docs/` directory contains a full documentation site that can be built with MkDocs:
 
-;; Whether to switch to Claudemacs buffer when adding context (default: t)
-(setq claudemacs-switch-to-buffer-on-add-context nil)
+```bash
+# Install mkdocs and dependencies
+pip install mkdocs mkdocs-material mkdocstrings
 
-;; Whether to prefer projectile root over git root when available (default: nil)
-(setq claudemacs-prefer-projectile-root t)
+# Serve locally
+mkdocs serve
+
+# Build static site
+mkdocs build
 ```
 
-```elisp
-;; Swap RET and M-RET behavior in Claudemacs buffers (default: nil)
-;; When enabled: RET creates newline, M-RET submits
-(setq claudemacs-m-return-is-submit t)
+## History
 
-;; Enable Shift-Return to create newlines (default: t)
-;; Provides alternative to M-RET for creating newlines
-(setq claudemacs-shift-return-newline t)
-```
+This project began as a fork of [cpoile/claudemacs](https://github.com/cpoile/claudemacs), which provides a clean terminal-based Claude Code integration for Emacs. emacs-claude-agent extends that foundation with:
 
-```elisp
-;; Run Claude through interactive shell to load shell environment (default: nil)
-;; When enabled, Claude is invoked through your shell (e.g., zsh -i -c "claude ...")
-;; which sources rc files like .zshrc or .bashrc, making shell-configured PATH
-;; and environment variables available to Claude.
-;; Useful if Claude can't find commands that are in your shell's PATH.
-;; NOTE: Changes only apply to new sessions - kill and restart to take effect.
-(setq claudemacs-use-shell-env t)
-```
+- **MCP integration** for direct buffer manipulation
+- **Multi-agent architecture** for parallel operations
+- **Oneshot agents** for quick, scoped edits
+- **Interactive prompts** through native Emacs UI
+- **Knowledge base** for persistent learnings
 
-#### System Notifications
-
-```elisp
-;; Whether to show system notifications when Claude is awaiting input (default: t)
-(setq claudemacs-notify-on-await t)
-
-;; Sound to use for macOS notifications (default: "Submarine")
-;; Available sounds: Basso, Blow, Bottle, Frog, Funk, Glass, Hero, Morse, 
-;; Ping, Pop, Purr, Sosumi, Submarine, Tink
-(setq claudemacs-notification-sound-mac "Ping")
-
-;; Auto-dismiss Linux notifications instead of persisting to system tray (default: t)
-(setq claudemacs-notification-auto-dismiss-linux nil)
-
-;; Sound for Linux notifications using canberra-gtk-play (default: "bell")
-;; Common sound IDs: "message-new-instant", "bell", "dialog-error", "dialog-warning"
-(setq claudemacs-notification-sound-linux "message-new-instant")
-```
-
-All variables can also be customized via `M-x customize-group RET claudemacs RET`.
-
-#### Startup Hook
-
-Claudemacs provides a startup hook that runs after a session has finished initializing. Hook functions execute with the claudemacs buffer as the current buffer.
-
-```elisp
-;; Example: Custom initialization based on project type
-(add-hook 'claudemacs-startup-hook
-          (lambda ()
-            (when (file-exists-p (expand-file-name "package.json" claudemacs--cwd))
-              (message "Node.js project detected in %s. Do stuff." claudemacs--cwd))))
-
-```
-
-## Buffer Naming
-
-Claudemacs creates workspace-aware buffer names:
-- With workspace: `*claudemacs:workspace-name*`
-- Without workspace: `*claudemacs:/path/to/project*`
-
-Currently supports Doom Emacs workspaces and Perspective mode. If you use another workspace package and would like support added, please open an issue - I'm happy to add support for others.
-
-## Tips and Tricks
-
-### Using eat-mode effectively
-
-When interacting with the eat-mode buffer, you are limited in what you can do in the default semi-char mode.
-
-Press `C-c C-e` to enter emacs mode. A box cursor will appear, which you can use to move around and select and kill text.
-Press `C-c C-j` to re-enter semi-char mode and continue typing to Claude.
-
-Press `C-v` to paste an image from the clipboard.
-
-### Scroll-popping, input box sticking, input box border draw issues
-
-There is a tricky interaction between Eat-mode and Claude Code, probably because Claude Code uses some input libraries that eat has trouble with. It was causing the eat-mode buffer to "scroll-pop" to the top whenever you change the other window's buffer. This is mostly fixed now, but a side effect is sometimes the Claude Clode input box gets stuck halfway up the buffer and won't move.
-
-There are also issues with drawing the input box border after the window resizes, which is expected of terminal programs. 
-
-If you see these issues, press `u` in the Claudemacs transient menu to "unstick" the buffer, and everything should get reset.
-
-### Buffer Toggle Edge Case
-
-Normally, toggling the Claudemacs buffer will close its window, if the window was created for the Claudemacs session. Toggling it again will recreate the window.
-
-But there's an edge case to be aware of: if a window was originally created for Claudemacs, but you've since switched to another workspace and back, that window may have shown other buffers in the meantime. In this case, the window is no longer considered "created just for Claudemacs" and won't automatically close when you toggle. This is due to Emacs' window management - once a window has been reused for other content, it loses its original "dedicated" status.
+The original claudemacs philosophy of simplicity remains - we just added superpowers.
 
 ## Requirements
 
 - Emacs 28.1+
-- [eat](https://github.com/kephale/emacs-eat) package
+- [eat](https://codeberg.org/akib/emacs-eat) terminal emulator
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code/overview)
+- Python 3.8+ (for MCP server)
+- [uv](https://github.com/astral-sh/uv) (for Python dependency management)
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit issues and pull requests.
 
 ## Credits
 
-Inspired by:
-- [Aidermacs](https://github.com/MatthewZMD/aidermacs) by Matthew Zeng
-- [claude-code.el](https://github.com/stevemolitor/claude-code.el) by Steve Molitor
+- Original [claudemacs](https://github.com/cpoile/claudemacs) by Christopher Poile
+- Inspired by [Aidermacs](https://github.com/MatthewZMD/aidermacs) by Matthew Zeng
+- Inspired by [claude-code.el](https://github.com/stevemolitor/claude-code.el) by Steve Molitor
+- Inspired by [claude-code-ide](https://github.com/CrazyForks/claude-code-ide)
 
 ## License
 
-MIT License. See LICENSE file for details.
+MIT License. See [LICENSE](LICENSE) file for details.

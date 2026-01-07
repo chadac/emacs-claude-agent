@@ -1,0 +1,109 @@
+site_name: emacs-claude-agent
+site_description: A powerful Emacs integration for Claude Code with MCP-powered buffer operations and multi-agent support
+site_author: chadac
+site_url: https://chadac.github.io/emacs-claude-agent
+
+repo_name: chadac/emacs-claude-agent
+repo_url: https://github.com/chadac/emacs-claude-agent
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  palette:
+    # Light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: deep purple
+      accent: purple
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    # Dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: deep purple
+      accent: purple
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+  icon:
+    repo: fontawesome/brands/github
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            show_source: true
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
+  - tables
+  - toc:
+      permalink: true
+  - attr_list
+  - md_in_html
+  - def_list
+  - pymdownx.tasklist:
+      custom_checkbox: true
+
+nav:
+  - Home: index.md
+  - Getting Started:
+    - Installation: getting-started/installation.md
+    - Quick Start: getting-started/quickstart.md
+    - Configuration: getting-started/configuration.md
+  - Features:
+    - Overview: features/overview.md
+    - MCP Integration: features/mcp.md
+    - Multi-Agent System: features/multi-agent.md
+    - Oneshot Agents: features/oneshot.md
+    - Interactive Prompts: features/prompts.md
+    - Magit Integration: features/magit.md
+    - Knowledge Base: features/knowledge-base.md
+  - Guides:
+    - Custom Tools: guides/custom-tools.md
+    - Project Configuration: guides/project-config.md
+    - Workflows: guides/workflows.md
+  - Reference:
+    - Commands: reference/commands.md
+    - MCP Tools: reference/mcp-tools.md
+    - Configuration Options: reference/configuration.md
+    - Elisp API: reference/elisp-api.md
+  - Contributing:
+    - Development Setup: contributing/development.md
+    - Architecture: contributing/architecture.md
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/chadac/emacs-claude-agent
+  generator: false
+
+copyright: Copyright &copy; 2024-2025 chadac
