@@ -26,6 +26,14 @@
 
 (require 'transient)
 
+;; Forward declarations for claude-oneshot functions
+(declare-function claude-oneshot-line-or-region "claude-oneshot")
+(declare-function claude-oneshot-buffer "claude-oneshot")
+(declare-function claude-oneshot-directory "claude-oneshot")
+(declare-function claude-oneshot-project "claude-oneshot")
+(declare-function claude-oneshot-list "claude-oneshot")
+(declare-function claude-oneshot-dismiss-tooltips "claude-oneshot")
+
 ;;;; Faces
 
 (defgroup claude-transient nil
@@ -199,6 +207,12 @@ Signals an error if KEY is already registered."
   (require 'claude-oneshot)
   (call-interactively #'claude-oneshot-list))
 
+(defun claude-transient-dismiss-tooltips ()
+  "Dismiss all oneshot tooltip overlays."
+  (interactive)
+  (require 'claude-oneshot)
+  (call-interactively #'claude-oneshot-dismiss-tooltips))
+
 ;;;; Agent Transient Menu
 
 (defvar claude-agent--progress-visible)
@@ -340,50 +354,61 @@ Returns nil if not in a project or directory doesn't exist."
     (when (file-directory-p sessions-dir)
       sessions-dir)))
 
+(defun claude-transient--valid-uuid-p (string)
+  "Return non-nil if STRING is a valid UUID format.
+UUIDs have the format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+  (and (stringp string)
+       (string-match-p
+        "^[0-9a-f]\\{8\\}-[0-9a-f]\\{4\\}-[0-9a-f]\\{4\\}-[0-9a-f]\\{4\\}-[0-9a-f]\\{12\\}$"
+        string)))
+
 (defun claude-transient--parse-session-file (file)
   "Parse a session JSONL FILE and extract metadata.
-Returns a plist with :id, :timestamp, :summary, :cwd, or nil if invalid."
+Returns a plist with :id, :timestamp, :summary, :cwd, or nil if invalid.
+Only parses files with valid UUID session IDs (skips agent-* files)."
   (condition-case nil
-      (when (and (file-exists-p file)
-                 (> (file-attribute-size (file-attributes file)) 0))
-        (let* ((session-id (file-name-base file))
-               (first-user-msg nil)
-               (last-timestamp nil)
-               (cwd nil))
-          ;; Read first few lines to get metadata
-          (with-temp-buffer
-            (insert-file-contents file nil 0 50000) ; Read first 50KB
-            (goto-char (point-min))
-            (while (and (not (eobp)) (< (line-number-at-pos) 20))
-              (let* ((line (buffer-substring-no-properties
-                            (line-beginning-position) (line-end-position)))
-                     (json (condition-case nil
-                               (json-read-from-string line)
-                             (error nil))))
-                (when json
-                  (let ((type (cdr (assq 'type json)))
-                        (msg (cdr (assq 'message json)))
-                        (ts (cdr (assq 'timestamp json)))
-                        (dir (cdr (assq 'cwd json))))
-                    (when dir (setq cwd dir))
-                    (when ts (setq last-timestamp ts))
-                    ;; Get first user message as summary
-                    (when (and (equal type "user")
-                               (not first-user-msg)
-                               msg)
-                      (let ((content (cdr (assq 'content msg))))
-                        (when (stringp content)
-                          (setq first-user-msg
-                                (truncate-string-to-width
-                                 (replace-regexp-in-string "[\n\r]+" " " content)
-                                 60 nil nil "..."))))))))
-              (forward-line 1)))
-          (when (or first-user-msg last-timestamp)
-            (list :id session-id
-                  :timestamp last-timestamp
-                  :summary (or first-user-msg "(empty session)")
-                  :cwd cwd
-                  :file file))))
+      (let ((session-id (file-name-base file)))
+        ;; Only parse files with valid UUID session IDs
+        (when (and (file-exists-p file)
+                   (> (file-attribute-size (file-attributes file)) 0)
+                   (claude-transient--valid-uuid-p session-id))
+          (let ((first-user-msg nil)
+                (last-timestamp nil)
+                (cwd nil))
+            ;; Read first few lines to get metadata
+            (with-temp-buffer
+              (insert-file-contents file nil 0 50000) ; Read first 50KB
+              (goto-char (point-min))
+              (while (and (not (eobp)) (< (line-number-at-pos) 20))
+                (let* ((line (buffer-substring-no-properties
+                              (line-beginning-position) (line-end-position)))
+                       (json (condition-case nil
+                                 (json-read-from-string line)
+                               (error nil))))
+                  (when json
+                    (let ((type (cdr (assq 'type json)))
+                          (msg (cdr (assq 'message json)))
+                          (ts (cdr (assq 'timestamp json)))
+                          (dir (cdr (assq 'cwd json))))
+                      (when dir (setq cwd dir))
+                      (when ts (setq last-timestamp ts))
+                      ;; Get first user message as summary
+                      (when (and (equal type "user")
+                                 (not first-user-msg)
+                                 msg)
+                        (let ((content (cdr (assq 'content msg))))
+                          (when (stringp content)
+                            (setq first-user-msg
+                                  (truncate-string-to-width
+                                   (replace-regexp-in-string "[\n\r]+" " " content)
+                                   60 nil nil "..."))))))))
+                (forward-line 1)))
+            (when (or first-user-msg last-timestamp)
+              (list :id session-id
+                    :timestamp last-timestamp
+                    :summary (or first-user-msg "(empty session)")
+                    :cwd cwd
+                    :file file)))))
     (error nil)))
 
 (defun claude-transient--format-session-for-display (session)
@@ -458,7 +483,7 @@ If a session already exists for this project, prompts for a slug."
     ("d" "Directory" claude-transient-oneshot-directory)
     ("p" "Project" claude-transient-oneshot-project)
     ("o" "List" claude-transient-oneshot-list)
-    ("y" "Dismiss tips" claude-oneshot-dismiss-tooltips)]
+    ("y" "Dismiss tips" claude-transient-dismiss-tooltips)]
    [:description "📋 Sessions"
     ("s" "Start" claude-transient-start-session)
     ("r" "Resume" claude-transient-resume-session)
