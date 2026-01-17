@@ -87,7 +87,9 @@ Called by Python server via emacsclient to get tool definitions."
        (let ((tool-def `((description . ,(or (plist-get def :description) ""))
                          (function . ,(symbol-name (plist-get def :function)))
                          (safe . ,(if (plist-get def :safe) t :json-false))
-                         (needs_session_cwd . ,(if (plist-get def :needs-session-cwd) t :json-false))
+                         (needs_session_cwd . ,(if (plist-member def :needs-session-cwd)
+                                                   (if (plist-get def :needs-session-cwd) t :json-false)
+                                                 t))  ; default to t if not specified
                          (args . ,(claude-mcp--convert-args (plist-get def :args))))))
          ;; Add context hint if specified
          (when-let ((context (plist-get def :context)))
@@ -2274,12 +2276,20 @@ Optional FINAL-MESSAGE is displayed briefly."
 
 (defun claude-mcp-restart-session ()
   "Restart the Claude session to reload the MCP server and Python agent.
-The conversation will be continued from where it left off."
-  (if-let ((buf (claude-mcp--find-claude-buffer)))
-      (with-current-buffer buf
+The conversation will be continued from where it left off.
+This function expects to be called in the context of the Claude buffer
+\(via :needs-session-cwd t which wraps execution in the session buffer)."
+  ;; When called via MCP with :needs-session-cwd t, we're already in the right buffer
+  (if (and (boundp 'claude-agent--process) claude-agent--process)
+      (progn
         (claude-agent-restart)
         "Session restarting... MCP server will be reloaded.")
-    "No Claude buffer found"))
+    ;; Fallback: try to find the buffer (for interactive use)
+    (if-let ((buf (claude-mcp--find-claude-buffer)))
+        (with-current-buffer buf
+          (claude-agent-restart)
+          "Session restarting... MCP server will be reloaded.")
+      "No Claude buffer found")))
 
 (claude-mcp-deftool restart-session
   "Restart the Claude session to reload the MCP server and Python agent. Use this after making changes to elisp files that need to be picked up by the MCP server. The conversation will be continued from where it left off."
