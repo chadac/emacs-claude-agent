@@ -156,6 +156,9 @@ class ClaudeAgent:
         # SDK client - persistent across conversation turns
         self._client: Optional[ClaudeSDKClient] = None
 
+        # Stderr capture for better error messages
+        self._stderr_lines: list[str] = []
+
         # Permission handling - async event for waiting on user response
         self._permission_event: Optional[asyncio.Event] = None
         self._permission_response: Optional[dict] = None
@@ -163,6 +166,19 @@ class ClaudeAgent:
 
         # Load existing permissions from settings
         self._load_permissions()
+
+    def _handle_stderr(self, line: str) -> None:
+        """Capture stderr output for better error messages."""
+        self._stderr_lines.append(line)
+        # Keep only last 50 lines to avoid unbounded memory growth
+        if len(self._stderr_lines) > 50:
+            self._stderr_lines = self._stderr_lines[-50:]
+
+    def _get_stderr_context(self) -> str:
+        """Get recent stderr output for error context."""
+        if not self._stderr_lines:
+            return ""
+        return "\n".join(self._stderr_lines[-20:])  # Last 20 lines
 
     def _load_permissions(self) -> None:
         """Load allowed permissions from .claude/settings.local.json."""
@@ -499,6 +515,7 @@ class ClaudeAgent:
             "continue_conversation": self._continue_session,
             "hooks": hooks,
             "model": self._model,
+            "stderr": self._handle_stderr,  # Capture stderr for better error messages
         }
         # Add system prompt if provided (for oneshot agents)
         if self._system_prompt:
@@ -511,6 +528,8 @@ class ClaudeAgent:
 
     async def send_user_message(self, message: str) -> None:
         """Send a user message to Claude and stream the response."""
+        # Clear stderr buffer for fresh error context
+        self._stderr_lines.clear()
         # Ensure client is connected
         if not self._client:
             await self.connect()
@@ -756,6 +775,11 @@ class ClaudeAgent:
                     "Session terminated. Please use claude-run to start a new session."
                 )
             else:
+                # Enhance error message with stderr context if available
+                if "Check stderr" in error_msg or "exit code" in error_msg:
+                    stderr_context = self._get_stderr_context()
+                    if stderr_context:
+                        error_msg = f"{error_msg}\n\nStderr output:\n{stderr_context}"
                 self._emit_error(error_msg, _format_traceback())
 
         self.state.status = "ready"
