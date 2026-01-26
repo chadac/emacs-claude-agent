@@ -391,7 +391,9 @@ class ClaudeAgent:
         context: ToolPermissionContext,
     ) -> PermissionResultAllow | PermissionResultDeny:
         """Callback for permission checks. Asks user if not pre-approved."""
-        self._log_json("PERMISSION_CHECK", {"tool": tool_name, "input": tool_input})
+        # Try to get tool_use_id from context, or generate a unique one
+        tool_use_id = getattr(context, "tool_use_id", None) or f"perm_{id(tool_input)}"
+        self._log_json("PERMISSION_CHECK", {"tool": tool_name, "input": tool_input, "tool_use_id": tool_use_id})
 
         # Always allow workflow/planning tools without prompting
         if tool_name in self.ALWAYS_SAFE_TOOLS:
@@ -405,11 +407,13 @@ class ClaudeAgent:
 
         # Need to ask user - emit permission request
         self._pending_permission_request = {
+            "tool_use_id": tool_use_id,
             "tool_name": tool_name,
             "tool_input": tool_input,
         }
         self._emit({
             "type": "permission_request",
+            "tool_use_id": tool_use_id,
             "tool_name": tool_name,
             "tool_input": tool_input,
         })
@@ -419,11 +423,11 @@ class ClaudeAgent:
         self._permission_response = None
 
         try:
-            # Wait for permission response (with timeout)
-            await asyncio.wait_for(self._permission_event.wait(), timeout=300.0)
+            # Wait for permission response (with timeout - 1 hour to allow user to step away)
+            await asyncio.wait_for(self._permission_event.wait(), timeout=3600.0)
         except asyncio.TimeoutError:
             self._emit_session_message("Permission request timed out")
-            return PermissionResultDeny(message="Permission request timed out after 5 minutes")
+            return PermissionResultDeny(message="Permission request timed out after 1 hour")
 
         response = self._permission_response
         self._permission_response = None
@@ -557,7 +561,9 @@ class ClaudeAgent:
             total_output_tokens = 0
             total_input_tokens = 0
             in_assistant_block = False
-            current_tool = None
+            # Track pending tools by their tool_use_id for proper result association
+            # Dict of tool_use_id -> tool_name
+            pending_tools: dict[str, str] = {}
 
             self._log_json("DEBUG", {"action": "waiting for SDK messages..."})
             async for msg in self._client.receive_messages():
@@ -622,12 +628,15 @@ class ClaudeAgent:
                                 in_assistant_block = False
                             tool_name = getattr(block, "name", "unknown")
                             tool_input = getattr(block, "input", {})
-                            current_tool = tool_name
+                            tool_use_id = getattr(block, "id", None) or f"tool_{len(pending_tools)}"
+                            # Track this tool for result association
+                            pending_tools[tool_use_id] = tool_name
 
                             # Special handling for Edit tool - emit diff info
                             if tool_name == "Edit":
                                 self._emit({
                                     "type": "edit_tool",
+                                    "tool_use_id": tool_use_id,
                                     "file_path": tool_input.get("file_path", ""),
                                     "old_string": tool_input.get("old_string", ""),
                                     "new_string": tool_input.get("new_string", ""),
@@ -636,6 +645,7 @@ class ClaudeAgent:
                             elif tool_name == "Write":
                                 self._emit({
                                     "type": "write_tool",
+                                    "tool_use_id": tool_use_id,
                                     "file_path": tool_input.get("file_path", ""),
                                     "content": tool_input.get("content", ""),
                                 })
@@ -647,9 +657,10 @@ class ClaudeAgent:
                                     "todos": todos,
                                 })
                             else:
-                                # Emit tool call
+                                # Emit tool call with unique ID
                                 self._emit({
                                     "type": "tool_call",
+                                    "tool_use_id": tool_use_id,
                                     "name": tool_name,
                                     "input": tool_input,
                                 })
@@ -677,6 +688,9 @@ class ClaudeAgent:
                         block_type = type(block).__name__
 
                         if block_type == "ToolResultBlock":
+                            # Get the tool_use_id to match with the original tool call
+                            tool_use_id = getattr(block, "tool_use_id", None)
+                            tool_name = pending_tools.get(tool_use_id, "unknown") if tool_use_id else "unknown"
                             # Emit tool result content
                             content = getattr(block, "content", None)
                             is_error = getattr(block, "is_error", False)
@@ -701,7 +715,7 @@ class ClaudeAgent:
                             # to catch any SDK bugs that bypass the hook
                             validated = validate_tool_result(
                                 {"content": content, "is_error": is_error},
-                                current_tool or "unknown"
+                                tool_name
                             )
 
                             # If validation added content, extract it
@@ -720,23 +734,25 @@ class ClaudeAgent:
 
                             self._emit({
                                 "type": "tool_result",
+                                "tool_use_id": tool_use_id or "unknown",
                                 "content": result_text,
                                 "is_error": is_error,
                             })
-                            # Close the tool
-                            if current_tool:
-                                self._emit({"type": "tool_end"})
-                                current_tool = None
-                            self._log_json("DEBUG", {"action": "tool_result processed, continuing to wait for more messages..."})
+                            # Close the tool and remove from pending
+                            if tool_use_id:
+                                self._emit({"type": "tool_end", "tool_use_id": tool_use_id})
+                                pending_tools.pop(tool_use_id, None)
+                            self._log_json("DEBUG", {"action": "tool_result processed", "tool_use_id": tool_use_id})
 
                 elif msg_type == "ResultMessage":
                     # Conversation turn complete
                     if in_assistant_block:
                         self._emit({"type": "assistant_end"})
                         in_assistant_block = False
-                    if current_tool:
-                        self._emit({"type": "tool_end"})
-                        current_tool = None
+                    # Close any remaining pending tools
+                    for tool_id in list(pending_tools.keys()):
+                        self._emit({"type": "tool_end", "tool_use_id": tool_id})
+                    pending_tools.clear()
 
                     # Get cost and session info
                     cost = getattr(msg, "total_cost_usd", None) or getattr(msg, "cost_usd", 0) or 0

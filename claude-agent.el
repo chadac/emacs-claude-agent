@@ -260,14 +260,12 @@ Each item is an alist with keys: content, status, activeForm.")
   "Alist mapping tool call positions to their results.
 Each entry is (MARKER NAME . RESULT-STRING).")
 
-(defvar-local claude-agent--last-tool-marker nil
-  "Marker for the last tool call, used to associate results.")
-
-(defvar-local claude-agent--last-tool-name nil
-  "Name of the last tool call, used to associate results.")
-
-(defvar-local claude-agent--last-tool-status-overlay nil
-  "Overlay for the status icon of the last tool call.")
+(defvar-local claude-agent--pending-tools nil
+  "Hash table tracking pending tool calls by tool_use_id.
+Keys are tool_use_id strings, values are plists with:
+  :marker - buffer position marker for the tool call
+  :name - tool name string
+  :status-overlay - overlay for the status icon (○/✓/✗)")
 
 (defvar-local claude-agent--placeholder-overlay nil
   "Overlay for the placeholder text in empty input area.")
@@ -1208,8 +1206,7 @@ The full diff is stored in tool-results for popup display."
         (overlay-put ov 'face 'claude-agent-tool-status-success-face)
         (overlay-put ov 'priority 100)
         (overlay-put ov 'claude-tool-status t)
-        (overlay-put ov 'evaporate t)
-        (setq claude-agent--last-tool-status-overlay ov)))
+        (overlay-put ov 'evaporate t)))
     ;; Tool header
     (let ((start (point)))
       (insert "edit")
@@ -1305,30 +1302,34 @@ Converts MCP tools like 'mcp__emacs__reload_file' to 'emacs/reload-file'."
     ;; Regular tool: just lowercase
     (downcase tool-name)))
 
-(defun claude-agent--insert-tool-call (tool-name args-string)
+(defun claude-agent--insert-tool-call (tool-name args-string &optional tool-use-id)
   "Insert a tool call display for TOOL-NAME with ARGS-STRING.
 Uses terse format: ○ toolname› args with appropriate faces.
-The status icon (○) is updated to ✓ or ✗ when tool result arrives."
+The status icon (○) is updated to ✓ or ✗ when tool result arrives.
+TOOL-USE-ID is the unique identifier for this tool invocation."
   (let* ((inhibit-read-only t)
          (tool-lower (claude-agent--format-tool-name tool-name))
          (saved-input (claude-agent--get-input-text))
          (cursor-offset (when (and claude-agent--input-start-marker
                                    (marker-position claude-agent--input-start-marker)
                                    (>= (point) claude-agent--input-start-marker))
-                          (- (point) claude-agent--input-start-marker))))
+                          (- (point) claude-agent--input-start-marker)))
+         (tool-marker nil)
+         (status-overlay nil))
     ;; Delete dynamic section
     (delete-region claude-agent--static-end-marker (point-max))
     (goto-char claude-agent--static-end-marker)
+    ;; Mark position for this tool call
+    (setq tool-marker (copy-marker (point)))
 
     ;; Insert pending status icon with overlay for later update
     (let ((icon-start (point)))
       (insert "○ ")
-      (let ((ov (make-overlay icon-start (point))))
-        (overlay-put ov 'face 'claude-agent-tool-status-pending-face)
-        (overlay-put ov 'priority 100)
-        (overlay-put ov 'claude-tool-status t)
-        (overlay-put ov 'evaporate t)
-        (setq claude-agent--last-tool-status-overlay ov)))
+      (setq status-overlay (make-overlay icon-start (point)))
+      (overlay-put status-overlay 'face 'claude-agent-tool-status-pending-face)
+      (overlay-put status-overlay 'priority 100)
+      (overlay-put status-overlay 'claude-tool-status t)
+      (overlay-put status-overlay 'evaporate t))
 
     ;; Insert tool name with overlay (survives font-lock)
     (let ((start (point)))
@@ -1364,7 +1365,20 @@ The status icon (○) is updated to ✓ or ✗ when tool result arrives."
     (claude-agent--update-placeholder)
     (goto-char (if (and cursor-offset (>= cursor-offset 0))
                    (min (+ claude-agent--input-start-marker cursor-offset) (point-max))
-                 claude-agent--input-start-marker))))
+                 claude-agent--input-start-marker))
+    ;; Register in pending-tools hash table if we have a tool-use-id
+    (when tool-use-id
+      (unless claude-agent--pending-tools
+        (setq claude-agent--pending-tools (make-hash-table :test 'equal)))
+      (puthash tool-use-id
+               (list :marker tool-marker
+                     :name tool-name
+                     :status-overlay status-overlay)
+               claude-agent--pending-tools))
+    ;; Return tool info for callers that need it
+    (list :marker tool-marker
+          :name tool-name
+          :status-overlay status-overlay)))
 
 (defun claude-agent--insert-tool-result-start ()
   "Insert the start of a tool result section."
@@ -1652,50 +1666,51 @@ If VIRTUAL-INDENT is non-nil, apply it as line-prefix/wrap-prefix."
     ("tool_call"
      (let* ((name (cdr (assq 'name msg)))
             (input (cdr (assq 'input msg)))
+            (tool-use-id (cdr (assq 'tool_use_id msg)))
             (args-str (claude-agent--format-tool-input-for-display name input)))
        (setq claude-agent--parse-state 'tool)
-       ;; Mark position and name before inserting so we can associate result later
-       (setq claude-agent--last-tool-marker
-             (copy-marker (or claude-agent--static-end-marker (point-max))))
-       (setq claude-agent--last-tool-name name)
-       (claude-agent--insert-tool-call name args-str)))
+       ;; Insert tool call and register in pending-tools hash table
+       (claude-agent--insert-tool-call name args-str tool-use-id)))
 
     ;; Tool result - store for later viewing with C-c ' and add tooltip
     ("tool_result"
-     (let ((content (cdr (assq 'content msg))))
-       (when (and claude-agent--last-tool-marker content)
-         (push (list claude-agent--last-tool-marker
-                     claude-agent--last-tool-name
-                     content)
+     (let* ((content (cdr (assq 'content msg)))
+            (tool-use-id (cdr (assq 'tool_use_id msg)))
+            (tool-info (and tool-use-id claude-agent--pending-tools
+                            (gethash tool-use-id claude-agent--pending-tools)))
+            (tool-marker (plist-get tool-info :marker))
+            (tool-name (plist-get tool-info :name))
+            (status-overlay (plist-get tool-info :status-overlay)))
+       (when (and tool-marker content)
+         (push (list tool-marker tool-name content)
                claude-agent--tool-results)
          ;; Update status icon based on whether result indicates error
-         (claude-agent--update-tool-status
-          claude-agent--last-tool-status-overlay
-          (if (claude-agent--tool-result-is-error-p content) 'error 'success))
+         (when status-overlay
+           (claude-agent--update-tool-status
+            status-overlay
+            (if (claude-agent--tool-result-is-error-p content) 'error 'success)))
          ;; Add tooltip to the tool call line
-         (claude-agent--add-tool-tooltip claude-agent--last-tool-marker content))))
+         (claude-agent--add-tool-tooltip tool-marker content))))
 
-    ;; Tool end
+    ;; Tool end - clean up from pending-tools
     ("tool_end"
+     (let ((tool-use-id (cdr (assq 'tool_use_id msg))))
+       (when (and tool-use-id claude-agent--pending-tools)
+         (remhash tool-use-id claude-agent--pending-tools)))
      (setq claude-agent--parse-state nil)
      (claude-agent--set-thinking "Thinking..."))
 
     ;; Edit tool (compact summary display with diff in popup)
     ("edit_tool"
-     (let ((file-path (cdr (assq 'file_path msg)))
-           (old-string (cdr (assq 'old_string msg)))
-           (new-string (cdr (assq 'new_string msg))))
+     (let* ((file-path (cdr (assq 'file_path msg)))
+            (old-string (cdr (assq 'old_string msg)))
+            (new-string (cdr (assq 'new_string msg)))
+            (tool-use-id (cdr (assq 'tool_use_id msg)))
+            (tool-marker nil))
        (setq claude-agent--parse-state 'tool)
        (claude-agent--set-thinking (format "Editing: %s" (file-name-nondirectory file-path)))
-       ;; Mark position and name for tool result storage
-       (setq claude-agent--last-tool-marker
-             (copy-marker (or claude-agent--static-end-marker (point-max))))
-       (setq claude-agent--last-tool-name "Edit")
        ;; Format diff content for storage in tool-results
        (let ((diff-content (claude-agent--format-diff-content old-string new-string)))
-         ;; Store in tool-results for popup viewing (like other tools)
-         (push (list claude-agent--last-tool-marker "Edit" diff-content)
-               claude-agent--tool-results)
          ;; Insert compact summary instead of full diff
          (let* ((inhibit-read-only t)
                 (saved-input (claude-agent--get-input-text))
@@ -1705,10 +1720,24 @@ If VIRTUAL-INDENT is non-nil, apply it as line-prefix/wrap-prefix."
                                  (- (point) claude-agent--input-start-marker))))
            (delete-region claude-agent--static-end-marker (point-max))
            (goto-char claude-agent--static-end-marker)
+           ;; Track marker position before inserting
+           (setq tool-marker (copy-marker (point)))
            (claude-agent--insert-edit-summary file-path old-string new-string)
            (set-marker claude-agent--static-end-marker (point))
+           ;; Store in tool-results for popup viewing
+           (push (list tool-marker "Edit" diff-content)
+                 claude-agent--tool-results)
+           ;; Register in pending-tools hash table if we have a tool-use-id
+           (when tool-use-id
+             (unless claude-agent--pending-tools
+               (setq claude-agent--pending-tools (make-hash-table :test 'equal)))
+             (puthash tool-use-id
+                      (list :marker tool-marker
+                            :name "Edit"
+                            :status-overlay nil)  ; edit_tool uses different display
+                      claude-agent--pending-tools))
            ;; Add tooltip to the summary line
-           (claude-agent--add-tool-tooltip claude-agent--last-tool-marker diff-content)
+           (claude-agent--add-tool-tooltip tool-marker diff-content)
            (when claude-agent--has-conversation
              (claude-agent--insert-status-bar))
            (setq claude-agent--input-start-marker (point-marker))
@@ -1723,20 +1752,18 @@ If VIRTUAL-INDENT is non-nil, apply it as line-prefix/wrap-prefix."
     ("write_tool"
      (let* ((file-path (cdr (assq 'file_path msg)))
             (content (cdr (assq 'content msg)))
-            (write-content (claude-agent--format-write-content content)))
+            (tool-use-id (cdr (assq 'tool_use_id msg)))
+            (write-content (claude-agent--format-write-content content))
+            (tool-info nil))
        (setq claude-agent--parse-state 'tool)
        (claude-agent--set-thinking (format "Writing: %s" (file-name-nondirectory file-path)))
-       ;; Mark position and name for tool result storage
-       (setq claude-agent--last-tool-marker
-             (copy-marker (or claude-agent--static-end-marker (point-max))))
-       (setq claude-agent--last-tool-name "Write")
+       ;; Insert compact tool call line - returns tool info plist
+       (setq tool-info (claude-agent--insert-tool-call "Write" file-path tool-use-id))
        ;; Store in tool-results for popup viewing
-       (push (list claude-agent--last-tool-marker "Write" write-content)
+       (push (list (plist-get tool-info :marker) "Write" write-content)
              claude-agent--tool-results)
-       ;; Insert compact tool call line
-       (claude-agent--insert-tool-call "Write" file-path)
        ;; Add tooltip
-       (claude-agent--add-tool-tooltip claude-agent--last-tool-marker write-content)))
+       (claude-agent--add-tool-tooltip (plist-get tool-info :marker) write-content)))
 
     ;; Session message (system notifications)
     ("session_message_start"
@@ -1791,7 +1818,11 @@ If VIRTUAL-INDENT is non-nil, apply it as line-prefix/wrap-prefix."
 ;;;; Permission prompt UI
 
 (defvar-local claude-agent--permission-data nil
-  "Current permission request data.")
+  "Current permission request data being displayed.")
+
+(defvar-local claude-agent--permission-queue nil
+  "Queue of pending permission requests waiting to be shown.
+Each element is permission data (an alist with tool_use_id, tool_name, tool_input).")
 
 (defvar-local claude-agent--permission-selection 0
   "Currently selected option in permission prompt (0-3).")
@@ -1961,18 +1992,42 @@ This is called when the user navigates options."
 
 (defun claude-agent--show-permission-prompt (data)
   "Show permission prompt for DATA above the input area.
-Saves current input text and shows dialog while preserving input."
-  ;; Save current input text before switching modes
-  (setq claude-agent--saved-input (claude-agent--get-input-text))
-  ;; Set permission state
-  (setq claude-agent--permission-data data)
-  (setq claude-agent--permission-selection 0)
-  ;; Switch to combined mode: permission dialog + text input preserved
-  (setq claude-agent--input-mode 'text-with-permission)
-  ;; Render the dialog (which now uses render-dynamic-section)
-  (claude-agent--render-permission-dialog)
-  ;; Set up keyboard navigation
-  (claude-agent--setup-permission-keymap))
+Saves current input text and shows dialog while preserving input.
+If a permission dialog is already showing, queue this request."
+  (if claude-agent--permission-data
+      ;; Already showing a permission prompt - queue this one
+      (progn
+        (push data claude-agent--permission-queue)
+        (claude-agent--set-thinking
+         (format "Awaiting permission... (%d queued)"
+                 (length claude-agent--permission-queue))))
+    ;; No current permission prompt - show this one
+    ;; Save current input text before switching modes
+    (setq claude-agent--saved-input (claude-agent--get-input-text))
+    ;; Set permission state
+    (setq claude-agent--permission-data data)
+    (setq claude-agent--permission-selection 0)
+    ;; Switch to combined mode: permission dialog + text input preserved
+    (setq claude-agent--input-mode 'text-with-permission)
+    ;; Render the dialog (which now uses render-dynamic-section)
+    (claude-agent--render-permission-dialog)
+    ;; Set up keyboard navigation
+    (claude-agent--setup-permission-keymap)))
+
+(defun claude-agent--show-next-queued-permission ()
+  "Show the next queued permission request, if any."
+  (when claude-agent--permission-queue
+    (let ((next-data (pop claude-agent--permission-queue)))
+      ;; Show the next permission prompt
+      (setq claude-agent--permission-data next-data)
+      (setq claude-agent--permission-selection 0)
+      (setq claude-agent--input-mode 'text-with-permission)
+      (claude-agent--render-permission-dialog)
+      (claude-agent--setup-permission-keymap)
+      (when claude-agent--permission-queue
+        (claude-agent--set-thinking
+         (format "Awaiting permission... (%d queued)"
+                 (length claude-agent--permission-queue)))))))
 
 (defun claude-agent--permission-select-next ()
   "Move selection down in permission dialog."
@@ -2063,6 +2118,7 @@ Restores text input mode and any saved input."
    (when claude-agent--permission-data
      (let* ((tool-name (cdr (assq 'tool_name claude-agent--permission-data)))
             (tool-input (cdr (assq 'tool_input claude-agent--permission-data)))
+            (tool-use-id (cdr (assq 'tool_use_id claude-agent--permission-data)))
             (scope (pcase action
                      ("allow_once" 'once)
                      ("allow_session" 'session)
@@ -2073,7 +2129,8 @@ Restores text input mode and any saved input."
                         tool-name tool-input scope)))
             (response-msg `((type . "permission_response")
                             (action . ,action)
-                            (pattern . ,pattern)))
+                            (pattern . ,pattern)
+                            ,@(when tool-use-id `((tool_use_id . ,tool-use-id)))))
             (saved-input claude-agent--saved-input))
        ;; Clear permission state and disable minor mode in all related buffers
        (setq claude-agent--permission-data nil)
@@ -2094,15 +2151,18 @@ Restores text input mode and any saved input."
        (dolist (ov (overlays-in (point-min) (point-max)))
          (when (overlay-get ov 'claude-permission-face)
            (delete-overlay ov)))
-       ;; Switch to empty mode (clears input area completely)
-       (setq claude-agent--input-mode 'empty)
-       ;; Show thinking status (this rebuilds dynamic section with empty input)
-       (claude-agent--set-thinking "Processing...")
        ;; Send JSON response to process
        (when (and claude-agent--process
                   (process-live-p claude-agent--process))
          (process-send-string claude-agent--process
-                              (concat (json-encode response-msg) "\n")))))))
+                              (concat (json-encode response-msg) "\n")))
+       ;; Check if there are more queued permission requests
+       (if claude-agent--permission-queue
+           ;; Show the next queued permission
+           (claude-agent--show-next-queued-permission)
+         ;; No more queued - switch to empty mode and show thinking
+         (setq claude-agent--input-mode 'empty)
+         (claude-agent--set-thinking "Processing..."))))))
 
 (defun claude-agent-permit-once ()
   "Allow the tool to run once."

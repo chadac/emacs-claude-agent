@@ -75,6 +75,7 @@ class AssistantMessageEndMessage(TypedDict):
 class ToolCallMessage(TypedDict):
     """Tool call initiated."""
     type: Literal["tool_call"]
+    tool_use_id: str  # Unique ID for this tool invocation
     name: str
     input: dict[str, Any]
 
@@ -82,6 +83,7 @@ class ToolCallMessage(TypedDict):
 class ToolResultMessage(TypedDict):
     """Tool result content."""
     type: Literal["tool_result"]
+    tool_use_id: str  # ID matching the tool_call this is a result for
     content: str
     is_error: bool
 
@@ -89,6 +91,7 @@ class ToolResultMessage(TypedDict):
 class ToolEndMessage(TypedDict):
     """Tool call completed."""
     type: Literal["tool_end"]
+    tool_use_id: str  # ID of the tool call that completed
 
 
 # Special tool display messages (for fancy UI rendering)
@@ -96,6 +99,7 @@ class ToolEndMessage(TypedDict):
 class EditToolMessage(TypedDict):
     """Edit tool with diff display data."""
     type: Literal["edit_tool"]
+    tool_use_id: str  # Unique ID for this tool invocation
     file_path: str
     old_string: str
     new_string: str
@@ -104,6 +108,7 @@ class EditToolMessage(TypedDict):
 class WriteToolMessage(TypedDict):
     """Write tool with content for diff-like popup display."""
     type: Literal["write_tool"]
+    tool_use_id: str  # Unique ID for this tool invocation
     file_path: str
     content: str
 
@@ -146,6 +151,7 @@ class MCPStatusMessage(TypedDict):
 class PermissionRequestMessage(TypedDict):
     """Request permission for tool use."""
     type: Literal["permission_request"]
+    tool_use_id: str  # Unique ID for this tool invocation
     tool_name: str
     tool_input: dict[str, Any]
 
@@ -237,6 +243,7 @@ class QuitMessage(TypedDict):
 class PermissionResponseMessage(TypedDict):
     """Response to permission request."""
     type: Literal["permission_response"]
+    tool_use_id: str  # ID of the permission request being responded to
     action: Literal["allow_once", "allow_session", "allow_always", "deny"]
     pattern: str | None  # None for deny
 
