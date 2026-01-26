@@ -2525,12 +2525,13 @@ Loads at most MAX-MESSAGES (default 50) most recent messages."
 ;;;; Entry point
 
 ;;;###autoload
-(defun claude-agent-run (work-dir &optional resume-session continue-session slug model)
+(defun claude-agent-run (work-dir &optional resume-session continue-session slug model additional-allowed-tools)
   "Start a Claude agent session for WORK-DIR.
 Optional RESUME-SESSION is a session ID to resume.
 Optional CONTINUE-SESSION, if non-nil, continues the most recent session.
 Optional SLUG is a suffix for the buffer name (e.g., *claude:project:slug*).
-Optional MODEL is the model to use (e.g., 'sonnet', 'opus', 'haiku')."
+Optional MODEL is the model to use (e.g., 'sonnet', 'opus', 'haiku').
+Optional ADDITIONAL-ALLOWED-TOOLS is a list of extra tools to pre-authorize."
   (interactive
    (list (read-directory-name "Project directory: "
                               (or (vc-git-root default-directory)
@@ -2558,8 +2559,8 @@ Optional MODEL is the model to use (e.g., 'sonnet', 'opus', 'haiku')."
       (when resume-session
         (claude-agent--display-session-history expanded-dir resume-session)))
 
-    ;; Start process with optional resume/continue/model
-    (let ((proc (claude-agent--start-process expanded-dir buf resume-session continue-session model)))
+    ;; Start process with optional resume/continue/model/allowed-tools
+    (let ((proc (claude-agent--start-process expanded-dir buf resume-session continue-session model nil additional-allowed-tools)))
       (with-current-buffer buf
         (setq claude-agent--process proc)))
 

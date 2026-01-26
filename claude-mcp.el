@@ -2350,6 +2350,50 @@ This function expects to be called in the context of the Claude buffer
   :safe t
   :args ())
 
+;;;; Attention Request
+
+(defcustom claude-mcp-attention-sound t
+  "Whether to play a sound when an agent requests attention.
+When non-nil, plays the system bell."
+  :type 'boolean
+  :group 'claude-mcp)
+
+(defcustom claude-mcp-attention-notify t
+  "Whether to show a system notification when an agent requests attention.
+Uses `notifications-notify' if available."
+  :type 'boolean
+  :group 'claude-mcp)
+
+(defun claude-mcp-request-attention (message &optional urgency)
+  "Request user attention with MESSAGE and optional URGENCY level.
+URGENCY can be \"low\", \"normal\", or \"critical\".
+Returns confirmation that attention was requested."
+  (let ((urgency-level (or urgency "normal")))
+    ;; Play sound if enabled
+    (when claude-mcp-attention-sound
+      (ding t))
+    ;; Show notification if enabled and available
+    (when (and claude-mcp-attention-notify
+               (fboundp 'notifications-notify))
+      (notifications-notify
+       :title "Claude Agent Needs Attention"
+       :body message
+       :urgency (intern urgency-level)
+       :app-name "Claude"))
+    ;; Always show in minibuffer/messages
+    (message "🔔 Claude Agent: %s" message)
+    ;; Flash the mode line
+    (let ((visible-bell t))
+      (ding))
+    (format "Attention requested: %s (urgency: %s)" message urgency-level)))
+
+(claude-mcp-deftool request-attention
+  "Request user attention when the agent needs human input or has an important question. Use this when you're blocked and need the user to respond, or to notify about completion of a long task."
+  :function #'claude-mcp-request-attention
+  :safe t
+  :args ((message string :required "Message explaining why attention is needed")
+         (urgency string "Urgency level: low, normal, or critical (default: normal)")))
+
 ;;;; Safe Tools Query
 
 (defun claude-mcp-get-safe-tools ()

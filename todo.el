@@ -55,6 +55,78 @@ Worktrees are created as {this-dir}/{project-name}/{branch-slug}/"
   :type 'directory
   :group 'org-roam-todo)
 
+(defcustom org-roam-todo-done-hook nil
+  "Hook run when marking a TODO as done via `org-roam-todo-mark-done'.
+Functions are called with no arguments in the context of the TODO buffer.
+Use this for project-specific cleanup, notifications, or GitHub issue closing."
+  :type 'hook
+  :group 'org-roam-todo)
+
+(defcustom org-roam-todo-auto-commit t
+  "Whether to automatically commit changes when marking a TODO as done.
+When non-nil, `org-roam-todo-mark-done' will commit all changes in the
+worktree before closing it."
+  :type 'boolean
+  :group 'org-roam-todo)
+
+(defcustom org-roam-todo-auto-push t
+  "Whether to automatically push after committing when marking a TODO as done.
+Only has effect when `org-roam-todo-auto-commit' is also non-nil."
+  :type 'boolean
+  :group 'org-roam-todo)
+
+(defcustom org-roam-todo-agent-allowed-tools
+  '("Edit(**)"
+    "Write(**)"
+    "Read(**)"
+    "Glob(**)"
+    "Grep(**)"
+    "Bash(git *)"
+    "Bash(npm *)"
+    "Bash(npx *)"
+    "Bash(yarn *)"
+    "Bash(pnpm *)"
+    "Bash(make *)"
+    "Bash(cargo *)"
+    "Bash(uv *)"
+    "Bash(pytest *)"
+    "Bash(python *)"
+    "Bash(ruff *)"
+    "Bash(ls *)"
+    "Bash(find *)"
+    "Bash(cat *)"
+    "Bash(head *)"
+    "Bash(tail *)"
+    "Bash(grep *)"
+    "Bash(rg *)"
+    "Bash(wc *)"
+    "Bash(diff *)"
+    "Bash(tree *)"
+    "mcp__emacs__read_file"
+    "mcp__emacs__edit_file"
+    "mcp__emacs__read_buffer"
+    "mcp__emacs__edit_buffer"
+    "mcp__emacs__magit_status"
+    "mcp__emacs__magit_diff"
+    "mcp__emacs__magit_log"
+    "mcp__emacs__magit_stage"
+    "mcp__emacs__magit_commit_propose"
+    "mcp__emacs__todo_current"
+    "mcp__emacs__todo_add_progress"
+    "mcp__emacs__todo_check_acceptance"
+    "mcp__emacs__todo_update_status"
+    "mcp__emacs__kb_search"
+    "mcp__emacs__kb_get"
+    "mcp__emacs__request_attention")
+  "List of tools to pre-authorize for TODO worktree agents.
+These tools will be allowed without permission prompts, enabling
+more autonomous operation.  Uses Claude Code permission pattern syntax:
+- ToolName(**) for recursive file access
+- Bash(pattern*) for specific bash commands
+- mcp__server__tool for MCP tools"
+  :type '(repeat string)
+  :group 'org-roam-todo)
+
 (defcustom org-roam-todo-worktree-copy-patterns
   '(".claude/settings.local.json")
   "List of file paths (relative to project root) to copy to new worktrees.
@@ -94,6 +166,18 @@ Checks for worktrees and maps them back to the main repository."
          (main-repo (org-roam-todo--worktree-main-repo current-dir)))
     (or main-repo current-dir)))
 
+(defun org-roam-todo--reorder-with-default (items default)
+  "Reorder ITEMS to put DEFAULT at the front if present.
+Uses `file-truename' for path comparison to handle symlinks."
+  (if (and default items)
+      (let ((normalized-default (file-truename (expand-file-name default))))
+        (cons default
+              (seq-remove (lambda (item)
+                            (string= (file-truename (expand-file-name item))
+                                     normalized-default))
+                          items)))
+    items))
+
 (defun org-roam-todo--select-project ()
   "Prompt user to select a git project.
 Returns the project root path. Defaults to inferred project from context."
@@ -107,7 +191,8 @@ Returns the project root path. Defaults to inferred project from context."
                         (projectile-known-projects))
                      nil)))
     (if projects
-        (completing-read "Project: " projects nil t nil nil inferred)
+        (let ((ordered-projects (org-roam-todo--reorder-with-default projects inferred)))
+          (completing-read "Project: " ordered-projects nil t nil nil inferred))
       (read-directory-name "Git project root: " inferred))))
 
 (defun org-roam-todo--project-name (project-root)
@@ -546,9 +631,10 @@ If the worktree and session already exist, sends the task to the existing sessio
           (org-roam-todo--send-task-to-buffer buffer-name content worktree-path)
           (pop-to-buffer existing-buffer)
           (message "Sent task to existing session: %s" buffer-name))
-      ;; New session - pre-trust and spawn
+      ;; New session - pre-trust and spawn with TODO-specific allowed tools
       (org-roam-todo--pre-trust-worktree worktree-path)
-      (let* ((buf (claude-agent-run worktree-path))
+      (let* ((buf (claude-agent-run worktree-path nil nil nil nil
+                                    org-roam-todo-agent-allowed-tools))
              (buffer-name (buffer-name buf)))
         ;; Wait for session to be ready (5 seconds for Claude to initialize)
         (org-roam-todo--send-task-to-buffer buffer-name content worktree-path 5)
@@ -624,6 +710,29 @@ If FORCE is non-nil, use -D instead of -d."
     (call-process "git" nil "*org-roam-todo-worktree-output*" nil
                   "branch" flag branch-name)))
 
+(defun org-roam-todo--git-has-changes-p (directory)
+  "Return non-nil if DIRECTORY has uncommitted git changes."
+  (let ((default-directory directory))
+    (not (string-empty-p
+          (string-trim
+           (shell-command-to-string "git status --porcelain"))))))
+
+(defun org-roam-todo--git-commit-all (directory message)
+  "Stage all changes in DIRECTORY and commit with MESSAGE.
+Returns t on success, nil on failure."
+  (let ((default-directory directory))
+    (and (= 0 (call-process "git" nil "*org-roam-todo-git-output*" nil
+                            "add" "-A"))
+         (= 0 (call-process "git" nil "*org-roam-todo-git-output*" nil
+                            "commit" "-m" message)))))
+
+(defun org-roam-todo--git-push (directory)
+  "Push current branch in DIRECTORY to origin.
+Returns t on success, nil on failure."
+  (let ((default-directory directory))
+    (= 0 (call-process "git" nil "*org-roam-todo-git-output*" nil
+                       "push" "-u" "origin" "HEAD"))))
+
 ;;;###autoload
 (defun org-roam-todo-close-worktree (&optional force)
   "Close the worktree associated with the current TODO.
@@ -675,6 +784,75 @@ Also deletes the branch (prompting if unmerged) and marks TODO as done."
       (org-roam-todo--set-property "STATUS" "done"))
     (save-buffer)
     (message "Closed worktree and marked TODO as done: %s" worktree-path)))
+
+;;;###autoload
+(defun org-roam-todo-mark-done (&optional skip-commit)
+  "Mark the current TODO as done, with optional worktree cleanup.
+Runs `org-roam-todo-done-hook' first.
+If a worktree exists:
+- Commits changes if `org-roam-todo-auto-commit' is non-nil
+- Pushes if `org-roam-todo-auto-push' is non-nil
+- Prompts to delete worktree and close related buffers
+With prefix arg SKIP-COMMIT, skip the auto-commit/push step."
+  (interactive "P")
+  (unless (org-roam-todo--node-p)
+    (user-error "Not in an org-roam TODO node"))
+  (let* ((worktree-path (org-roam-todo--get-property "WORKTREE_PATH"))
+         (project-root (org-roam-todo--get-property "PROJECT_ROOT"))
+         (branch-name (org-roam-todo--get-property "WORKTREE_BRANCH"))
+         (current-status (org-roam-todo--get-property "STATUS"))
+         (title (save-excursion
+                  (goto-char (point-min))
+                  (when (re-search-forward "^#\\+title: \\(.+\\)$" nil t)
+                    (match-string 1)))))
+    ;; Run done hooks first
+    (run-hooks 'org-roam-todo-done-hook)
+    ;; Handle worktree - commit/push first, then cleanup
+    (when (and worktree-path
+               (org-roam-todo--worktree-exists-p worktree-path))
+      ;; Auto-commit if enabled and not skipped
+      (when (and org-roam-todo-auto-commit
+                 (not skip-commit)
+                 (org-roam-todo--git-has-changes-p worktree-path))
+        (let ((commit-msg (format "Complete TODO: %s\n\n🤖 Generated with Claude Code"
+                                  (or title "task"))))
+          (if (org-roam-todo--git-commit-all worktree-path commit-msg)
+              (progn
+                (message "Committed changes in worktree")
+                ;; Auto-push if enabled
+                (when org-roam-todo-auto-push
+                  (message "Pushing to origin...")
+                  (if (org-roam-todo--git-push worktree-path)
+                      (message "Pushed to origin successfully")
+                    (message "Warning: Push failed - you may need to push manually"))))
+            (message "Warning: Commit failed - changes not committed"))))
+      ;; Now handle worktree cleanup
+      (when (yes-or-no-p "Delete associated worktree and close buffers? ")
+        ;; Kill Claude session
+        (org-roam-todo--kill-claude-session worktree-path)
+        ;; Kill file buffers
+        (org-roam-todo--kill-worktree-buffers worktree-path)
+        ;; Remove worktree (with force prompt if needed)
+        (let ((result (org-roam-todo--remove-worktree project-root worktree-path)))
+          (unless (= 0 result)
+            (when (yes-or-no-p "Worktree has uncommitted changes. Force remove? ")
+              (org-roam-todo--remove-worktree project-root worktree-path t))))
+        ;; Clear worktree properties
+        (org-roam-todo--set-property "WORKTREE_PATH" nil)
+        (org-roam-todo--set-property "WORKTREE_BRANCH" nil)
+        ;; Optionally delete branch
+        (when (and branch-name
+                   (org-roam-todo--branch-exists-p project-root branch-name)
+                   (yes-or-no-p (format "Delete branch '%s'? " branch-name)))
+          (let ((result (org-roam-todo--delete-branch project-root branch-name)))
+            (unless (= 0 result)
+              (when (yes-or-no-p (format "Branch '%s' is not fully merged. Force delete? " branch-name))
+                (org-roam-todo--delete-branch project-root branch-name t)))))))
+    ;; Mark as done (unless already done/rejected)
+    (unless (member current-status '("done" "rejected"))
+      (org-roam-todo--set-property "STATUS" "done"))
+    (save-buffer)
+    (message "Marked TODO as done")))
 
 ;;;###autoload
 (defun org-roam-todo-select-close-worktree (&optional project-filter)
@@ -1027,10 +1205,13 @@ With prefix arg PROMPT, prompts for project selection."
   (let ((map (make-sparse-keymap)))
     ;; Bind C-c c to the unified Claude menu
     (define-key map (kbd "C-c c") #'claude-menu)
+    ;; Bind C-c C-d to mark TODO as done
+    (define-key map (kbd "C-c C-d") #'org-roam-todo-mark-done)
     map)
   "Keymap for `org-roam-todo-mode'.
 
-Press C-c c to show the Claude menu.")
+Press C-c c to show the Claude menu.
+Press C-c C-d to mark the TODO as done.")
 
 ;;;###autoload
 (define-minor-mode org-roam-todo-mode
@@ -1038,7 +1219,12 @@ Press C-c c to show the Claude menu.")
 
 \\{org-roam-todo-mode-map}"
   :lighter " OrgTODO"
-  :keymap org-roam-todo-mode-map)
+  :keymap org-roam-todo-mode-map
+  (if org-roam-todo-mode
+      ;; Mode enabled - add C-c C-c handler buffer-locally
+      (add-hook 'org-ctrl-c-ctrl-c-hook #'org-roam-todo--ctrl-c-ctrl-c-handler nil t)
+    ;; Mode disabled - remove handler
+    (remove-hook 'org-ctrl-c-ctrl-c-hook #'org-roam-todo--ctrl-c-ctrl-c-handler t)))
 
 (defun org-roam-todo--maybe-enable-mode ()
   "Enable `org-roam-todo-mode' if this is an org-roam TODO node."
@@ -1054,6 +1240,22 @@ Press C-c c to show the Claude menu.")
 
 ;; Auto-enable in TODO nodes
 (add-hook 'find-file-hook #'org-roam-todo--maybe-enable-mode)
+
+(defun org-roam-todo--ctrl-c-ctrl-c-handler ()
+  "Handle C-c C-c in org-roam TODO buffers.
+If the buffer has :WORKTREE: t property, create a worktree.
+Returns non-nil if handled, nil otherwise."
+  (when (and (derived-mode-p 'org-mode)
+             org-roam-todo-mode
+             (org-roam-todo--node-p))
+    (let ((worktree-prop (org-roam-todo--get-property "WORKTREE")))
+      (when (and worktree-prop
+                 (string= (downcase worktree-prop) "t"))
+        ;; Only trigger if no worktree exists yet
+        (unless (org-roam-todo--get-property "WORKTREE_PATH")
+          (require 'claude-agent)
+          (org-roam-todo-create-worktree)
+          t)))))  ; Return non-nil to indicate we handled it
 
 ;;;; MCP Tool Functions
 
@@ -1315,6 +1517,49 @@ Returns JSON with the created TODO's file path and ID."
        (project . ,project-name)
        (status . "draft")))))
 
+(defun org-roam-todo-mcp-complete (&optional summary)
+  "Complete the current TODO - commit, push, and mark done.
+SUMMARY is an optional description of what was accomplished.
+Returns a status message."
+  (let* ((cwd (or (bound-and-true-p claudemacs-session-cwd)
+                  (bound-and-true-p claude-session-cwd)
+                  (bound-and-true-p claude--cwd)
+                  default-directory))
+         (expanded-cwd (expand-file-name cwd))
+         (todos (org-roam-todo--query-todos))
+         (todo (cl-find-if
+                (lambda (t)
+                  (let ((wpath (plist-get t :worktree-path)))
+                    (and wpath
+                         (string= (expand-file-name wpath) expanded-cwd))))
+                todos))
+         (file (plist-get todo :file))
+         (title (plist-get todo :title))
+         (project-root (plist-get todo :project-root))
+         (branch-name (plist-get todo :worktree-path)))
+    (unless todo
+      (error "No TODO found for current worktree: %s" cwd))
+    ;; Commit changes if there are any
+    (let ((commit-msg (format "Complete TODO: %s\n\n%s\n\n🤖 Generated with Claude Code"
+                              (or title "task")
+                              (or summary "Task completed by Claude agent"))))
+      (when (org-roam-todo--git-has-changes-p cwd)
+        (if (org-roam-todo--git-commit-all cwd commit-msg)
+            (progn
+              (org-roam-todo-mcp-add-progress
+               (format "Committed changes: %s" (or summary "task completed")))
+              ;; Push if enabled
+              (when org-roam-todo-auto-push
+                (if (org-roam-todo--git-push cwd)
+                    (org-roam-todo-mcp-add-progress "Pushed changes to origin")
+                  (org-roam-todo-mcp-add-progress "Warning: Push failed"))))
+          (error "Failed to commit changes"))))
+    ;; Mark as done
+    (org-roam-todo-mcp-update-status "done")
+    ;; Notify user that cleanup can be done
+    (format "TODO completed! Changes committed%s. Use C-c C-d in the TODO buffer to close the worktree."
+            (if org-roam-todo-auto-push " and pushed" ""))))
+
 (defun org-roam-todo-mcp-update-acceptance (criteria &optional todo-id)
   "Update or add acceptance criteria items.
 CRITERIA is a list of (text . checked) pairs.
@@ -1424,7 +1669,19 @@ TODO-ID can be a file path or title (defaults to current TODO)."
     :args ((project-root string :required "Path to the project root directory")
            (title string :required "Title of the TODO")
            (description string "Optional task description")
-           (acceptance-criteria array "Optional array of acceptance criteria strings"))))
+           (acceptance-criteria array "Optional array of acceptance criteria strings")))
+
+  (claude-mcp-deftool todo-complete
+    "Complete the current TODO task. This will:
+1. Commit all changes with a generated commit message
+2. Push to origin (if org-roam-todo-auto-push is enabled)
+3. Mark the TODO as done
+4. Optionally close the worktree (prompts user)
+Use this when you have finished all the work for a TODO."
+    :function #'org-roam-todo-mcp-complete
+    :safe nil  ; Not safe - makes commits
+    :needs-session-cwd t
+    :args ((summary string "Optional summary of what was accomplished for the commit message"))))
 
 ;;;; Global Keybindings
 
