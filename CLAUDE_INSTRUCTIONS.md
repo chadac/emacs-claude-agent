@@ -2,6 +2,16 @@
 
 > **Note**: This file is automatically loaded by Claude Code when starting a session in this directory. You (Claude) will have this context available from the start of every claudemacs session.
 
+## Important: Agent System Prompt
+
+The file `claude-agent-prompt.md` contains the system prompt that is appended to Claude's instructions when running inside Emacs. **If you need to modify Claude's behavior or add instructions about how Claude should interact with Emacs, edit `claude-agent-prompt.md`.**
+
+Key instructions in that file:
+- File editing workflow (lock-region → write-region)
+- Why NOT to use standard Edit/Write tools
+- Notes system usage
+- Bash execution preferences
+
 ## What is Claudemacs?
 
 You (Claude) are running inside a special integration that connects Claude Code with Emacs. This means:

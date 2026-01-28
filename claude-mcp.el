@@ -429,9 +429,15 @@ Returns a formatted string with metadata, diagnostics, and content."
                           "\n\n"))))
 
                    ;; Content with line numbers - compact format matching Read tool
-                   (let ((lines (split-string content "\n" t))
-                         (line-num start-line)
-                         (numbered-lines '()))
+                   ;; Note: We split without omitting nulls to preserve empty lines,
+                   ;; but remove the trailing empty string caused by the final newline
+                   (let* ((lines (split-string content "\n"))
+                          ;; Remove trailing empty string from final newline
+                          (lines (if (and lines (string-empty-p (car (last lines))))
+                                     (butlast lines)
+                                   lines))
+                          (line-num start-line)
+                          (numbered-lines '()))
                      (dolist (line lines)
                        (push (format (format "%%%dd→%%s" max-line-width) line-num line)
                              numbered-lines)
@@ -606,9 +612,15 @@ Returns content with line numbers in the same format as read-file."
                         (buffer-substring-no-properties start-pos (point)))))
            (max-line-width (length (number-to-string end-line))))
       ;; Format with line numbers like read-file
-      (let ((lines (split-string content "\n" t))
-            (line-num start-line)
-            (numbered-lines '()))
+      ;; Note: We split without omitting nulls to preserve empty lines,
+      ;; but remove the trailing empty string caused by the final newline
+      (let* ((lines (split-string content "\n"))
+             ;; Remove trailing empty string from final newline
+             (lines (if (and lines (string-empty-p (car (last lines))))
+                        (butlast lines)
+                      lines))
+             (line-num start-line)
+             (numbered-lines '()))
         (dolist (line lines)
           (push (format (format "%%%dd→%%s" max-line-width) line-num line)
                 numbered-lines)
@@ -711,6 +723,411 @@ Use this for creating scratch buffers, preview content, or temporary work areas.
   :args ((buffer-name string :required "Name for the new buffer")
          (content string :required "Content to put in the buffer")
          (mode string "Optional major mode to apply (e.g., 'python-mode', 'org-mode')")))
+
+;;;; Region Locking for Pair Programming
+;;
+;; These tools allow Claude to "acquire" regions of a buffer for editing.
+;; The workflow is:
+;; 1. Read buffer content with line numbers
+;; 2. Lock a region (by line numbers) - highlights it and makes it read-only to user
+;; 3. Write new content to replace the locked region
+;; 4. Lock is released and buffer optionally auto-saved
+;;
+;; Multiple regions can be locked simultaneously (in the same or different buffers).
+;; Each lock has a unique ID for tracking.
+
+(defvar-local claude-mcp--locked-regions nil
+  "Hash table of locked regions in this buffer, keyed by lock ID.
+Each value is a plist with :start-line, :end-line, :start-pos, :end-pos,
+:overlay, :was-modified, :claude-is-writing, :agent-buffer.")
+
+(defvar claude-mcp--lock-counter 0
+  "Counter for generating unique lock IDs.")
+
+(defface claude-mcp-locked-region-face
+  '((t :background "#3e4451" :extend t))
+  "Face for highlighting Claude's locked region."
+  :group 'claude-mcp)
+
+(defface claude-mcp-written-region-face
+  '((t :background "#2e4a2e" :extend t))
+  "Face for briefly highlighting newly written content."
+  :group 'claude-mcp)
+
+(defun claude-mcp--get-buffer (buffer-name &optional file-path)
+  "Get buffer by BUFFER-NAME or FILE-PATH.
+If FILE-PATH is provided and buffer-name is nil, find buffer visiting that file."
+  (or (and buffer-name (get-buffer buffer-name))
+      (and file-path (get-file-buffer (expand-file-name file-path)))
+      (and file-path (find-file-noselect (expand-file-name file-path)))))
+
+(defun claude-mcp--ensure-locked-regions ()
+  "Ensure the locked-regions hash table exists in current buffer."
+  (unless claude-mcp--locked-regions
+    (setq claude-mcp--locked-regions (make-hash-table :test 'equal))))
+
+(defun claude-mcp--line-to-pos (line-num)
+  "Convert LINE-NUM (1-indexed) to buffer position at start of that line."
+  (save-excursion
+    (goto-char (point-min))
+    (forward-line (1- line-num))
+    (point)))
+
+(defun claude-mcp--line-end-pos (line-num)
+  "Get the position at the end of LINE-NUM (including newline if present)."
+  (save-excursion
+    (goto-char (point-min))
+    (forward-line line-num)  ; Move to start of next line
+    (point)))
+
+(defun claude-mcp--generate-lock-id (start-line end-line)
+  "Generate a unique lock ID for lines START-LINE to END-LINE."
+  (setq claude-mcp--lock-counter (1+ claude-mcp--lock-counter))
+  (format "L%d-%d#%d" start-line end-line claude-mcp--lock-counter))
+
+(defun claude-mcp--check-region-overlap (start-pos end-pos)
+  "Check if region START-POS to END-POS overlaps with any existing lock.
+Returns the lock ID if overlap found, nil otherwise."
+  (let ((overlap-id nil))
+    (when claude-mcp--locked-regions
+      (maphash
+       (lambda (id lock-info)
+         (let ((lock-start (plist-get lock-info :start-pos))
+               (lock-end (plist-get lock-info :end-pos)))
+           (when (and (< start-pos lock-end) (> end-pos lock-start))
+             (setq overlap-id id))))
+       claude-mcp--locked-regions))
+    overlap-id))
+
+(defun claude-mcp--flash-region (start-pos end-pos)
+  "Briefly highlight region from START-POS to END-POS in green."
+  (let ((ov (make-overlay start-pos end-pos)))
+    (overlay-put ov 'face 'claude-mcp-written-region-face)
+    (overlay-put ov 'claude-mcp-flash t)
+    (run-at-time 2.0 nil
+                 (lambda (overlay)
+                   (when (overlayp overlay)
+                     (delete-overlay overlay)))
+                 ov)))
+
+(defun claude-mcp-lock-region (buffer-name start-line end-line &optional agent-name file-path)
+  "Lock a region in BUFFER-NAME from START-LINE to END-LINE (inclusive, 1-indexed).
+The region is highlighted and made read-only to the user.
+AGENT-NAME optionally identifies which agent owns the lock.
+FILE-PATH can be provided to auto-open the file if the buffer doesn't exist.
+Returns lock ID and confirmation, or error if region overlaps existing lock."
+  (let ((buf (claude-mcp--get-buffer buffer-name file-path)))
+    (unless buf
+      (error "Buffer '%s' does not exist (and no file_path provided to open it)" buffer-name))
+    (with-current-buffer buf
+      (claude-mcp--ensure-locked-regions)
+      ;; Validate line numbers
+      (let ((total-lines (count-lines (point-min) (point-max))))
+        (when (< start-line 1)
+          (error "Start_line must be >= 1, got %d" start-line))
+        (when (> end-line total-lines)
+          (error "End_line %d exceeds buffer line count %d" end-line total-lines))
+        (when (> start-line end-line)
+          (error "Start_line %d must be <= end_line %d" start-line end-line)))
+      ;; Calculate positions
+      (let* ((start-pos (claude-mcp--line-to-pos start-line))
+             (end-pos (claude-mcp--line-end-pos end-line))
+             ;; Check for overlapping locks
+             (overlap (claude-mcp--check-region-overlap start-pos end-pos)))
+        (when overlap
+          (error "Region overlaps with existing lock %s" overlap))
+        (let* ((was-modified (buffer-modified-p))
+               (lock-id (claude-mcp--generate-lock-id start-line end-line))
+               (agent-buffer (or agent-name "Claude"))
+               ;; Truncate based on window width - leave room for " 🔒 Locked by " prefix and padding
+               (max-name-len (max 20 (- (window-body-width) 18)))
+               (agent-display (if (> (length agent-buffer) max-name-len)
+                                  (concat (substring agent-buffer 0 (- max-name-len 4)) "...*")
+                                agent-buffer))
+               ;; Create overlay for visual feedback
+               (ov (make-overlay start-pos end-pos))
+               ;; Create label showing which agent owns the lock
+               (label (propertize (format " 🔒 Locked by %s " agent-display)
+                                  'face '(:background "#61afef"
+                                          :foreground "#282c34"
+                                          :weight bold
+                                          :height 0.85))))
+          ;; Configure overlay
+          (overlay-put ov 'face 'claude-mcp-locked-region-face)
+          (overlay-put ov 'claude-mcp-lock lock-id)
+          (overlay-put ov 'before-string (concat label "\n"))
+          (overlay-put ov 'help-echo (format "Locked by %s (ID: %s)" agent-buffer lock-id))
+          (overlay-put ov 'modification-hooks
+                       (list (lambda (ov after-p beg end &optional len)
+                               (unless after-p
+                                 (let* ((lock-id (overlay-get ov 'claude-mcp-lock))
+                                        (lock-info (and claude-mcp--locked-regions
+                                                        (gethash lock-id claude-mcp--locked-regions))))
+                                   (when (and lock-info
+                                              (not (plist-get lock-info :claude-is-writing)))
+                                     (error "This region is locked by Claude (ID: %s)" lock-id)))))))
+          ;; Store lock info
+          (puthash lock-id
+                   (list :start-line start-line
+                         :end-line end-line
+                         :start-pos start-pos
+                         :end-pos end-pos
+                         :overlay ov
+                         :was-modified was-modified
+                         :claude-is-writing nil
+                         :agent-buffer agent-buffer)
+                   claude-mcp--locked-regions)
+          ;; Return confirmation with lock ID
+          (let ((content (buffer-substring-no-properties start-pos end-pos)))
+            (format "Locked %s lines %d-%d (ID: %s)\n\nLocked content:\n%s"
+                    buffer-name start-line end-line lock-id content)))))))
+
+(claude-mcp-deftool lock-region
+  "Lock a region of a buffer for editing. The region is highlighted and protected from user edits.
+Use this before write-region to safely edit a portion of a buffer.
+The lock is based on line numbers (1-indexed, inclusive).
+If the buffer doesn't exist, provide file_path to auto-open it."
+  :function #'claude-mcp-lock-region
+  :args ((buffer-name string :required "Name of the buffer")
+         (start-line integer :required "First line to lock (1-indexed)")
+         (end-line integer :required "Last line to lock (1-indexed, inclusive)")
+         (agent-name string "Name of the agent owning the lock (auto-set by MCP server)")
+         (file-path string "Path to file - if provided and buffer doesn't exist, opens the file")))
+(defun claude-mcp-unlock-region (buffer-name)
+  "Unlock the currently locked region in BUFFER-NAME without making changes.
+Use this to cancel an edit operation."
+  (let ((buf (claude-mcp--get-buffer buffer-name)))
+    (unless buf
+      (error "Buffer '%s' does not exist" buffer-name))
+    (with-current-buffer buf
+      (unless (and claude-mcp--locked-regions
+                   (> (hash-table-count claude-mcp--locked-regions) 0))
+        (error "Buffer '%s' has no locked regions" buffer-name))
+      ;; If only one lock, remove it; otherwise error (need lock ID)
+      (if (= (hash-table-count claude-mcp--locked-regions) 1)
+          (let (lock-id lock-info)
+            (maphash (lambda (id info)
+                       (setq lock-id id lock-info info))
+                     claude-mcp--locked-regions)
+            (let ((start-line (plist-get lock-info :start-line))
+                  (end-line (plist-get lock-info :end-line))
+                  (ov (plist-get lock-info :overlay)))
+              (when (overlayp ov)
+                (delete-overlay ov))
+              (remhash lock-id claude-mcp--locked-regions)
+              (format "Unlocked %s lines %d-%d (ID: %s, no changes made)"
+                      buffer-name start-line end-line lock-id)))
+        (error "Buffer has %d locks - specify lock ID with unlock_region_by_id"
+               (hash-table-count claude-mcp--locked-regions))))))
+
+(claude-mcp-deftool unlock-region
+  "Unlock a previously locked region without making changes. Use this to cancel an edit."
+  :function #'claude-mcp-unlock-region
+  :safe t
+  :args ((buffer-name string :required "Name of the buffer")))
+
+(defun claude-mcp-write-region (buffer-name content)
+  "Replace the locked region in BUFFER-NAME with CONTENT.
+The lock must have been acquired with lock-region first.
+If the buffer was unmodified before locking, it will be auto-saved after writing."
+  (let ((buf (claude-mcp--get-buffer buffer-name)))
+    (unless buf
+      (error "Buffer '%s' does not exist" buffer-name))
+    (with-current-buffer buf
+      (unless (and claude-mcp--locked-regions
+                   (> (hash-table-count claude-mcp--locked-regions) 0))
+        (error "Buffer '%s' has no locked region" buffer-name))
+      ;; If only one lock, use it; otherwise error (need lock ID)
+      (if (= (hash-table-count claude-mcp--locked-regions) 1)
+          (let (lock-id)
+            (maphash (lambda (id _) (setq lock-id id)) claude-mcp--locked-regions)
+            (claude-mcp--write-region-by-id buffer-name lock-id content))
+        (error "Buffer has %d locks - specify lock ID with write_region_by_id"
+               (hash-table-count claude-mcp--locked-regions))))))
+
+(defun claude-mcp--write-region-by-id (buffer-name lock-id content)
+  "Internal: Replace locked region LOCK-ID in BUFFER-NAME with CONTENT."
+  (let ((buf (claude-mcp--get-buffer buffer-name)))
+    (with-current-buffer buf
+      (let* ((lock-info (gethash lock-id claude-mcp--locked-regions))
+             (start-line (plist-get lock-info :start-line))
+             (end-line (plist-get lock-info :end-line))
+             (start-pos (plist-get lock-info :start-pos))
+             (end-pos (plist-get lock-info :end-pos))
+             (ov (plist-get lock-info :overlay))
+             (was-modified (plist-get lock-info :was-modified))
+             (old-content (buffer-substring-no-properties start-pos end-pos))
+             (inhibit-read-only t))
+        ;; Mark that Claude is writing (allows modification hooks to pass)
+        (plist-put lock-info :claude-is-writing t)
+        (puthash lock-id lock-info claude-mcp--locked-regions)
+        ;; Delete overlay
+        (when (overlayp ov)
+          (delete-overlay ov))
+        ;; Replace the region content
+        (goto-char start-pos)
+        (delete-region start-pos end-pos)
+        (let ((new-start start-pos))
+          (insert content)
+          (let ((new-end (point)))
+            ;; Flash the new content briefly
+            (claude-mcp--flash-region new-start new-end)))
+        ;; Remove lock from hash
+        (remhash lock-id claude-mcp--locked-regions)
+        ;; Auto-save if buffer was originally unmodified
+        (when (and (not was-modified) (buffer-file-name))
+          (save-buffer))
+        ;; Build diff output
+        (let* ((old-lines (split-string old-content "\n"))
+               (new-lines (split-string content "\n"))
+               (diff-output (concat
+                             (mapconcat (lambda (l) (concat "- " l)) old-lines "\n")
+                             "\n"
+                             (mapconcat (lambda (l) (concat "+ " l)) new-lines "\n"))))
+          (format "Replaced %s lines %d-%d (ID: %s)%s\n\n%s"
+                  buffer-name start-line end-line lock-id
+                  (if (and (not was-modified) (buffer-file-name))
+                      " (auto-saved)"
+                    "")
+                  diff-output))))))
+
+(claude-mcp-deftool write-region
+  "Replace the locked region with new content. Requires a prior lock-region call.
+If the buffer was unmodified before locking, it will be auto-saved after writing."
+  :function #'claude-mcp-write-region
+  :safe t
+  :args ((buffer-name string :required "Name of the buffer")
+         (content string :required "New content to replace the locked region")))
+
+;;;; Watch Mode - Follow Claude's Edits
+;;
+;; Watch mode lets users follow along as Claude makes edits.
+;; When enabled, the view automatically jumps to locked/written regions.
+;; Any keypress exits watch mode.
+
+(defvar claude-mcp-watch-mode nil
+  "Non-nil when watch mode is active.")
+
+(defvar claude-mcp--watch-window nil
+  "The window that is in watch mode.")
+
+(defvar claude-mcp--watch-original-buffer nil
+  "The original buffer shown in the watch window before watch mode.")
+
+(defvar claude-mcp--watch-source-buffer nil
+  "The claudemacs buffer that watch mode is following.")
+
+(defface claude-mcp-watch-mode-line-face
+  '((t :background "#e5c07b" :foreground "#282c34" :weight bold))
+  "Face for watch mode indicator in mode line."
+  :group 'claude-mcp)
+
+(defun claude-mcp--watch-exit ()
+  "Exit watch mode."
+  (interactive)
+  (when claude-mcp-watch-mode
+    (setq claude-mcp-watch-mode nil)
+    (setq claude-mcp--watch-window nil)
+    (setq claude-mcp--watch-source-buffer nil)
+    ;; Remove the pre-command hook
+    (remove-hook 'pre-command-hook #'claude-mcp--watch-exit-on-input)
+    (force-mode-line-update t)
+    (message "Watch mode exited")))
+
+(defun claude-mcp--watch-exit-on-input ()
+  "Exit watch mode on any user input."
+  ;; Only exit if this is real user input, not programmatic
+  (when (and claude-mcp-watch-mode
+             (not (eq this-command 'claude-mcp--watch-exit)))
+    (claude-mcp--watch-exit)))
+
+(defun claude-mcp--watch-jump-to-region (buffer start-pos)
+  "Jump watch window to show BUFFER at START-POS.
+Shows 5 lines of context above the edit when possible."
+  (when (and claude-mcp-watch-mode
+             claude-mcp--watch-window
+             (window-live-p claude-mcp--watch-window))
+    (with-selected-window claude-mcp--watch-window
+      (switch-to-buffer buffer t t)
+      (goto-char start-pos)
+      ;; Show 5 lines above the edit position
+      (recenter 5))))
+
+(defun claude-mcp--watch-notify-lock (buffer start-pos)
+  "Notify watch mode that a region was locked in BUFFER at START-POS."
+  (claude-mcp--watch-jump-to-region buffer start-pos))
+
+(defun claude-mcp--watch-notify-write (buffer start-pos)
+  "Notify watch mode that content was written to BUFFER at START-POS."
+  (claude-mcp--watch-jump-to-region buffer start-pos))
+
+(defun claude-mcp-watch-mode-toggle ()
+  "Toggle watch mode to follow Claude's edits.
+When enabled, automatically jumps to regions Claude is editing.
+Any keypress exits watch mode."
+  (interactive)
+  (if claude-mcp-watch-mode
+      (claude-mcp--watch-exit)
+    ;; Enable watch mode
+    (let ((claude-buf (or (and (string-match-p "^\\*claude:" (buffer-name))
+                               (current-buffer))
+                          ;; Try to find a claude buffer
+                          (seq-find (lambda (b)
+                                      (string-match-p "^\\*claude:" (buffer-name b)))
+                                    (buffer-list)))))
+      (unless claude-buf
+        (user-error "No Claude buffer found"))
+      ;; Set up watch mode
+      (setq claude-mcp-watch-mode t)
+      (setq claude-mcp--watch-source-buffer claude-buf)
+      ;; Use a different window for watching (not the claude buffer window)
+      (let ((claude-win (get-buffer-window claude-buf)))
+        (setq claude-mcp--watch-window
+              (or (seq-find (lambda (w)
+                              (and (not (eq w claude-win))
+                                   (not (minibufferp (window-buffer w)))))
+                            (window-list))
+                  ;; If only one window, split it
+                  (split-window claude-win nil 'right))))
+      ;; Store original buffer
+      (setq claude-mcp--watch-original-buffer
+            (window-buffer claude-mcp--watch-window))
+      ;; Add hook to exit on any input
+      (add-hook 'pre-command-hook #'claude-mcp--watch-exit-on-input)
+      (force-mode-line-update t)
+      (message "Watch mode enabled - following Claude's edits (any key to exit)"))))
+
+;; Update lock-region to notify watch mode
+(defun claude-mcp--lock-region-with-watch-notify (orig-fun buffer-name start-line end-line &optional agent-name)
+  "Advice for `claude-mcp-lock-region' to notify watch mode."
+  (let ((result (funcall orig-fun buffer-name start-line end-line agent-name)))
+    (when claude-mcp-watch-mode
+      (when-let ((buf (claude-mcp--get-buffer buffer-name)))
+        (with-current-buffer buf
+          (claude-mcp--watch-notify-lock buf (claude-mcp--line-to-pos start-line)))))
+    result))
+
+(advice-add 'claude-mcp-lock-region :around #'claude-mcp--lock-region-with-watch-notify)
+
+;; Update write-region to notify watch mode
+(defun claude-mcp--write-region-with-watch-notify (orig-fun buffer-name content)
+  "Advice for `claude-mcp-write-region' to notify watch mode."
+  (let ((result (funcall orig-fun buffer-name content)))
+    (when claude-mcp-watch-mode
+      (when-let ((buf (claude-mcp--get-buffer buffer-name)))
+        ;; Get position from the lock info that was just used
+        (with-current-buffer buf
+          (claude-mcp--watch-notify-write buf (point)))))
+    result))
+
+(advice-add 'claude-mcp-write-region :around #'claude-mcp--write-region-with-watch-notify)
+
+;; Add mode line indicator
+(defvar claude-mcp--watch-mode-line-indicator
+  '(:eval (when claude-mcp-watch-mode
+            (propertize " 👁 WATCH " 'face 'claude-mcp-watch-mode-line-face))))
+
+(add-to-list 'mode-line-misc-info claude-mcp--watch-mode-line-indicator)
 
 ;;;; REPL Integration
 

@@ -124,6 +124,10 @@ class ClaudeAgent:
     handling via the can_use_tool callback.
     """
 
+    # Tools that are blocked when running in Emacs integration mode.
+    # These bypass Emacs and break pair programming - use MCP tools instead.
+    BLOCKED_TOOLS = {"Edit", "Write"}
+
     def __init__(
         self,
         work_dir: str,
@@ -135,6 +139,7 @@ class ClaudeAgent:
         continue_session: bool = False,
         model: Optional[str] = None,
         system_prompt: Optional[str] = None,
+        block_direct_edit: bool = True,
     ):
         self.work_dir = work_dir
         self.mcp_config = mcp_config
@@ -148,6 +153,7 @@ class ClaudeAgent:
         self._continue_session = continue_session
         self._model = model
         self._system_prompt = system_prompt
+        self._block_direct_edit = block_direct_edit  # Block Edit/Write tools for Emacs integration
         self._first_message = True  # Track if this is the first message
         if log_file:
             os.makedirs(os.path.dirname(log_file), exist_ok=True)
@@ -394,6 +400,16 @@ class ClaudeAgent:
         # Try to get tool_use_id from context, or generate a unique one
         tool_use_id = getattr(context, "tool_use_id", None) or f"perm_{id(tool_input)}"
         self._log_json("PERMISSION_CHECK", {"tool": tool_name, "input": tool_input, "tool_use_id": tool_use_id})
+
+        # Block Edit/Write tools when in Emacs integration mode
+        # These bypass Emacs and break pair programming - must use MCP tools instead
+        if self._block_direct_edit and tool_name in self.BLOCKED_TOOLS:
+            self._log_json("PERMISSION_BLOCKED", {"tool": tool_name, "reason": "use_emacs_mcp"})
+            return PermissionResultDeny(
+                message=f"Tool '{tool_name}' is blocked in Emacs integration. "
+                        f"Use mcp__emacs__lock_region + mcp__emacs__write_region instead for pair programming support. "
+                        f"See claude-agent-prompt.md for details."
+            )
 
         # Always allow workflow/planning tools without prompting
         if tool_name in self.ALWAYS_SAFE_TOOLS:
@@ -835,6 +851,7 @@ async def run_agent(
     log_file: Optional[str] = None,
     model: Optional[str] = None,
     system_prompt: Optional[str] = None,
+    block_direct_edit: bool = True,
 ) -> None:
     """Run the agent, reading commands from stdin."""
     agent = ClaudeAgent(
@@ -847,6 +864,7 @@ async def run_agent(
         continue_session=continue_session,
         model=model,
         system_prompt=system_prompt,
+        block_direct_edit=block_direct_edit,
     )
 
     # Show initial session info
@@ -987,6 +1005,11 @@ def main() -> None:
         default=None,
         help="Path to file containing system prompt (for multiline prompts)",
     )
+    parser.add_argument(
+        "--no-block-direct-edit",
+        action="store_true",
+        help="Disable blocking of Edit/Write tools (allow direct file editing)",
+    )
     args = parser.parse_args()
 
     allowed_tools = None
@@ -1014,6 +1037,7 @@ def main() -> None:
             log_file=args.log_file,
             model=args.model,
             system_prompt=system_prompt,
+            block_direct_edit=not args.no_block_direct_edit,
         )
     )
 

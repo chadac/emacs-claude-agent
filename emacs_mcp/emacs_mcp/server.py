@@ -626,6 +626,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if not elisp_fn:
             raise ValueError(f"Tool {name} has no function defined")
 
+        # Auto-inject agent_name for lock_region if not provided
+        if name == "lock_region" and "agent_name" not in arguments:
+            if SESSION_BUFFER_NAME:
+                arguments["agent_name"] = SESSION_BUFFER_NAME
+
         # Extract explicit context parameters first (these are special and not passed to elisp)
         context_buffer = arguments.pop("__buffer", None)
         context_file = arguments.pop("__file", None)

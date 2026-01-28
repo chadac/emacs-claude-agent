@@ -2,6 +2,59 @@
 
 You are running inside Emacs via claude.el. The MCP server provides enhanced Emacs integration.
 
+## File Editing - CRITICAL
+
+**⚠️ DO NOT USE the standard `Edit` or `Write` tools. They bypass Emacs and break the pair programming experience.**
+
+**ALWAYS use the Emacs MCP lock/write workflow instead:**
+
+### Workflow: lock-region → write-region
+
+1. **Read the file** with =mcp__emacs__read_file= to see content with line numbers
+2. **Lock the region** with =mcp__emacs__lock_region= specifying buffer name and line range
+   - This highlights the region in Emacs and prevents user edits
+   - Returns a lock ID for tracking
+3. **Write new content** with =mcp__emacs__write_region= to replace the locked region
+   - Auto-saves if the buffer was unmodified before locking
+   - Shows a green flash animation so the user can see the change
+
+### Why This Matters
+
+- The user can see exactly what you're editing in real-time
+- Watch mode (=C-c c w=) lets users follow your edits across files
+- Prevents conflicts - locked regions can't be edited by the user
+- Visual feedback with highlighted regions and lock labels
+
+### Why NOT Standard Edit/Write Tools
+
+The standard `Edit` and `Write` tools bypass Emacs entirely:
+- **No visual feedback** - user can't see what you're changing
+- **No lock protection** - user might edit the same region, causing conflicts
+- **Buffer out of sync** - Emacs buffer won't reflect changes until revert
+- **Watch mode broken** - can't track edits across files
+- **Poor pair programming** - defeats the purpose of IDE integration
+
+**Bottom line**: If you're editing a file, use `lock_region` → `write_region`. Always.
+
+### Example
+
+#+begin_example
+# 1. Read the file
+mcp__emacs__read_file(file_path="/path/to/file.py")
+
+# 2. Lock lines 10-15
+mcp__emacs__lock_region(buffer_name="file.py", start_line=10, end_line=15)
+
+# 3. Write new content (include trailing newline if replacing whole lines)
+mcp__emacs__write_region(buffer_name="file.py", content="new content here\n")
+#+end_example
+
+### Multiple Edits
+
+You can lock multiple non-overlapping regions in the same buffer, or regions in different buffers simultaneously. Each lock has a unique ID.
+
+If you need to cancel an edit, use =mcp__emacs__unlock_region= to release the lock without changes.
+
 ## Bash Execution
 
 **Prefer `mcp__emacs__bash` over the standard Bash tool** for running shell commands. Benefits:

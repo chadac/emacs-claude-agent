@@ -76,6 +76,16 @@ claude buffer as the current buffer."
   :type 'hook
   :group 'claude-agent)
 
+(defcustom claude-mcp-system-prompt-file "claude-agent-prompt.md"
+  "Path to a file containing additional system prompt instructions for Claude.
+If set, the contents of this file are appended to Claude's system prompt.
+This is useful for project-specific instructions or pair programming guidance.
+The file path can be absolute or relative to the package directory.
+Default is \"claude-agent-prompt.md\" which includes Emacs integration guidance."
+  :type '(choice (const :tag "None" nil)
+                 (file :tag "File path"))
+  :group 'claude-agent)
+
 ;;;; Buffer-local Variables
 
 (defvar-local claude-mcp--cwd nil
@@ -267,7 +277,17 @@ WORK-DIR can be either:
          (mcp-config (claude--generate-mcp-config expanded-dir buffer-name))
          (agent-args (list "--work-dir" expanded-dir
                           "--mcp-config" mcp-config
-                          "--log-file" (expand-file-name "claude-agent.log" expanded-dir))))
+                          "--log-file" (expand-file-name "claude-agent.log" expanded-dir)))
+         ;; Resolve system prompt file path
+         (prompt-file (when claude-mcp-system-prompt-file
+                        (if (file-name-absolute-p claude-mcp-system-prompt-file)
+                            claude-mcp-system-prompt-file
+                          (expand-file-name claude-mcp-system-prompt-file
+                                           (or claude--package-dir default-directory))))))
+    ;; Add --system-prompt-file if configured
+    (when (and prompt-file (file-exists-p prompt-file))
+      (setq agent-args (append agent-args
+                               (list "--system-prompt-file" prompt-file))))
     ;; Add --resume or --continue based on args
     (when (member "--resume" args)
       (let ((session-id (cadr (member "--resume" args))))

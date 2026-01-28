@@ -521,6 +521,15 @@ Applies consistent styling to all eat-mode terminal faces."
       (use-local-map map)
       (message "Applied buffer-local keymap successfully"))))
 
+(defun claude-agent--get-agent-dir ()
+  "Get the directory containing the Python agent.
+Returns the path to the claude_agent directory, or nil if not found.
+Prefers `claude--package-dir' if set, otherwise falls back to `locate-library'."
+  (when-let ((base-dir (or claude--package-dir
+                           (when-let ((lib-file (locate-library "claude-agent")))
+                             (file-name-directory lib-file)))))
+    (expand-file-name "claude_agent" base-dir)))
+
 (defun claude--get-shell-name ()
   "Get the path to the user's shell (e.g., '/bin/zsh', '/bin/bash').
 Falls back to '/bin/sh' if SHELL environment variable is not set."

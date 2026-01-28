@@ -255,6 +255,10 @@ Press 'i' or RET in the log area to jump to input."
     ("t" "Toggle todos" claude-agent-toggle-todos
      :description (lambda () (concat "Todos "
                                      (propertize (if (bound-and-true-p claude-agent--todos-visible) "visible" "hidden")
+                                                 'face 'transient-value))))
+    ("w" "Watch edits" claude-mcp-watch-mode-toggle
+     :description (lambda () (concat "Watch "
+                                     (propertize (if (bound-and-true-p claude-mcp-watch-mode) "ON" "off")
                                                  'face 'transient-value))))]
    ["Navigation"
     ("i" "Go to input" claude-agent-goto-input)
