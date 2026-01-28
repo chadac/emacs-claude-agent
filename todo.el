@@ -49,7 +49,7 @@
   :group 'claude-agent)
 
 (defcustom org-roam-todo-worktree-directory
-  (expand-file-name "claude-worktrees" (or (getenv "XDG_DATA_HOME") "~/.local/share"))
+  (expand-file-name "worktrees" (or (getenv "XDG_DATA_HOME") "~/.local/share"))
   "Base directory for storing worktrees.
 Worktrees are created as {this-dir}/{project-name}/{branch-slug}/"
   :type 'directory
@@ -128,7 +128,7 @@ more autonomous operation.  Uses Claude Code permission pattern syntax:
   :group 'org-roam-todo)
 
 (defcustom org-roam-todo-worktree-copy-patterns
-  '(".claude/settings.local.json")
+  '(".claude/settings.local.json" ".dir-locals.el" ".envrc")
   "List of file paths (relative to project root) to copy to new worktrees.
 These files are copied after worktree creation to preserve permissions
 and settings.  Supports glob patterns like \".claude/*.json\".

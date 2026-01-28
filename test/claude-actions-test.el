@@ -24,7 +24,7 @@
 
 ;; Add parent directory to load path to find claudemacs
 (add-to-list 'load-path (file-name-directory (directory-file-name (file-name-directory load-file-name))))
-(require 'claude)
+(require 'claude-agent)
 
 ;;; Test Utilities
 

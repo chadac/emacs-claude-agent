@@ -1,2883 +1,1554 @@
-;;; claude-agent.el --- Claude interaction buffer -*- lexical-binding: t; -*-
-
-;; This file is part of Claude.
+;;; claude.el --- AI pair programming with Claude Code -*- lexical-binding: t; -*-
+;; Author: Christopher Poile <cpoile@gmail.com>
+;; Version: 0.1.0
 ;; Package-Requires: ((emacs "28.1"))
+;; Keywords: claudecode ai emacs llm ai-pair-programming tools
+;; URL: https://github.com/cpoile/claudemacs
+;; SPDX-License-Identifier: MIT
+
+;; This file is not part of GNU Emacs.
 
 ;;; Commentary:
 
-;; This module provides a single-buffer interface for interacting with Claude.
-;; The buffer is organized into distinct sections:
+;; This package integrates with Claude Code (https://docs.anthropic.com/en/docs/claude-code/overview)
+;; for AI-assisted programming in Emacs using the eat terminal emulator.
 ;;
-;; 1. Header Section: Session name (read-only)
-;; 2. Log Section: Conversation history (read-only, append-only)
-;; 3. Status Section: Model/cost/session info + thinking indicator (read-only)
-;; 4. Input Section: Header line (read-only) + editable typing area
-;;
-;; The Python agent outputs structured markers which are parsed and formatted.
+;; Inspired by Aidermacs: https://github.com/MatthewZMD/aidermacs and
+;; claude-code.el: https://github.com/stevemolitor/claude-code.el
 
 ;;; Code:
 
-(require 'ansi-color)
-(require 'org)
+;;;; Directory Detection
+(defvar claude--package-dir
+  (when load-file-name
+    (file-name-directory load-file-name))
+  "Directory where claude.el is located.
+Set at load time to avoid issues with locate-library finding wrong version.")
+
+;;;; Dependencies
+(require 'cl-lib)
+(require 'json)
 (require 'transient)
+(require 'project)
+(require 'vc-git)
+(require 'eat nil 'noerror)
+(require 'claude-pair)
 (require 'claude-mcp)
-(require 'claude-transient)
+(require 'claude-sessions)
+(require 'todo)
+(require 'claude-agent-repl)
+
+;; Declare functions from optional packages
+(declare-function safe-persp-name "perspective")
+(declare-function get-current-persp "perspective")
+(declare-function flycheck-error-message "flycheck")
+(declare-function flycheck-overlay-errors-in "flycheck")
+(declare-function projectile-project-root "projectile")
 
 ;;;; Customization
-
 (defgroup claude-agent nil
-  "Claude interaction buffer."
-  :group 'Claude)
+  "AI pair programming with Claude Code."
+  :group 'tools)
 
-(defcustom claude-agent-python-command "uv"
-  "Command to run Python for the agent wrapper."
+(defcustom claude-program "claude"
+  "The name or path of the claude-code program."
   :type 'string
   :group 'claude-agent)
 
-(defcustom claude-agent-enable-mcp t
-  "Whether to enable the Emacs MCP server for Claude sessions.
-When non-nil, Claude can interact with Emacs buffers via MCP tools.
-Requires the Emacs server to be running (`server-start')."
-  :type 'boolean
-  :group 'claude-agent)
-
-(defcustom claude-agent-disallowed-tools '()
-  "List of tools that should be disallowed for the Claude agent.
-Example: Setting to \\='(\"WebSearch\") would disable web search."
+(defcustom claude-program-switches nil
+  "List of command line switches to pass to the Claude program.
+These are passed as SWITCHES parameters to `eat-make`.
+E.g, `\'(\"--verbose\" \"--dangerously-skip-permissions\")'"
   :type '(repeat string)
   :group 'claude-agent)
 
-;;;; Faces
+(defcustom claude-auto-allow-cli-reads t
+  "Whether to automatically allow read-only claude-cli commands.
+When non-nil, Claude Code will auto-approve permissions for read-only
+claude-cli commands (get-buffer-content, get-region, list-buffers,
+buffer-info). This allows seamless integration without permission prompts
+for safe read operations.
 
-(defface claude-agent-header-face
-  '((t :foreground "#56b6c2" :slant italic))
-  "Face for the header section."
+When nil, all claude-cli commands will require explicit permission."
+  :type 'boolean
   :group 'claude-agent)
 
-(defface claude-agent-user-header-face
-  '((t :foreground "#61afef" :weight bold))
-  "Face for user message headers."
+(defcustom claude-use-mcp t
+  "Whether to use MCP (Model Context Protocol) for Emacs integration.
+When non-nil, this will load the MCP server for buffer operations,
+exposing tools like get_buffer_content, list_buffers, etc. as native MCP tools.
+
+When nil, falls back to bash-based claude-cli tools."
+  :type 'boolean
   :group 'claude-agent)
 
-(defface claude-agent-user-face
-  '((t :foreground "#c8ccd4"))  ; Slightly off-white (lighter than default)
-  "Face for user message text."
+(defcustom claude-additional-tools-files nil
+  "List of additional tools.yaml files to load for MCP tools.
+Each file should contain tool definitions in the same format as the main tools.yaml.
+Tools from additional files are merged with the built-in tools.
+
+This can be set via .dir-locals.el to provide project-specific MCP tools.
+
+Example:
+  ((nil . ((claude-additional-tools-files . (\"~/my-project/.claude-tools.yaml\")))))"
+  :type '(repeat file)
+  :safe #'listp
   :group 'claude-agent)
 
-(defface claude-agent-assistant-header-face
-  '((t :foreground "#c678dd" :weight bold))
-  "Face for assistant message headers."
+(defcustom claude-prefer-projectile-root nil
+  "Whether to prefer projectile root over git root when available.
+If non-nil and projectile is loaded, use `projectile-project-root' to
+determine the project root instead of `vc-git-root'. If projectile is
+not available or fails to find a project root, falls back to git root
+detection. This option has no effect if projectile is not installed."
+  :type 'boolean
   :group 'claude-agent)
 
-(defface claude-agent-assistant-face
-  '((t :foreground "#e5e5e5"))
-  "Face for assistant message text."
+(defcustom claude-switch-to-buffer-on-create t
+  "Whether to switch to the Claude buffer when creating a new session.
+If non-nil, automatically switch to the Claude buffer after starting.
+If nil, create the session but don't switch focus to it."
+  :type 'boolean
   :group 'claude-agent)
 
-(defface claude-agent-tool-face
-  '((t :foreground "#e5c07b" :slant italic))
-  "Face for tool call indicators."
+(defcustom claude-switch-to-buffer-on-toggle t
+  "Whether to switch to the Claude buffer when toggling to show it.
+If non-nil, switch to the Claude buffer when toggling from hidden to visible.
+If nil, show the buffer but don't switch focus to it."
+  :type 'boolean
   :group 'claude-agent)
 
-(defface claude-agent-status-face
-  '((t :foreground "#56b6c2" :slant italic))
-  "Face for status info section (model, cost, session)."
+(defcustom claude-m-return-is-submit nil
+  "Swap the behavior of RET and M-RET in Claude buffers.
+If nil (default): RET submits input, M-RET creates new line (standard behavior).
+If non-nil: M-RET submits input, RET creates new line (swapped behavior).
+
+This setting only affects Claude buffers and does not impact other
+eat buffers."
+  :type 'boolean
   :group 'claude-agent)
 
-(defface claude-agent-thinking-face
-  '((t :foreground "#98c379" :weight bold))
-  "Face for thinking indicator."
+(defcustom claude-shift-return-newline t
+  "Whether Shift-Return creates a newline in Claude buffers.
+If non-nil: S-RET acts like M-RET (creates a newline).
+If nil (default): S-RET has default behavior.
+
+This provides an alternative way to create newlines without using M-RET."
+  :type 'boolean
   :group 'claude-agent)
 
-(defface claude-agent-progress-face
-  '((t :foreground "#61afef"))
-  "Face for progress indicators."
+(defcustom claude-switch-to-buffer-on-file-add nil
+  "Whether to switch to the Claude buffer when adding file references.
+If non-nil, automatically switch to the Claude buffer after adding files.
+If nil, add the file reference but don't switch focus to it."
+  :type 'boolean
   :group 'claude-agent)
 
-(defface claude-agent-progress-header-face
-  '((t :foreground "#5c6370" :slant italic))
-  "Face for progress section header."
+(defcustom claude-use-shell-env nil
+  "Whether to run Claude through an interactive shell to load shell environment.
+If non-nil, Claude is invoked through the user's interactive shell (e.g., zsh -i -c)
+which sources rc files like .zshrc or .bashrc, making shell-configured PATH and
+environment variables available to Claude.
+If nil (default), Claude is invoked directly without shell environment loading.
+This preserves backward compatibility for users whose existing setup works correctly."
+  :type 'boolean
   :group 'claude-agent)
 
-(defface claude-agent-compacting-face
-  '((t :foreground "#e5c07b" :weight bold :slant italic))
-  "Face for compacting indicator (yellow/warning color)."
+(defcustom claude-switch-to-buffer-on-send-error nil
+  "Whether to switch to the Claude buffer when sending error fix requests.
+If non-nil, automatically switch to the Claude buffer after sending
+error fix requests. If nil, send the error fix request but don't switch
+focus to it."
+  :type 'boolean
   :group 'claude-agent)
 
-(defface claude-agent-todo-pending-face
-  '((t :foreground "#5c6370"))
-  "Face for pending todo items."
+(defcustom claude-switch-to-buffer-on-add-context t
+  "Whether to switch to the Claude buffer when adding context.
+If non-nil, automatically switch to the Claude buffer after adding context.
+If nil, add the context but don't switch focus to it."
+  :type 'boolean
   :group 'claude-agent)
 
-(defface claude-agent-todo-in-progress-face
-  '((t :foreground "#61afef" :weight bold))
-  "Face for in-progress todo items."
+(defcustom claude-notify-on-await t
+  "Whether to show a system notification when Claude Code is awaiting the user.
+When non-nil, display an OS notification popup when Claude completes a task.
+When nil, no notification is shown (silent operation)."
+  :type 'boolean
   :group 'claude-agent)
 
-(defface claude-agent-todo-completed-face
-  '((t :foreground "#98c379" :strike-through t))
-  "Face for completed todo items."
+(defcustom claude-notification-sound-mac "Submarine"
+  "The sound to use when displaying system notifications on macOS.
+
+System sounds include: `Basso', `Blow', `Bottle', `Frog', `Funk',
+`Glass', `Hero', `Morse', `Ping', `Pop', `Purr', `Sosumi', `Submarine',
+`Tink'. Or put more sounds in the `/Library/Sound' folder and use those."
+  :type 'string
   :group 'claude-agent)
 
-(defface claude-agent-error-face
-  '((t :foreground "#e06c75" :weight bold))
-  "Face for error messages."
+(defcustom claude-notification-auto-dismiss-linux t
+  "Whether to auto-dismiss notifications on Linux (don't persist to system tray).
+When non-nil, notifications will automatically disappear and not stay in the tray.
+When nil, notifications will persist in the system tray according to system defaults.
+This setting only affects Linux systems using notify-send."
+  :type 'boolean
   :group 'claude-agent)
 
-(defface claude-agent-session-face
-  '((t :foreground "#56b6c2" :slant italic))
-  "Face for session info messages."
+(defcustom claude-notification-sound-linux "bell"
+  "The sound to use when displaying system notifications on Linux.
+Uses canberra-gtk-play if available.  Common sound IDs include:
+`message-new-instant', `bell', `dialog-error', `dialog-warning'.
+When empty string, no sound is played."
+  :type 'string
   :group 'claude-agent)
 
-(defface claude-agent-input-header-face
-  '((t :foreground "#5c6370" :weight bold))
-  "Face for the input area header."
+(defcustom claude-startup-hook nil
+  "Hook run after a Claude session has finished starting up.
+This hook is called after the eat terminal is initialized, keymaps
+are set up, and bell handlers are configured. The hook functions
+are executed with the Claude buffer as the current buffer."
+  :type 'hook
   :group 'claude-agent)
 
-(defface claude-agent-diff-removed
-  '((t :inherit diff-refine-removed))
-  "Face for removed lines in diff display."
+(defface claude-repl-face
+  nil
+  "Face for Claude REPL."
   :group 'claude-agent)
 
-(defface claude-agent-diff-added
-  '((t :inherit diff-refine-added))
-  "Face for added lines in diff display."
-  :group 'claude-agent)
-
-(defface claude-agent-diff-header
-  '((t :foreground "#5c6370"))
-  "Face for diff box drawing characters."
-  :group 'claude-agent)
-
-(defface claude-agent-file-link
-  '((t :inherit link :underline t))
-  "Face for clickable file paths."
-  :group 'claude-agent)
-
-(defface claude-agent-line-number
-  '((t :foreground "#5c6370"))
-  "Face for line numbers in file content display."
-  :group 'claude-agent)
-
-
-;;;; Buffer-local variables - Section markers
-;;
-;; Buffer has 3 zones with different update semantics:
-;;
-;;   [STATIC]  - Header + completed conversation turns
-;;               Append-only, never modified after written
-;;               Ends at `static-end-marker`
-;;
-;;   [DYNAMIC] - Current in-progress turn + status bar
-;;               Fully deleted and rebuilt on each update
-;;               Content stored in variables, rendered fresh each time
-;;
-;;   [INPUT]   - User typing area
-;;               Preserved across dynamic rebuilds
-;;               Starts at `input-start-marker` (set after each rebuild)
-
-(defvar-local claude-agent--process nil
-  "The agent process for this session.")
-
-(defvar-local claude-agent--static-end-marker nil
-  "Marker for end of static section (start of dynamic section).
-Everything before this is completed content that never changes.")
-
-(defvar-local claude-agent--input-start-marker nil
-  "Marker for start of input section (where user types).
-Set fresh after each dynamic section rebuild.")
-
-;;;; Buffer-local variables - State
-
-(defvar-local claude-agent--parse-state nil
-  "Current parsing state: nil, user, assistant, tool, error, session.")
-
-(defvar-local claude-agent--pending-output ""
-  "Buffer for incomplete lines from process output.")
-
-(defvar-local claude-agent--session-info nil
-  "Plist with session info: :model :session-id :cost.")
-
-(defvar-local claude-agent--mcp-server-status nil
-  "List of MCP server status objects from the agent.
-Each element is an alist with keys: name, status.")
-
-(defvar-local claude-agent--input-history nil
-  "History of inputs sent to Claude.")
-
-(defvar-local claude-agent--input-history-index 0
-  "Current position in input history.")
-
-;;;; Buffer-local variables - Thinking status
-
-(defconst claude-agent--spinner-frames '("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
-  "Frames for the spinner animation.")
-
-
-
-(defvar-local claude-agent--spinner-index 0
-  "Current index in spinner frames.")
-
-(defvar-local claude-agent--spinner-timer nil
-  "Timer for spinner animation.")
-
-(defvar-local claude-agent--thinking-start-time nil
-  "Time when thinking started, for elapsed time display.")
-
-(defvar-local claude-agent--thinking-status nil
-  "Current thinking status text, or nil if not thinking.")
-
-(defvar-local claude-agent--input-tokens 0
-  "Input token count for current turn.")
-
-(defvar-local claude-agent--output-tokens 0
-  "Output token count for current turn.")
-
-;;;; Buffer-local variables - Progress indicators
-
-(defvar-local claude-agent--progress-indicators nil
-  "Hash table of active progress indicators.
-Keys are progress IDs, values are plists with :message and :start-time.")
-
-(defvar-local claude-agent--progress-visible t
-  "Whether the progress section is visible.")
-
-(defvar-local claude-agent--compacting nil
-  "Non-nil when the conversation is being compacted.
-This is set when Claude is summarizing the conversation history.")
-
-(defvar-local claude-agent--todos-visible t
-  "Whether the todo list section is visible.")
-
-(defvar-local claude-agent--todos nil
-  "List of current todo items.
-Each item is an alist with keys: content, status, activeForm.")
-
-(defvar-local claude-agent--has-conversation nil
-  "Non-nil if conversation has started (first message sent).")
-
-(defvar-local claude-agent--tool-results nil
-  "Alist mapping tool call positions to their results.
-Each entry is (MARKER NAME . RESULT-STRING).")
-
-(defvar-local claude-agent--pending-tools nil
-  "Hash table tracking pending tool calls by tool_use_id.
-Keys are tool_use_id strings, values are plists with:
-  :marker - buffer position marker for the tool call
-  :name - tool name string
-  :status-overlay - overlay for the status icon (○/✓/✗)")
-
-(defvar-local claude-agent--placeholder-overlay nil
-  "Overlay for the placeholder text in empty input area.")
-
-(defvar-local claude-agent--work-dir nil
-  "The working directory for this Claude session.")
-
-(defconst claude-agent--placeholder-text "Enter your message... (C-c C-c to send)"
-  "Placeholder text shown when input area is empty.")
-
-(defface claude-agent-placeholder-face
-  '((t :foreground "#5c6370" :slant italic))
-  "Face for placeholder text in empty input area."
-  :group 'claude-agent)
-
-;;;; Buffer-local variables - Input mode
-
-(defvar-local claude-agent--input-mode 'text
-  "Current input mode: `text' for normal input, `permission' for permission prompt.")
-
-(defvar-local claude-agent--saved-input ""
-  "Saved input text when switching away from text mode.")
-
-;;;; Buffer-local variables - Message queue
-
-(defvar-local claude-agent--message-queue nil
-  "List of messages queued while agent is busy. Each is a string.")
-
-
-(defface claude-agent-queued-face
-  '((t :foreground "#5c6370" :slant italic))
-  "Face for queued messages (grayed out)."
-  :group 'claude-agent)
-
-(defface claude-agent-queued-header-face
-  '((t :foreground "#5c6370" :slant italic))
-  "Face for queued message headers."
-  :group 'claude-agent)
-
-;;;; Mode definition
-
-(defvar claude-agent-mode-map
-  (let ((map (make-sparse-keymap)))
-    ;; Standard Emacs-style bindings (work everywhere)
-    (define-key map (kbd "C-c C-c") #'claude-agent-send)
-    (define-key map (kbd "C-<return>") #'claude-agent-send)
-    (define-key map (kbd "C-c C-k") #'claude-agent-interrupt)
-    (define-key map (kbd "C-c C-q") #'claude-agent-quit)
-    (define-key map (kbd "M-p") #'claude-agent-previous-input)
-    (define-key map (kbd "M-n") #'claude-agent-next-input)
-    ;; Transient menu (C-c c for "claude")
-    (define-key map (kbd "C-c c") #'claude-menu)
-    map)
-  "Keymap for `claude-agent-mode'.")
-
-(defvar claude-agent-log-mode-map
-  (let ((map (make-sparse-keymap)))
-    ;; Magit-style single-key bindings for the log/read-only area
-    ;; Model
-    (define-key map (kbd "m") #'claude-agent-set-model)
-    (define-key map (kbd "$") #'claude-agent-show-cost)
-    ;; MCP
-    (define-key map (kbd "M l") #'claude-agent-mcp-list)
-    (define-key map (kbd "M s") #'claude-agent-show-mcp-status)
-    (define-key map (kbd "M a") #'claude-agent-mcp-add)
-    (define-key map (kbd "M r") #'claude-agent-mcp-remove)
-    ;; Session control
-    (define-key map (kbd "c") #'claude-agent-compact)
-    (define-key map (kbd "C") #'claude-agent-clear)
-    (define-key map (kbd "q") #'claude-agent-quit)
-    (define-key map (kbd "k") #'claude-agent-interrupt)
-    ;; Navigation - go to input
-    (define-key map (kbd "i") #'claude-agent-goto-input)
-    (define-key map (kbd "RET") #'claude-agent-goto-input)
-    ;; Tool result viewing
-    (define-key map (kbd "'") #'claude-agent-show-tool-result)
-    (define-key map (kbd "TAB") #'claude-agent-toggle-tool-popup)
-    ;; Navigation between messages/tool calls
-    (define-key map (kbd "{") #'claude-agent-previous-section)
-    (define-key map (kbd "}") #'claude-agent-next-section)
-    ;; Help
-    (define-key map (kbd "?") #'claude-menu)
-    map)
-  "Keymap for the read-only log area in `claude-agent-mode'.
-These single-key bindings only apply outside the input area.")
-
-(define-derived-mode claude-agent-mode fundamental-mode "Claude"
-  "Major mode for Claude interaction buffer."
-  :group 'claude-agent
-  (setq-local truncate-lines nil)
-  (setq-local word-wrap t)
-  (setq-local buffer-read-only nil)
-  (visual-line-mode 1)
-  ;; Set up org-mode fontification without org-mode keybindings
-  ;; This gives us org syntax highlighting (bold, italic, code, src blocks)
-  (require 'org)
-  (org-set-font-lock-defaults)
-  (font-lock-mode 1)
-  ;; Disable flycheck and company to prevent expensive syntax parsing
-  (when (bound-and-true-p flycheck-mode)
-    (flycheck-mode -1))
-  (when (bound-and-true-p company-mode)
-    (company-mode -1))
-  ;; Ensure our keybindings are set (defvar doesn't reinit on re-eval)
-  (use-local-map claude-agent-mode-map)
-  ;; Re-define keys to ensure they're set
-  (local-set-key (kbd "C-c C-c") #'claude-agent-send)
-  (local-set-key (kbd "C-<return>") #'claude-agent-send)
-  (local-set-key (kbd "C-c C-k") #'claude-agent-interrupt)
-  (local-set-key (kbd "C-c C-q") #'claude-agent-quit)
-  (local-set-key (kbd "M-p") #'claude-agent-previous-input)
-  (local-set-key (kbd "M-n") #'claude-agent-next-input)
-  (local-set-key (kbd "C-c '") #'claude-agent-show-tool-result)
-  ;; Set up placeholder update hook
-  (add-hook 'post-command-hook #'claude-agent--post-command-hook nil t)
-  ;; Set up evil insert state entry hook to move to input area
-  ;; Use after-change-major-mode-hook to ensure evil is loaded
-  (add-hook 'evil-insert-state-entry-hook
-            #'claude-agent--on-insert-state-entry nil t)
-  ;; Add C-c c for transient menu (works in all states)
-  (local-set-key (kbd "C-c c") #'claude-menu))
-
-;;;; Helper functions
-
-(defun claude-agent--in-input-area-p ()
-  "Return t if point is in the input area."
-  (and claude-agent--input-start-marker
-       (>= (point) claude-agent--input-start-marker)))
-
-(defun claude-agent--scroll-to-bottom ()
-  "Scroll window to show maximum content with input area near bottom.
-This eliminates empty space below the input area."
-  (when-let ((win (get-buffer-window (current-buffer))))
-    (with-selected-window win
-      ;; Recenter with point near the bottom (negative arg = lines from bottom)
-      (recenter -3))))
-
-(defun claude-agent--add-tool-tooltip (marker content)
-  "Add a tooltip with CONTENT preview to the tool call at MARKER."
-  (when (and marker (marker-position marker))
-    (let* ((line-end (save-excursion
-                       (goto-char (marker-position marker))
-                       (line-end-position)))
-           ;; Truncate content for tooltip (first 500 chars, max 10 lines)
-           (preview (if (> (length content) 500)
-                        (concat (substring content 0 500) "\n...")
-                      content))
-           (preview (let ((lines (split-string preview "\n")))
-                      (if (> (length lines) 10)
-                          (concat (string-join (seq-take lines 10) "\n") "\n...")
-                        preview))))
-      ;; Create overlay for the whole tool call line
-      (let ((ov (make-overlay (marker-position marker) line-end)))
-        (overlay-put ov 'help-echo preview)
-        (overlay-put ov 'claude-agent-tooltip t)
-        (overlay-put ov 'evaporate t)))))
-
-(defun claude-agent--tool-result-is-error-p (content)
-  "Check if tool result CONTENT indicates an error."
-  (and content
-       (string-match-p
-        (rx (or (seq line-start (or "error" "Error" "ERROR"))
-                (seq line-start "<tool_use_error>")
-                (seq line-start "⚠")
-                (seq "Error:" (+ any))
-                (seq "failed" (+ any))
-                (seq "No " (or "files" "matches") " found")))
-        content)))
-
-(defun claude-agent--update-tool-status (overlay status)
-  "Update the tool status OVERLAY to show STATUS.
-STATUS should be `success' or `error'."
-  (when (and overlay (overlay-buffer overlay))
-    (let ((inhibit-read-only t)
-          (start (overlay-start overlay))
-          (end (overlay-end overlay)))
-      (save-excursion
-        (goto-char start)
-        (delete-region start end)
-        (pcase status
-          ('success
-           (insert "✓ ")
-           (move-overlay overlay start (point))
-           (overlay-put overlay 'face 'claude-agent-tool-status-success-face))
-          ('error
-           (insert "✗ ")
-           (move-overlay overlay start (point))
-           (overlay-put overlay 'face 'claude-agent-tool-status-error-face)))))))
-
-(defvar-local claude-agent--tool-popup-enabled t
-  "When non-nil, show tool result popup automatically when on a tool line.")
-
-(defvar claude-agent--tool-popup-buffer " *claude-tool-popup*"
-  "Buffer name for the tool result posframe.")
-
-(defun claude-agent-toggle-tool-popup ()
-  "Toggle automatic tool result popup display."
-  (interactive)
-  (setq claude-agent--tool-popup-enabled (not claude-agent--tool-popup-enabled))
-  (if claude-agent--tool-popup-enabled
-      (message "Tool popup enabled")
-    (claude-agent--hide-tool-popup)
-    (message "Tool popup disabled")))
-
-(defun claude-agent--hide-tool-popup ()
-  "Hide the tool result posframe."
-  (when (and (fboundp 'posframe-hide)
-             (get-buffer claude-agent--tool-popup-buffer))
-    (posframe-hide claude-agent--tool-popup-buffer)))
-
-(defface claude-agent-popup-hint-face
-  '((t :foreground "#5c6370" :slant italic))
-  "Face for hint text in tool popup."
-  :group 'claude-agent)
-
-(defun claude-agent--show-tool-popup (content)
-  "Show CONTENT in a posframe below the current line."
-  (when (fboundp 'posframe-show)
-    (let* ((max-lines 15)
-           (max-chars 1000)
-           ;; Truncate content
-           (preview (if (> (length content) max-chars)
-                        (concat (substring content 0 max-chars) "\n...")
-                      content))
-           (lines (split-string preview "\n"))
-           (preview (if (> (length lines) max-lines)
-                        (concat (string-join (seq-take lines max-lines) "\n") "\n...")
-                      preview))
-           ;; Add hints at the bottom
-           (hints "\n─────────────────────────────────\nC-c ' full result  |  TAB disable popup")
-           (full-content (concat preview hints)))
-      (posframe-show claude-agent--tool-popup-buffer
-                     :string full-content
-                     :position (line-end-position)
-                     :background-color "#1e1e1e"
-                     :foreground-color "#abb2bf"
-                     :border-color "#5c6370"
-                     :border-width 1
-                     :left-fringe 8
-                     :right-fringe 8))))
-
-(defun claude-agent--update-tool-popup ()
-  "Update tool popup based on current cursor position.
-Called from `post-command-hook'."
-  (when (and claude-agent--tool-popup-enabled
-             ;; Don't update during buffer modifications
-             (not inhibit-read-only)
-             ;; Only in claude-agent buffers
-             (eq major-mode 'claude-agent-mode))
-    (condition-case nil
-        (if-let ((result (claude-agent--find-tool-result-at-point)))
-            (let* ((name (car result))
-                   (content (cdr result))
-                   (formatter (cdr (assoc name claude-agent-tool-formatters)))
-                   (formatted (if formatter (funcall formatter content) content)))
-              (claude-agent--show-tool-popup formatted))
-          (claude-agent--hide-tool-popup))
-      ;; Silently ignore errors to prevent buffer corruption
-      (error (claude-agent--hide-tool-popup)))))
-
-(defvar claude-agent-tool-formatters
-  '(("mcp__emacs__edit" . claude-agent--format-diff-output)
-    ("Edit" . claude-agent--format-diff-output)
-    ("Write" . claude-agent--format-diff-output))
-  "Alist mapping tool names to formatter functions.
-Each formatter takes a result string and returns a propertized string.")
-
-(defun claude-agent--format-diff-output (content)
-  "Format CONTENT as a diff with colored +/- lines."
-  (let ((lines (split-string content "\n")))
-    (mapconcat
-     (lambda (line)
-       (cond
-        ((string-prefix-p "- " line)
-         (propertize line 'face 'claude-agent-diff-removed))
-        ((string-prefix-p "+ " line)
-         (propertize line 'face 'claude-agent-diff-added))
-        (t line)))
-     lines "\n")))
-
-(defun claude-agent--find-tool-result-at-point ()
-  "Find the tool result for the tool call on the current line.
-Returns (NAME . RESULT) cons or nil if not found."
-  (let ((line-start (line-beginning-position))
-        (line-end (line-end-position))
-        (result nil))
-    ;; Find a tool marker on this line
-    (dolist (entry claude-agent--tool-results)
-      (let ((marker (car entry)))
-        (when (and (marker-position marker)
-                   (>= (marker-position marker) line-start)
-                   (<= (marker-position marker) line-end))
-          (setq result entry))))
-    ;; Return (NAME . RESULT) or nil
-    (when result
-      (cons (nth 1 result) (nth 2 result)))))
-
-(defun claude-agent-show-tool-result ()
-  "Show the result of the tool call at point in a popup buffer.
-Like `org-edit-special' (C-c ') for source blocks."
-  (interactive)
-  (if-let ((result (claude-agent--find-tool-result-at-point)))
-      (let* ((name (car result))
-             (content (cdr result))
-             (formatter (cdr (assoc name claude-agent-tool-formatters)))
-             (formatted (if formatter (funcall formatter content) content))
-             (buf (get-buffer-create "*claude-tool-result*")))
-        (with-current-buffer buf
-          (let ((inhibit-read-only t))
-            (erase-buffer)
-            (insert formatted)
-            (goto-char (point-min))
-            (special-mode)))
-        (display-buffer buf '(display-buffer-below-selected
-                              (window-height . 0.4))))
-    (message "No tool result found at point")))
-
-(defun claude-agent-goto-input ()
-  "Move point to the input area."
-  (interactive)
-  (when claude-agent--input-start-marker
-    (goto-char claude-agent--input-start-marker)
-    ;; Enter insert state if using evil
-    (when (and (bound-and-true-p evil-local-mode)
-               (fboundp 'evil-insert-state))
-      (evil-insert-state))))
-
-(defun claude-agent--section-header-p ()
-  "Return non-nil if current line is a section header (message or tool call)."
-  (save-excursion
-    (beginning-of-line)
-    (or (looking-at "^you> ")
-        (looking-at "^claude> ")
-        (looking-at "^[a-z-]+/[a-z-]+›")  ; MCP tool: server/tool›
-        (looking-at "^[a-z]+›"))))          ; Built-in tool: edit›, grep›, etc.
-
-(defun claude-agent-next-section ()
-  "Move to the next message or tool call."
-  (interactive)
-  (let ((start (point)))
-    (forward-line 1)
-    (while (and (not (eobp))
-                (not (claude-agent--section-header-p))
-                (< (point) (or claude-agent--input-start-marker (point-max))))
-      (forward-line 1))
-    (if (or (eobp)
-            (>= (point) (or claude-agent--input-start-marker (point-max))))
-        (progn
-          (goto-char start)
-          (message "No more sections"))
-      (beginning-of-line))))
-
-(defun claude-agent-previous-section ()
-  "Move to the previous message or tool call."
-  (interactive)
-  (let ((start (point)))
-    (beginning-of-line)
-    (when (claude-agent--section-header-p)
-      (forward-line -1))
-    (while (and (not (bobp))
-                (not (claude-agent--section-header-p)))
-      (forward-line -1))
-    (if (bobp)
-        (if (claude-agent--section-header-p)
-            (beginning-of-line)
-          (goto-char start)
-          (message "No more sections"))
-      (beginning-of-line))))
-
-(defvar-local claude-agent--in-log-area nil
-  "Non-nil when cursor is in the log area (not input area).
-Used to track keymap state changes.")
-
-(defun claude-agent--update-keymap ()
-  "Update the active keymap based on cursor position.
-When in the log area, enable magit-style single-key bindings.
-When in the input area, use normal text input bindings."
-  (let ((in-log (not (claude-agent--in-input-area-p))))
-    (unless (eq in-log claude-agent--in-log-area)
-      (setq claude-agent--in-log-area in-log)
-      (if in-log
-          ;; Entering log area - add log keymap as minor mode map
-          (progn
-            (setq-local minor-mode-overriding-map-alist
-                        (cons (cons 'claude-agent--in-log-area claude-agent-log-mode-map)
-                              (assq-delete-all 'claude-agent--in-log-area
-                                               minor-mode-overriding-map-alist))))
-        ;; Entering input area - remove log keymap
-        (setq-local minor-mode-overriding-map-alist
-                    (assq-delete-all 'claude-agent--in-log-area
-                                     minor-mode-overriding-map-alist))))))
-
-(defmacro claude-agent--in-base-buffer (&rest body)
-  "Execute BODY in the base buffer (for polymode compatibility)."
-  `(let ((base (or (buffer-base-buffer) (current-buffer))))
-     (with-current-buffer base
-       ,@body)))
-
-;;;; Placeholder management
-
-(defun claude-agent--input-empty-p ()
-  "Return t if the input area is empty (only whitespace)."
-  (and claude-agent--input-start-marker
-       ;; string-blank-p returns match position (0) for empty, so convert to t
-       (not (null (string-blank-p (buffer-substring-no-properties
-                                   claude-agent--input-start-marker (point-max)))))))
-
-(defun claude-agent--update-placeholder ()
-  "Show or hide placeholder based on input area content."
-  (when (and claude-agent--input-start-marker
-             (marker-position claude-agent--input-start-marker))
-    (if (claude-agent--input-empty-p)
-        ;; Show placeholder at current input-start position
-        (let ((pos (marker-position claude-agent--input-start-marker)))
-          ;; Move existing overlay or create new one
-          (if (and claude-agent--placeholder-overlay
-                   (overlay-buffer claude-agent--placeholder-overlay))
-              ;; Move to new position
-              (move-overlay claude-agent--placeholder-overlay pos pos)
-            ;; Create new overlay
-            (setq claude-agent--placeholder-overlay (make-overlay pos pos))
-            (overlay-put claude-agent--placeholder-overlay 'before-string
-                         (propertize claude-agent--placeholder-text
-                                     'face 'claude-agent-placeholder-face
-                                     'cursor t))
-            (overlay-put claude-agent--placeholder-overlay 'evaporate nil)))
-      ;; Hide placeholder
-      (when (and claude-agent--placeholder-overlay
-                 (overlay-buffer claude-agent--placeholder-overlay))
-        (delete-overlay claude-agent--placeholder-overlay)
-        (setq claude-agent--placeholder-overlay nil)))))
-
-(defun claude-agent--in-insert-state-p ()
-  "Return t if evil-mode is active and in insert state."
-  (and (bound-and-true-p evil-local-mode)
-       (eq evil-state 'insert)))
-
-(defun claude-agent--on-insert-state-entry ()
-  "Hook called when entering evil insert state.
-Moves cursor to input area if currently outside it."
-  (when (and claude-agent--input-start-marker
-             (marker-position claude-agent--input-start-marker)
-             (< (point) claude-agent--input-start-marker))
-    (goto-char claude-agent--input-start-marker)))
-
-(defun claude-agent--post-command-hook ()
-  "Hook run after each command to update placeholder visibility.
-Also constrains cursor to input area when in evil insert state,
-and switches keymaps based on cursor position."
-  (claude-agent--update-placeholder)
-  ;; In insert mode, keep cursor in input area
-  (when (and claude-agent--input-start-marker
-             (marker-position claude-agent--input-start-marker)
-             (claude-agent--in-insert-state-p)
-             (< (point) claude-agent--input-start-marker))
-    (goto-char claude-agent--input-start-marker))
-  ;; If input is empty and we're in the input area, keep cursor at prompt
-  (when (and (claude-agent--input-empty-p)
-             (claude-agent--in-input-area-p)
-             claude-agent--input-start-marker)
-    (goto-char claude-agent--input-start-marker))
-  ;; Switch keymaps based on position (magit-style in log area)
-  (claude-agent--update-keymap)
-  ;; Update tool result popup
-  (claude-agent--update-tool-popup))
-
-;;;; Section management
-;;
-;; Two-zone architecture:
-;; - Static section: Append-only (header + conversation log)
-;; - Dynamic section: Re-rendered from state (status bar + input area)
-
-(defun claude-agent--init-buffer (session-name)
-  "Initialize buffer with section structure for SESSION-NAME."
-  (let ((inhibit-read-only t))
-    (erase-buffer)
-
-    ;; === HEADER (part of static section) ===
-    (let ((start (point)))
-      (insert "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
-      (insert (format " Claude Session: %s\n" session-name))
-      (insert "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
-      (claude-agent--apply-face start (point) 'claude-agent-header-face)
-      ;; Mark as fontified to prevent org-mode font-lock from interfering
-      (put-text-property start (point) 'fontified t))
-
-    ;; === STATIC END MARKER ===
-    ;; Everything before this is committed content that never changes
-    (setq claude-agent--static-end-marker (point-marker))
-    (set-marker-insertion-type claude-agent--static-end-marker nil)
-
-    ;; === INPUT START MARKER ===
-    ;; Set initially at same position, will be updated by rebuild
-    (setq claude-agent--input-start-marker (point-marker))
-    (set-marker-insertion-type claude-agent--input-start-marker nil)
-
-    ;; Show placeholder and position cursor
-    (claude-agent--update-placeholder)
-    (goto-char claude-agent--input-start-marker)
-
-    ;; Make everything before input read-only
-    (claude-agent--update-read-only)))
-
-(defun claude-agent--apply-face (start end face)
-  "Apply FACE to region from START to END using overlay."
-  (let ((ov (make-overlay start end)))
-    (overlay-put ov 'face face)
-    (overlay-put ov 'priority 100)
-    (overlay-put ov 'evaporate t)
-    (overlay-put ov 'claude-agent-styled t))
-  ;; Also apply to indirect buffers (polymode)
-  (let ((base (current-buffer)))
-    (dolist (buf (buffer-list))
-      (when (and (buffer-live-p buf)
-                 (eq (buffer-base-buffer buf) base))
-        (with-current-buffer buf
-          (let ((ov (make-overlay start end)))
-            (overlay-put ov 'face face)
-            (overlay-put ov 'priority 100)
-            (overlay-put ov 'evaporate t)
-            (overlay-put ov 'claude-agent-styled t)))))))
-
-(defun claude-agent--update-read-only ()
-  "Update read-only text property to cover everything before prompt marker.
-Optimized to only modify the dynamic section, not the entire buffer."
-  ;; Use text properties for read-only (overlays don't enforce read-only)
-  (when (and claude-agent--input-start-marker
-             (> (marker-position claude-agent--input-start-marker) (point-min)))
-    ;; Only remove read-only from the dynamic section (after static-end).
-    ;; The static section already has read-only applied and doesn't change.
-    ;; This is O(dynamic-section-size) instead of O(buffer-size).
-    (when (and claude-agent--static-end-marker
-               (marker-position claude-agent--static-end-marker))
-      (remove-list-of-text-properties
-       claude-agent--static-end-marker (point-max)
-       '(read-only rear-nonsticky)))
-    ;; Apply read-only to everything before prompt, with rear-nonsticky
-    ;; so text inserted at the boundary is NOT read-only.
-    ;; Note: This still applies to the full static section, but add-text-properties
-    ;; is fast when properties already exist (it's a no-op for unchanged regions).
-    (add-text-properties (point-min) claude-agent--input-start-marker
-                         '(read-only t rear-nonsticky (read-only)))))
-
-;;;; Dynamic section management
-;;
-;; Two-zone architecture:
-;; - Static section: Append-only log content (header + conversation)
-;; - Dynamic section: Re-rendered from state (status bar + input area)
-;;
-;; `append-to-static` appends to the static section directly.
-;; `render-dynamic-section` clears and re-renders dynamic section from state.
-
-(defun claude-agent--get-input-text ()
-  "Get the current text in the input area."
-  (if (and claude-agent--input-start-marker
-           (marker-position claude-agent--input-start-marker))
-      (buffer-substring-no-properties
-       claude-agent--input-start-marker (point-max))
-    ""))
-
-(defun claude-agent--append-to-static (text)
-  "Append TEXT to the static section and re-render dynamic section.
-This is a convenience wrapper for `append-to-log' without styling."
-  (claude-agent--append-to-log text nil nil))
-
-(defun claude-agent--render-dynamic-section ()
-  "Render the dynamic section (status bar + input area).
-Clears everything after static-end-marker and re-renders from state.
-Handles different input modes: text input vs permission prompt."
-  (let* ((inhibit-read-only t)
-         ;; Only save cursor offset if in text mode
-         (cursor-offset (when (and (eq claude-agent--input-mode 'text)
-                                   claude-agent--input-start-marker
-                                   (marker-position claude-agent--input-start-marker)
-                                   (>= (point) claude-agent--input-start-marker))
-                          (- (point) claude-agent--input-start-marker)))
-         ;; Only capture input if in text mode (permission mode uses saved-input)
-         (input-to-restore (if (eq claude-agent--input-mode 'text)
-                               (claude-agent--get-input-text)
-                             "")))
-    ;; Clear overlays in dynamic section
-    (when (and claude-agent--static-end-marker
-               (marker-position claude-agent--static-end-marker))
-      (dolist (ov (overlays-in claude-agent--static-end-marker (point-max)))
-        (when (or (overlay-get ov 'claude-agent-styled)
-                  (overlay-get ov 'claude-permission-face))
-          (delete-overlay ov)))
-      ;; Delete everything from static-end to end of buffer
-      (delete-region claude-agent--static-end-marker (point-max)))
-
-    ;; Position at start of dynamic section
-    (goto-char (or claude-agent--static-end-marker (point-max)))
-
-    ;; === INSERT STATUS BAR ===
-    (when claude-agent--has-conversation
-      (claude-agent--insert-status-bar))
-
-    ;; === RENDER INPUT AREA BASED ON MODE ===
-    (pcase claude-agent--input-mode
-      ('text
-       ;; Normal text input mode
-       (setq claude-agent--input-start-marker (point-marker))
-       (set-marker-insertion-type claude-agent--input-start-marker nil)
-       (unless (string-empty-p input-to-restore)
-         (insert input-to-restore))
-       ;; Update read-only and placeholder
-       (claude-agent--update-read-only)
-       (claude-agent--update-placeholder)
-       ;; Restore cursor position within input area
-       (if (and cursor-offset (>= cursor-offset 0))
-           (goto-char (min (+ claude-agent--input-start-marker cursor-offset)
-                           (point-max)))
-         (goto-char claude-agent--input-start-marker))
-       ;; Scroll to show maximum content - put input near bottom
-       (claude-agent--scroll-to-bottom))
-
-      ('empty
-       ;; Empty mode - clear input area and switch to text mode
-       ;; This discards any saved input and starts fresh
-       (setq claude-agent--saved-input "")
-       (setq claude-agent--input-mode 'text)
-       (setq claude-agent--input-start-marker (point-marker))
-       (set-marker-insertion-type claude-agent--input-start-marker nil)
-       ;; Update read-only and placeholder (will show placeholder since empty)
-       (claude-agent--update-read-only)
-       (claude-agent--update-placeholder)
-       (goto-char claude-agent--input-start-marker))
-
-      ('permission
-       ;; Permission prompt mode - render the permission dialog (legacy, replaces input)
-       (setq claude-agent--input-start-marker (point-marker))
-       (claude-agent--render-permission-content)
-       (claude-agent--update-read-only))
-
-      ('text-with-permission
-       ;; Combined mode: permission dialog ABOVE preserved text input
-       ;; First render the permission dialog
-       (claude-agent--render-permission-content)
-       ;; Add separator before input area
-       (insert "\n")
-       ;; Now render the text input area
-       (setq claude-agent--input-start-marker (point-marker))
-       (set-marker-insertion-type claude-agent--input-start-marker nil)
-       (unless (string-empty-p input-to-restore)
-         (insert input-to-restore))
-       ;; Update read-only and placeholder
-       (claude-agent--update-read-only)
-       (claude-agent--update-placeholder)
-       ;; Restore cursor position within input area
-       (if (and cursor-offset (>= cursor-offset 0))
-           (goto-char (min (+ claude-agent--input-start-marker cursor-offset)
-                           (point-max)))
-         (goto-char claude-agent--input-start-marker))))))
-
-;;;; Status bar rendering
-
-(defun claude-agent--format-elapsed-time (start-time)
-  "Format elapsed time since START-TIME as Xm Ys."
-  (let* ((elapsed (float-time (time-subtract (current-time) start-time)))
-         (minutes (floor (/ elapsed 60)))
-         (seconds (floor (mod elapsed 60))))
-    (if (> minutes 0)
-        (format "%dm%ds" minutes seconds)
-      (format "%ds" seconds))))
-
-(defun claude-agent--insert-status-bar ()
-  "Insert the status bar content at point.
-Called by `render-dynamic-section'. Assumes point is positioned correctly."
-  ;; === Thinking indicator (if active) ===
-  (when claude-agent--thinking-status
-    (let ((start (point))
-          (spinner (nth claude-agent--spinner-index
-                        claude-agent--spinner-frames))
-          (elapsed (if claude-agent--thinking-start-time
-                       (claude-agent--format-elapsed-time
-                        claude-agent--thinking-start-time)
-                     "0s"))
-          (tokens (format "(+%d/-%d)"
-                          claude-agent--input-tokens
-                          claude-agent--output-tokens)))
-      (insert (format "\n%s %s %s %s (C-c C-k to interrupt)\n"
-                      spinner
-                      claude-agent--thinking-status
-                      elapsed
-                      tokens))
-      (claude-agent--apply-face start (point)
-                                (if claude-agent--compacting
-                                    'claude-agent-compacting-face
-                                  'claude-agent-thinking-face))))
-
-  ;; === Compacting indicator (standalone, when not also thinking) ===
-  (when (and claude-agent--compacting (not claude-agent--thinking-status))
-    (let ((start (point))
-          (spinner (nth claude-agent--spinner-index
-                        claude-agent--spinner-frames)))
-      (insert (format "\n%s 📦 Compacting conversation...\n" spinner))
-      (claude-agent--apply-face start (point) 'claude-agent-compacting-face)))
-
-  ;; === Progress indicators (if any and visible) ===
-  (when (and claude-agent--progress-indicators
-             claude-agent--progress-visible
-             (> (hash-table-count claude-agent--progress-indicators) 0))
-    (maphash
-     (lambda (_id info)
-       (let* ((label (plist-get info :label))
-              (percent (or (plist-get info :percent) 0))
-              (start-time (plist-get info :start-time))
-              (elapsed (if start-time
-                           (claude-agent--format-elapsed-time start-time)
-                         ""))
-              (bar-width 30)
-              (filled (round (* bar-width (/ (min (max percent 0) 100.0) 100.0))))
-              (empty (- bar-width filled)))
-         ;; Insert label with percentage and elapsed time
-         (let ((start (point)))
-           (insert (format "\n  %s (%d%%) %s\n"
-                           (or label "Working...")
-                           (round percent)
-                           elapsed))
-           (claude-agent--apply-face start (point) 'claude-agent-progress-face))
-         ;; Insert progress bar
-         (let ((start (point)))
-           (insert (format "  ▐%s%s▌\n"
-                           (make-string filled ?█)
-                           (make-string empty ?░)))
-           (claude-agent--apply-face start (point) 'claude-agent-progress-face))))
-     claude-agent--progress-indicators))
-
-  ;; === Todo list (if any active and visible) ===
-  ;; Hide when all todos are completed
-  (let ((has-active-todos (and claude-agent--todos
-                               (seq-some (lambda (todo)
-                                           (let ((status (cdr (assq 'status todo))))
-                                             (not (equal status "completed"))))
-                                         claude-agent--todos))))
-    (when (and has-active-todos claude-agent--todos-visible)
-      (insert "\n")
-      (dolist (todo claude-agent--todos)
-        (let* ((content (cdr (assq 'content todo)))
-               (status (cdr (assq 'status todo)))
-               (active-form (cdr (assq 'activeForm todo)))
-               (checkbox (pcase status
-                           ("completed" "[X]")
-                           ("in_progress" "[-]")
-                           (_ "[ ]")))
-               (face (pcase status
-                       ("completed" 'claude-agent-todo-completed-face)
-                       ("in_progress" 'claude-agent-todo-in-progress-face)
-                       (_ 'claude-agent-todo-pending-face)))
-               (text (if (equal status "in_progress")
-                         (or active-form content)
-                       content))
-               (start (point)))
-          (insert (format "  - %s %s\n" checkbox text))
-          (claude-agent--apply-face start (point) face)))))
-
-  ;; === Queued messages (if any) ===
-  (when claude-agent--message-queue
-    (dolist (msg (reverse claude-agent--message-queue))
-      (let ((msg-start (point)))
-        (insert "\n┄┄┄ Queued ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n")
-        (claude-agent--apply-face msg-start (point) 'claude-agent-queued-header-face)
-        (setq msg-start (point))
-        (let ((lines (split-string msg "\n")))
-          (dolist (line lines)
-            (insert "  " line "\n")))
-        (claude-agent--apply-face msg-start (point) 'claude-agent-queued-face))))
-
-  ;; === Status info line ===
-  (let* ((model (or (plist-get claude-agent--session-info :model) "..."))
-         (cost (or (plist-get claude-agent--session-info :cost) 0))
-         (session-id (or (plist-get claude-agent--session-info :session-id) "..."))
-         (status-text (format " Model: %s  |  Cost: $%.4f  |  Session: %s "
-                              model cost
-                              (if (> (length session-id) 8)
-                                  (substring session-id 0 8)
-                                session-id)))
-         (bar-length (length status-text))
-         (bar (make-string bar-length ?━))
-         (start (point)))
-    (insert "\n")
-    (insert bar "\n")
-    (insert status-text "\n")
-    (insert bar "\n")
-    (insert "\n")
-    (claude-agent--apply-face start (point) 'claude-agent-header-face)))
-
-(defun claude-agent--spinner-tick ()
-  "Advance spinner and update in-place (lightweight)."
-  (when claude-agent--thinking-status
-    (setq claude-agent--spinner-index
-          (mod (1+ claude-agent--spinner-index)
-               (length claude-agent--spinner-frames)))
-    ;; Only update the spinner/elapsed time, don't rebuild everything
-    (claude-agent--update-spinner-display)))
-
-(defun claude-agent--update-spinner-display ()
-  "Update spinner and elapsed time in-place without full rebuild."
-  (when (and claude-agent--thinking-status
-             claude-agent--static-end-marker
-             (marker-position claude-agent--static-end-marker))
-    (let ((inhibit-read-only t)
-          (spinner (nth claude-agent--spinner-index
-                        claude-agent--spinner-frames))
-          (elapsed (if claude-agent--thinking-start-time
-                       (claude-agent--format-elapsed-time
-                        claude-agent--thinking-start-time)
-                     "0s"))
-          (tokens (format "(+%d/-%d)"
-                          claude-agent--input-tokens
-                          claude-agent--output-tokens)))
-      (save-excursion
-        ;; Find the thinking indicator line (starts after static-end-marker)
-        (goto-char claude-agent--static-end-marker)
-        ;; Skip the first newline
-        (when (looking-at "\n")
-          (forward-char 1))
-        ;; Now we should be at the start of the spinner line
-        (when (looking-at ".*?\\(C-c C-k to interrupt\\)")
-          (let ((line-start (point))
-                (line-end (line-end-position)))
-            ;; Replace the line
-            (delete-region line-start line-end)
-            (insert (format "%s %s %s %s (C-c C-k to interrupt)"
-                            spinner
-                            claude-agent--thinking-status
-                            elapsed
-                            tokens))
-            ;; Reapply the face
-            (claude-agent--apply-face line-start (point) 'claude-agent-thinking-face)))))))
-
-(defun claude-agent--set-thinking (status)
-  "Set thinking STATUS, or clear if nil."
-  ;; Cancel existing timer
-  (when claude-agent--spinner-timer
-    (cancel-timer claude-agent--spinner-timer)
-    (setq claude-agent--spinner-timer nil))
-
-  (setq claude-agent--thinking-status status)
-
-  (if status
-      (progn
-        ;; Start timing if not already
-        (unless claude-agent--thinking-start-time
-          (setq claude-agent--thinking-start-time (current-time)))
-        ;; Start spinner timer
-        (setq claude-agent--spinner-timer
-              (run-with-timer 0.1 0.1 #'claude-agent--spinner-tick)))
-    ;; Clear timing when done
-    (setq claude-agent--thinking-start-time nil))
-
-  ;; Rebuild dynamic section (handles cursor positioning)
-  (claude-agent--render-dynamic-section))
-
-;;;; Content helpers
-
-(defun claude-agent--count-diff-lines (old-string new-string)
-  "Count lines removed and added from OLD-STRING and NEW-STRING.
-Returns a cons cell (REMOVED . ADDED)."
-  (let ((removed (if (and old-string (not (string-empty-p old-string)))
-                     (length (split-string old-string "\n"))
-                   0))
-        (added (if (and new-string (not (string-empty-p new-string)))
-                   (length (split-string new-string "\n"))
-                 0)))
-    (cons removed added)))
-
-(defun claude-agent--format-diff-content (old-string new-string)
-  "Format OLD-STRING and NEW-STRING as a diff string for storage.
-Returns a string with - and + prefixed lines."
-  (let ((result ""))
-    ;; Old lines (removed)
-    (when (and old-string (not (string-empty-p old-string)))
-      (dolist (line (split-string old-string "\n"))
-        (setq result (concat result "- " line "\n"))))
-    ;; New lines (added)
-    (when (and new-string (not (string-empty-p new-string)))
-      (dolist (line (split-string new-string "\n"))
-        (setq result (concat result "+ " line "\n"))))
-    result))
-
-(defun claude-agent--format-write-content (content)
-  "Format CONTENT as diff-like output for Write tool popup.
-Returns a string with + prefixed lines (all additions)."
-  (let ((result ""))
-    (when (and content (not (string-empty-p content)))
-      (dolist (line (split-string content "\n"))
-        (setq result (concat result "+ " line "\n"))))
-    result))
-
-(defun claude-agent--insert-diff (file-path old-string new-string)
-  "Insert a diff display for FILE-PATH with OLD-STRING and NEW-STRING.
-Inserts directly at point with proper faces and clickable link."
-  (let ((inhibit-read-only t))
-    ;; Tool header in new terse format (using overlays to survive font-lock)
-    (let ((start (point)))
-      (insert "edit")
-      (claude-agent--apply-face start (point) 'claude-agent-tool-name-face))
-    (let ((start (point)))
-      (insert "› ")
-      (claude-agent--apply-face start (point) 'claude-agent-tool-arrow-face))
-    (insert-text-button file-path
-                        'action (lambda (_btn)
-                                  (find-file-other-window
-                                   (button-get _btn 'file-path)))
-                        'file-path file-path
-                        'face 'claude-agent-tool-file-face
-                        'help-echo "Click to open file"
-                        'follow-link t)
-    (insert "\n")
-    ;; Old lines (removed)
-    (when (and old-string (not (string-empty-p old-string)))
-      (dolist (line (split-string old-string "\n"))
-        (let ((line-start (point)))
-          (insert "- " line "\n")
-          (claude-agent--apply-face line-start (point) 'claude-agent-diff-removed))))
-    ;; New lines (added)
-    (when (and new-string (not (string-empty-p new-string)))
-      (dolist (line (split-string new-string "\n"))
-        (let ((line-start (point)))
-          (insert "+ " line "\n")
-          (claude-agent--apply-face line-start (point) 'claude-agent-diff-added))))))
-
-(defun claude-agent--insert-edit-summary (file-path old-string new-string)
-  "Insert a compact edit summary for FILE-PATH with line counts.
-Shows format: ✓ edit› filename.el (+N/-M)
-The full diff is stored in tool-results for popup display."
-  (let* ((inhibit-read-only t)
-         (counts (claude-agent--count-diff-lines old-string new-string))
-         (removed (car counts))
-         (added (cdr counts))
-         (filename (file-name-nondirectory file-path))
-         (summary (format "%s (+%d/-%d)" filename added removed)))
-    ;; Status icon (edits are considered successful when rendered)
-    (let ((icon-start (point)))
-      (insert "✓ ")
-      (let ((ov (make-overlay icon-start (point))))
-        (overlay-put ov 'face 'claude-agent-tool-status-success-face)
-        (overlay-put ov 'priority 100)
-        (overlay-put ov 'claude-tool-status t)
-        (overlay-put ov 'evaporate t)))
-    ;; Tool header
-    (let ((start (point)))
-      (insert "edit")
-      (claude-agent--apply-face start (point) 'claude-agent-tool-name-face))
-    (let ((start (point)))
-      (insert "› ")
-      (claude-agent--apply-face start (point) 'claude-agent-tool-arrow-face))
-    ;; Clickable filename with line counts
-    (insert-text-button summary
-                        'action (lambda (_btn)
-                                  (find-file-other-window
-                                   (button-get _btn 'file-path)))
-                        'file-path file-path
-                        'face 'claude-agent-tool-file-face
-                        'help-echo "Click to open file, hover for diff preview"
-                        'follow-link t)
-    (insert "\n")))
-
-(defface claude-agent-tool-name-face
-  '((t :foreground "#e5c07b" :weight bold))
-  "Face for tool names in tool calls (orange, like headers)."
-  :group 'claude-agent)
-
-(defface claude-agent-tool-arrow-face
-  '((t :foreground "#e5c07b"))
-  "Face for the arrow separator in tool calls."
-  :group 'claude-agent)
-
-(defface claude-agent-tool-cmd-face
-  '((t :foreground "#abb2bf"))
-  "Face for command text in tool calls."
-  :group 'claude-agent)
-
-(defface claude-agent-tool-file-face
-  '((t :foreground "#61afef"))
-  "Face for file paths in tool calls."
-  :group 'claude-agent)
-
-(defface claude-agent-tool-pattern-face
-  '((t :foreground "#98c379"))
-  "Face for patterns (glob, grep) in tool calls."
-  :group 'claude-agent)
-
-(defface claude-agent-tool-continuation-face
-  '((t :foreground "#5c6370"))
-  "Face for continuation markers in multi-line tool calls."
-  :group 'claude-agent)
-
-(defface claude-agent-tool-status-pending-face
-  '((t :foreground "#e5c07b"))
-  "Face for pending tool status icon (yellow circle)."
-  :group 'claude-agent)
-
-(defface claude-agent-tool-status-success-face
-  '((t :foreground "#98c379"))
-  "Face for successful tool status icon (green checkmark)."
-  :group 'claude-agent)
-
-(defface claude-agent-tool-status-error-face
-  '((t :foreground "#e06c75"))
-  "Face for error tool status icon (red X)."
-  :group 'claude-agent)
-
-(defun claude-agent--format-bash-multiline (command)
-  "Format a multi-line bash COMMAND with pipe continuations."
-  (let ((lines (split-string command "\n")))
-    (if (= (length lines) 1)
-        ;; Single line - just return propertized command
-        (propertize command 'face 'claude-agent-tool-cmd-face)
-      ;; Multi-line - add continuation markers
-      (let ((result ""))
-        (dotimes (i (length lines))
-          (let ((line (nth i lines)))
-            (if (= i 0)
-                (setq result (concat result (propertize line 'face 'claude-agent-tool-cmd-face) "\n"))
-              (setq result (concat result
-                                   (propertize "   │ " 'face 'claude-agent-tool-continuation-face)
-                                   (propertize line 'face 'claude-agent-tool-cmd-face)
-                                   "\n")))))
-        ;; Remove trailing newline since caller adds it
-        (substring result 0 -1)))))
-
-(defun claude-agent--format-tool-name (tool-name)
-  "Format TOOL-NAME for display.
-Converts MCP tools like 'mcp__emacs__reload_file' to 'emacs/reload-file'."
-  (if (string-prefix-p "mcp__" tool-name)
-      ;; MCP tool: mcp__server__tool_name -> server/tool-name
-      (let* ((without-prefix (substring tool-name 5))  ; Remove "mcp__"
-             (parts (split-string without-prefix "__"))
-             (server (car parts))
-             (tool (mapconcat #'identity (cdr parts) "_")))
-        (concat server "/" (replace-regexp-in-string "_" "-" tool)))
-    ;; Regular tool: just lowercase
-    (downcase tool-name)))
-
-(defun claude-agent--insert-tool-call (tool-name args-string &optional tool-use-id)
-  "Insert a tool call display for TOOL-NAME with ARGS-STRING.
-Uses terse format: ○ toolname› args with appropriate faces.
-The status icon (○) is updated to ✓ or ✗ when tool result arrives.
-TOOL-USE-ID is the unique identifier for this tool invocation."
-  (let* ((inhibit-read-only t)
-         (tool-lower (claude-agent--format-tool-name tool-name))
-         (saved-input (claude-agent--get-input-text))
-         (cursor-offset (when (and claude-agent--input-start-marker
-                                   (marker-position claude-agent--input-start-marker)
-                                   (>= (point) claude-agent--input-start-marker))
-                          (- (point) claude-agent--input-start-marker)))
-         (tool-marker nil)
-         (status-overlay nil))
-    ;; Delete dynamic section
-    (delete-region claude-agent--static-end-marker (point-max))
-    (goto-char claude-agent--static-end-marker)
-    ;; Mark position for this tool call
-    (setq tool-marker (copy-marker (point)))
-
-    ;; Insert pending status icon with overlay for later update
-    (let ((icon-start (point)))
-      (insert "○ ")
-      (setq status-overlay (make-overlay icon-start (point)))
-      (overlay-put status-overlay 'face 'claude-agent-tool-status-pending-face)
-      (overlay-put status-overlay 'priority 100)
-      (overlay-put status-overlay 'claude-tool-status t)
-      (overlay-put status-overlay 'evaporate t))
-
-    ;; Insert tool name with overlay (survives font-lock)
-    (let ((start (point)))
-      (insert tool-lower)
-      (claude-agent--apply-face start (point) 'claude-agent-tool-name-face))
-    ;; Insert arrow with overlay
-    (let ((start (point)))
-      (insert "› ")
-      (claude-agent--apply-face start (point) 'claude-agent-tool-arrow-face))
-    ;; Insert args with overlay based on tool type
-    (let ((start (point))
-          (face (cond
-                 ((string= tool-name "Bash") nil)
-                 ((member tool-name '("Read" "Write" "Edit")) 'claude-agent-tool-file-face)
-                 ((member tool-name '("Glob" "Grep")) 'claude-agent-tool-pattern-face)
-                 (t 'claude-agent-tool-cmd-face))))
-      (if (string= tool-name "Bash")
-          (insert (claude-agent--format-bash-multiline args-string))
-        (insert args-string))
-      (when face
-        (claude-agent--apply-face start (point) face)))
-    (insert "\n")
-
-    ;; Update static marker
-    (set-marker claude-agent--static-end-marker (point))
-
-    ;; Rebuild dynamic section
-    (when claude-agent--has-conversation
-      (claude-agent--insert-status-bar))
-    (setq claude-agent--input-start-marker (point-marker))
-    (insert saved-input)
-    (claude-agent--update-read-only)
-    (claude-agent--update-placeholder)
-    (goto-char (if (and cursor-offset (>= cursor-offset 0))
-                   (min (+ claude-agent--input-start-marker cursor-offset) (point-max))
-                 claude-agent--input-start-marker))
-    ;; Register in pending-tools hash table if we have a tool-use-id
-    (when tool-use-id
-      (unless claude-agent--pending-tools
-        (setq claude-agent--pending-tools (make-hash-table :test 'equal)))
-      (puthash tool-use-id
-               (list :marker tool-marker
-                     :name tool-name
-                     :status-overlay status-overlay)
-               claude-agent--pending-tools))
-    ;; Return tool info for callers that need it
-    (list :marker tool-marker
-          :name tool-name
-          :status-overlay status-overlay)))
-
-(defun claude-agent--insert-tool-result-start ()
-  "Insert the start of a tool result section."
-  (claude-agent--append-to-log " #+begin_example\n" nil " "))
-
-(defun claude-agent--insert-tool-result-end ()
-  "Insert the end of a tool result section."
-  (claude-agent--append-to-log " #+end_example\n" nil))
-
-(defun claude-agent--insert-bash-tool (command)
-  "Insert a Bash tool call with COMMAND."
-  ;; Just use the standard tool call format, no special src block
-  (claude-agent--insert-tool-call "Bash" command))
-
-(defvar-local claude-agent--current-read-file nil
-  "File path for current Read tool being displayed.")
-
-(defun claude-agent--insert-read-tool (file-path)
-  "Insert a Read tool call with FILE-PATH."
-  (setq claude-agent--current-read-file file-path)
-  ;; Just use the standard tool call format
-  (claude-agent--insert-tool-call "Read" file-path))
-
-(defun claude-agent--format-read-line (line)
-  "Format a LINE from Read tool output with prettier line numbers.
-Input format: '     N→content' where N is line number."
-  (if (string-match "^\\( *\\)\\([0-9]+\\)→\\(.*\\)$" line)
-      (let ((line-num (match-string 2 line))
-            (content (match-string 3 line)))
-        (cons (format "%4s│ " line-num) content))
-    ;; Not a numbered line, return as-is
-    (cons nil line)))
-
-(defun claude-agent--insert-read-content (content)
-  "Insert Read tool CONTENT with formatted line numbers.
-Expects content in the format from Claude's Read tool."
-  (let* ((inhibit-read-only t)
-         (saved-input (if (eq claude-agent--input-mode 'text)
-                          (claude-agent--get-input-text)
-                        claude-agent--saved-input))
-         (cursor-offset (when (and (eq claude-agent--input-mode 'text)
-                                   claude-agent--input-start-marker
-                                   (marker-position claude-agent--input-start-marker)
-                                   (>= (point) claude-agent--input-start-marker))
-                          (- (point) claude-agent--input-start-marker)))
-         (lines (split-string content "\n"))
-         ;; Remove trailing empty lines
-         (trimmed-lines (let ((result lines))
-                          (while (and result (string-empty-p (car (last result))))
-                            (setq result (butlast result)))
-                          result)))
-    ;; Delete dynamic section
-    (delete-region claude-agent--static-end-marker (point-max))
-    (goto-char claude-agent--static-end-marker)
-    ;; Insert each line with formatted line numbers
-    (dolist (line trimmed-lines)
-      (let ((parsed (claude-agent--format-read-line line)))
-        (if (car parsed)
-            ;; Line with number
-            (progn
-              (let ((num-start (point)))
-                (insert " " (car parsed))
-                (claude-agent--apply-face num-start (point) 'claude-agent-line-number))
-              (insert (cdr parsed) "\n"))
-          ;; Plain line (no number)
-          (insert " " (cdr parsed) "\n"))))
-    ;; Update static marker
-    (set-marker claude-agent--static-end-marker (point))
-    ;; Rebuild dynamic section
-    (when claude-agent--has-conversation
-      (claude-agent--insert-status-bar))
-    (setq claude-agent--input-start-marker (point-marker))
-    (insert saved-input)
-    (claude-agent--update-read-only)
-    (claude-agent--update-placeholder)
-    (goto-char (if (and cursor-offset (>= cursor-offset 0))
-                   (min (+ claude-agent--input-start-marker cursor-offset) (point-max))
-                 claude-agent--input-start-marker))))
-
-(defun claude-agent--append-to-log (text &optional face virtual-indent)
-  "Append TEXT to the static section (conversation log).
-If FACE is non-nil, apply it as an overlay to the inserted text.
-If VIRTUAL-INDENT is non-nil, apply it as line-prefix/wrap-prefix."
-  ;; We need to apply face/indent to the text being inserted.
-  ;; Since append-to-static does complex operations, we'll handle styling here.
-  (let* ((inhibit-read-only t)
-         ;; In permission mode, use saved-input; in text mode, capture current input
-         (saved-input (if (eq claude-agent--input-mode 'text)
-                          (claude-agent--get-input-text)
-                        claude-agent--saved-input))
-         (cursor-offset (when (and (eq claude-agent--input-mode 'text)
-                                   claude-agent--input-start-marker
-                                   (marker-position claude-agent--input-start-marker)
-                                   (>= (point) claude-agent--input-start-marker))
-                          (- (point) claude-agent--input-start-marker))))
-    ;; Delete everything from static-end to end
-    (delete-region claude-agent--static-end-marker (point-max))
-    ;; Insert new static content with styling
-    (goto-char claude-agent--static-end-marker)
-    (let ((start (point)))
-      (insert text)
-      ;; Apply face overlay if specified
-      (when face
-        (claude-agent--apply-face start (point) face))
-      ;; Apply virtual indent if specified
-      (when virtual-indent
-        (put-text-property start (point) 'line-prefix virtual-indent)
-        (put-text-property start (point) 'wrap-prefix virtual-indent))
-      ;; Mark as fontified to prevent org-mode font-lock from interfering
-      (put-text-property start (point) 'fontified t))
-    (set-marker claude-agent--static-end-marker (point))
-    ;; Insert status bar
-    (when claude-agent--has-conversation
-      (claude-agent--insert-status-bar))
-    ;; Set input marker and restore input
-    (setq claude-agent--input-start-marker (point-marker))
-    (insert saved-input)
-    ;; Finalize
-    (claude-agent--update-read-only)
-    (claude-agent--update-placeholder)
-    ;; Restore cursor
-    (goto-char (if (and cursor-offset (>= cursor-offset 0))
-                   (min (+ claude-agent--input-start-marker cursor-offset) (point-max))
-                 claude-agent--input-start-marker))))
-
-;;;; Process filter - parsing NDJSON messages
-
-(defun claude-agent--process-filter (proc output)
-  "Process filter for agent PROC handling OUTPUT."
-  (let ((buf (process-buffer proc)))
-    (when (buffer-live-p buf)
-      (with-current-buffer buf
-        (claude-agent--handle-output output)))))
-
-(defun claude-agent--handle-output (output)
-  "Handle OUTPUT from the agent process, parsing NDJSON messages."
-  (setq claude-agent--pending-output
-        (concat claude-agent--pending-output output))
-
-  ;; Process complete lines (each line is a JSON message)
-  (while (string-match "\n" claude-agent--pending-output)
-    (let ((line (substring claude-agent--pending-output 0 (match-beginning 0))))
-      (setq claude-agent--pending-output
-            (substring claude-agent--pending-output (match-end 0)))
-      (claude-agent--process-json-line line))))
-
-(defun claude-agent--process-json-line (line)
-  "Process a single LINE of NDJSON output."
-  (when (and line (not (string-empty-p (string-trim line))))
-    (condition-case err
-        (let* ((msg (json-read-from-string line))
-               (msg-type (cdr (assq 'type msg))))
-          (claude-agent--dispatch-message msg-type msg))
-      (json-readtable-error
-       (message "Claude agent: Invalid JSON: %s" line))
-      (error
-       (message "Claude agent: Error processing message: %s" (error-message-string err))))))
-
-(defun claude-agent--dispatch-message (msg-type msg)
-  "Dispatch message MSG based on MSG-TYPE."
-  (pcase msg-type
-    ;; Ready - clear thinking, send queued messages
-    ("ready"
-     (claude-agent--set-thinking nil)
-     (when claude-agent--message-queue
-       (claude-agent--send-next-queued)))
-
-    ;; Session start
-    ("session_start"
-     nil)  ; Handled by buffer init
-
-    ;; Session info - update model/session-id
-    ("session_info"
-     (when-let ((model (cdr (assq 'model msg))))
-       (setq claude-agent--session-info
-             (plist-put claude-agent--session-info :model model)))
-     (when-let ((session-id (cdr (assq 'session_id msg))))
-       (setq claude-agent--session-info
-             (plist-put claude-agent--session-info :session-id session-id)))
-     (claude-agent--render-dynamic-section))
-
-    ;; Thinking status
-    ("thinking"
-     (let ((status (cdr (assq 'status msg))))
-       (unless claude-agent--thinking-start-time
-         (setq claude-agent--input-tokens 0
-               claude-agent--output-tokens 0
-               claude-agent--thinking-start-time (current-time)))
-       (claude-agent--set-thinking (or status "Thinking..."))))
-
-    ;; Progress - update token counts
-    ("progress"
-     (when-let ((input (cdr (assq 'input_tokens msg))))
-       (setq claude-agent--input-tokens input))
-     (when-let ((output (cdr (assq 'output_tokens msg))))
-       (setq claude-agent--output-tokens output)))
-
-    ;; Result - update cost
-    ("result"
-     (when-let ((cost (cdr (assq 'cost_usd msg))))
-       (setq claude-agent--session-info
-             (plist-put claude-agent--session-info :cost cost)))
-     ;; Clear compacting status on result
-     (setq claude-agent--compacting nil)
-     (claude-agent--render-dynamic-section))
-
-    ;; Compacting - conversation is being summarized
-    ("compacting"
-     (let ((status (cdr (assq 'status msg))))
-       (if (equal status "start")
-           (progn
-             (setq claude-agent--compacting t)
-             (claude-agent--append-to-log
-              "\n📦 Compacting conversation history...\n"
-              'claude-agent-compacting-face))
-         ;; status is "end" or similar
-         (setq claude-agent--compacting nil))
-       (claude-agent--render-dynamic-section)))
-
-    ;; Todo update - update todo list display
-    ("todo_update"
-     (let ((todos (cdr (assq 'todos msg))))
-       ;; Convert vector to list if needed (JSON arrays come as vectors)
-       (setq claude-agent--todos (if (vectorp todos)
-                                     (append todos nil)
-                                   todos))
-       (claude-agent--render-dynamic-section)))
-
-    ;; MCP status
-    ("mcp_status"
-     (let ((servers (cdr (assq 'servers msg))))
-       (setq claude-agent--mcp-server-status servers)
-       (let ((failed (seq-filter
-                      (lambda (s) (not (equal (cdr (assq 'status s)) "connected")))
-                      servers)))
-         (when failed
-           (claude-agent--append-to-log
-            (format "\n⚠ MCP server issue: %s\n"
-                    (mapconcat (lambda (s)
-                                 (format "%s (%s)"
-                                         (cdr (assq 'name s))
-                                         (cdr (assq 'status s))))
-                               failed ", "))
-            'claude-agent-error-face)))))
-
-    ;; Permission request
-    ("permission_request"
-     (claude-agent--set-thinking "Awaiting permission...")
-     (claude-agent--show-permission-prompt msg))
-
-    ;; Permission granted (informational)
-    ("permission_granted"
-     nil)  ; Could show notification if desired
-
-    ;; User message start
-    ("user_start"
-     (setq claude-agent--parse-state 'user)
-     (setq claude-agent--has-conversation t)
-     (claude-agent--append-to-log "you> " 'claude-agent-user-header-face))
-
-    ;; User message text
-    ("user_text"
-     (let ((text (cdr (assq 'text msg))))
-       (claude-agent--append-to-log (concat text "\n") 'claude-agent-user-face "  ")))
-
-    ;; User message end
-    ("user_end"
-     (setq claude-agent--parse-state nil))
-
-    ;; Assistant message start
-    ("assistant_start"
-     (setq claude-agent--parse-state 'assistant)
-     (claude-agent--append-to-log "claude> " 'claude-agent-assistant-header-face))
-
-    ;; Assistant message text
-    ("assistant_text"
-     (let ((text (cdr (assq 'text msg))))
-       (claude-agent--append-to-log (concat text "\n") nil "  ")))
-
-    ;; Assistant message end
-    ("assistant_end"
-     (setq claude-agent--parse-state nil))
-
-    ;; Tool call - all tools use the same simple format now
-    ("tool_call"
-     (let* ((name (cdr (assq 'name msg)))
-            (input (cdr (assq 'input msg)))
-            (tool-use-id (cdr (assq 'tool_use_id msg)))
-            (args-str (claude-agent--format-tool-input-for-display name input)))
-       (setq claude-agent--parse-state 'tool)
-       ;; Insert tool call and register in pending-tools hash table
-       (claude-agent--insert-tool-call name args-str tool-use-id)))
-
-    ;; Tool result - store for later viewing with C-c ' and add tooltip
-    ("tool_result"
-     (let* ((content (cdr (assq 'content msg)))
-            (tool-use-id (cdr (assq 'tool_use_id msg)))
-            (tool-info (and tool-use-id claude-agent--pending-tools
-                            (gethash tool-use-id claude-agent--pending-tools)))
-            (tool-marker (plist-get tool-info :marker))
-            (tool-name (plist-get tool-info :name))
-            (status-overlay (plist-get tool-info :status-overlay)))
-       (when (and tool-marker content)
-         (push (list tool-marker tool-name content)
-               claude-agent--tool-results)
-         ;; Update status icon based on whether result indicates error
-         (when status-overlay
-           (claude-agent--update-tool-status
-            status-overlay
-            (if (claude-agent--tool-result-is-error-p content) 'error 'success)))
-         ;; Add tooltip to the tool call line
-         (claude-agent--add-tool-tooltip tool-marker content))))
-
-    ;; Tool end - clean up from pending-tools
-    ("tool_end"
-     (let ((tool-use-id (cdr (assq 'tool_use_id msg))))
-       (when (and tool-use-id claude-agent--pending-tools)
-         (remhash tool-use-id claude-agent--pending-tools)))
-     (setq claude-agent--parse-state nil)
-     (claude-agent--set-thinking "Thinking..."))
-
-    ;; Edit tool (compact summary display with diff in popup)
-    ("edit_tool"
-     (let* ((file-path (cdr (assq 'file_path msg)))
-            (old-string (cdr (assq 'old_string msg)))
-            (new-string (cdr (assq 'new_string msg)))
-            (tool-use-id (cdr (assq 'tool_use_id msg)))
-            (tool-marker nil))
-       (setq claude-agent--parse-state 'tool)
-       (claude-agent--set-thinking (format "Editing: %s" (file-name-nondirectory file-path)))
-       ;; Format diff content for storage in tool-results
-       (let ((diff-content (claude-agent--format-diff-content old-string new-string)))
-         ;; Insert compact summary instead of full diff
-         (let* ((inhibit-read-only t)
-                (saved-input (claude-agent--get-input-text))
-                (cursor-offset (when (and claude-agent--input-start-marker
-                                          (marker-position claude-agent--input-start-marker)
-                                          (>= (point) claude-agent--input-start-marker))
-                                 (- (point) claude-agent--input-start-marker))))
-           (delete-region claude-agent--static-end-marker (point-max))
-           (goto-char claude-agent--static-end-marker)
-           ;; Track marker position before inserting
-           (setq tool-marker (copy-marker (point)))
-           (claude-agent--insert-edit-summary file-path old-string new-string)
-           (set-marker claude-agent--static-end-marker (point))
-           ;; Store in tool-results for popup viewing
-           (push (list tool-marker "Edit" diff-content)
-                 claude-agent--tool-results)
-           ;; Register in pending-tools hash table if we have a tool-use-id
-           (when tool-use-id
-             (unless claude-agent--pending-tools
-               (setq claude-agent--pending-tools (make-hash-table :test 'equal)))
-             (puthash tool-use-id
-                      (list :marker tool-marker
-                            :name "Edit"
-                            :status-overlay nil)  ; edit_tool uses different display
-                      claude-agent--pending-tools))
-           ;; Add tooltip to the summary line
-           (claude-agent--add-tool-tooltip tool-marker diff-content)
-           (when claude-agent--has-conversation
-             (claude-agent--insert-status-bar))
-           (setq claude-agent--input-start-marker (point-marker))
-           (insert saved-input)
-           (claude-agent--update-read-only)
-           (claude-agent--update-placeholder)
-           (goto-char (if (and cursor-offset (>= cursor-offset 0))
-                          (min (+ claude-agent--input-start-marker cursor-offset) (point-max))
-                        claude-agent--input-start-marker))))))
-
-    ;; Write tool (compact display with content stored for popup)
-    ("write_tool"
-     (let* ((file-path (cdr (assq 'file_path msg)))
-            (content (cdr (assq 'content msg)))
-            (tool-use-id (cdr (assq 'tool_use_id msg)))
-            (write-content (claude-agent--format-write-content content))
-            (tool-info nil))
-       (setq claude-agent--parse-state 'tool)
-       (claude-agent--set-thinking (format "Writing: %s" (file-name-nondirectory file-path)))
-       ;; Insert compact tool call line - returns tool info plist
-       (setq tool-info (claude-agent--insert-tool-call "Write" file-path tool-use-id))
-       ;; Store in tool-results for popup viewing
-       (push (list (plist-get tool-info :marker) "Write" write-content)
-             claude-agent--tool-results)
-       ;; Add tooltip
-       (claude-agent--add-tool-tooltip (plist-get tool-info :marker) write-content)))
-
-    ;; Session message (system notifications)
-    ("session_message_start"
-     (setq claude-agent--parse-state 'session))
-
-    ("session_message_text"
-     (let ((text (cdr (assq 'text msg))))
-       (claude-agent--append-to-log (concat text "\n") 'claude-agent-session-face)))
-
-    ("session_message_end"
-     (setq claude-agent--parse-state nil))
-
-    ;; Error
-    ("error"
-     (let ((message-text (cdr (assq 'message msg)))
-           (traceback (cdr (assq 'traceback msg))))
-       (claude-agent--append-to-log
-        (format "\n⚠ Error: %s\n" message-text)
-        'claude-agent-error-face)
-       (when traceback
-         (claude-agent--append-to-log
-          (format "Traceback:\n%s\n" traceback)
-          'claude-agent-error-face))))
-
-    ;; Unknown message type
-    (_
-     (message "Claude agent: Unknown message type: %s" msg-type))))
-
-(defun claude-agent--format-tool-input-for-display (tool-name tool-input)
-  "Format TOOL-INPUT for display based on TOOL-NAME."
+;;;; Buffer-local Variables
+(defvar-local claude--cwd nil
+  "Buffer-local variable storing the current working directory for this Claude session.")
+
+(defvar-local claude--session-id nil
+  "Buffer-local variable storing the session ID (UUID) for this Claude session.
+Used to resume the correct session when restarting agents with custom names.")
+
+;;;;
+;;;; Utility Functions
+;;;;
+
+(defun claude--project-root (&optional dir)
+  "Get the project root, optionally preferring projectile if enabled.
+If DIR is given, use it as the starting location.
+When `claude-prefer-projectile-root' is enabled and projectile is 
+available, tries `projectile-project-root' first. Falls back to 
+`vc-git-root', then to the directory itself."
+  (let ((loc (or dir 
+                 (when (buffer-file-name)
+                   (file-name-directory (buffer-file-name)))
+                 default-directory)))
+    (or 
+     ;; Try projectile first if enabled and available
+     (when (and claude-prefer-projectile-root
+                (fboundp 'projectile-project-root))
+       (condition-case nil
+         (let ((proj-root (projectile-project-root)))
+           (when (and proj-root (file-directory-p proj-root))
+             proj-root))
+         (error nil)))
+     ;; Fallback to vc-git-root
+     (vc-git-root loc)
+     ;; Final fallback to location itself
+     loc)))
+
+(defun claude--session-id ()
+  "Return an identifier for the current Claude session.
+If a workspace is active (checking various workspace packages),
+use its name, otherwise fall back to the project root."
   (cond
-   ((member tool-name '("Read" "Write" "Edit"))
-    (cdr (assq 'file_path tool-input)))
-   ((string= tool-name "Bash")
-    (cdr (assq 'command tool-input)))
-   ((string= tool-name "Glob")
-    (cdr (assq 'pattern tool-input)))
-   ((string= tool-name "Grep")
-    (let ((pattern (cdr (assq 'pattern tool-input)))
-          (path (cdr (assq 'path tool-input))))
-      (if path (format "%s, %s" pattern path) pattern)))
-   ((string= tool-name "WebFetch")
-    (cdr (assq 'url tool-input)))
-   ((string= tool-name "Task")
-    (cdr (assq 'description tool-input)))
+   ;; Doom Emacs workspace
+   ((and (fboundp '+workspace-current-name)
+         (let ((ws (+workspace-current-name)))
+           (and ws (stringp ws) (not (string-empty-p ws)))))
+    (+workspace-current-name))
+   ;; Perspective mode
+   ((and (and (fboundp 'safe-persp-name) (fboundp 'get-current-persp))
+         (let ((ws (safe-persp-name (get-current-persp))))
+           (and ws (stringp ws) (not (string-empty-p ws)))))
+    (safe-persp-name (get-current-persp)))
+   ;; Fall back to project root
+   (t (file-truename (claude--project-root)))))
+
+(defun claude--get-buffer-name ()
+  "Generate the Claude buffer name based on workspace session ID."
+  (format "*claude:%s*" (claude--session-id)))
+
+(defun claude--get-buffer ()
+  "Return existing Claude buffer for current session."
+  (get-buffer (claude--get-buffer-name)))
+
+(defun claude--is-claude-buffer-p (&optional buffer)
+  "Return t if BUFFER (or current buffer) is a Claude buffer."
+  (let ((buf (or buffer (current-buffer))))
+    (and (buffer-live-p buf)
+         (string-match-p "^\\*claude:" (buffer-name buf)))))
+
+(defun claude--parse-buffer-name (buffer-name)
+  "Parse Claude buffer name into components.
+Buffer name format:
+  *claude:/path/to/dir* or
+  *claude:/path/to/dir:agent-name*
+Returns cons cell (directory . agent-name) or (directory . nil)."
+  (when (string-match "^\\*claude:\\([^:*]+\\)\\(?::\\([^*]+\\)\\)?\\*$" buffer-name)
+    (let ((dir (match-string 1 buffer-name))
+          (agent (match-string 2 buffer-name)))
+      (cons dir agent))))
+
+(defun claude--switch-to-buffer ()
+  "Switch to the Claude buffer for current session.
+Returns t if switched successfully, nil if no buffer exists."
+  (if-let* ((buffer (claude--get-buffer)))
+      (progn
+        (with-current-buffer buffer
+          (if (not eat-terminal)
+              (error "Claude session exists but no eat-terminal found. Please kill *claude:...* buffer and re-start")
+            (let ((process (eat-term-parameter eat-terminal 'eat--process)))
+              (if (not (and process (process-live-p process)))
+                (error "Claude session exists but process is not running. Please kill *claude:...* buffer and re-start")))))
+        ;; we have a running eat-terminal
+        (display-buffer buffer)
+        (select-window (get-buffer-window buffer))
+        t)
+    nil))
+
+(defun claude--get-flycheck-errors-on-line ()
+  "Get all flycheck errors on the current line."
+  (when (and (bound-and-true-p flycheck-mode)
+             (fboundp 'flycheck-overlay-errors-in))
+    (let ((line-start (line-beginning-position))
+          (line-end (line-end-position)))
+      (flycheck-overlay-errors-in line-start line-end))))
+
+(defun claude--format-flycheck-errors (errors)
+  "Format flycheck ERRORS for display to Claude."
+  (cond
+   ((null errors) "")
+   ((= 1 (length errors))
+    (flycheck-error-message (car errors)))
+   ((<= (length errors) 3)
+    (format "(%d errors: %s)"
+            (length errors)
+            (mapconcat (lambda (err) (flycheck-error-message err))
+                      errors "; ")))
    (t
-    (let ((first-val (cdar tool-input)))
-      (if first-val
-          (format "%s" first-val)
-        "")))))
+    (format "(%d errors including: %s; ...)"
+            (length errors)
+            (mapconcat (lambda (err) (flycheck-error-message err))
+                      (seq-take errors 2) "; ")))))
 
-;;;; Permission prompt UI
+;;;; Terminal Integration
+;; Eat terminal emulator functions
+(declare-function eat-make "eat")
+(declare-function eat-term-send-string "eat")
+(declare-function eat-term-input-event "eat")
+(declare-function eat-kill-process "eat")
+(declare-function eat-term-parameter "eat")
+(declare-function setf "cl-lib")
 
-(defvar-local claude-agent--permission-data nil
-  "Current permission request data being displayed.")
+;;;; Bell Handling
+(defun claude--bell-handler (terminal)
+  "Handle bell events from Claude Code in TERMINAL.
+This function is called when Claude Code sends a bell character."
+  (ignore terminal)
+  (when claude-notify-on-await
+    (claude--system-notification "Claude Code finished and is awaiting your input")))
 
-(defvar-local claude-agent--permission-queue nil
-  "Queue of pending permission requests waiting to be shown.
-Each element is permission data (an alist with tool_use_id, tool_name, tool_input).")
 
-(defvar-local claude-agent--permission-selection 0
-  "Currently selected option in permission prompt (0-3).")
+(defun claude--system-notification (message &optional title)
+  "Show a system notification with MESSAGE and optional TITLE.
+This works across macOS, Linux, and Windows platforms."
+  (let ((title (or title "Claude"))
+        (message (or message "Claude is finished and awaiting your input")))
+    (cond
+     ;; macOS
+     ((eq system-type 'darwin)
+      (call-process "osascript" nil nil nil
+                    "-e" (format "display notification \"%s\" with title \"%s\" sound name \"%s\""
+                                message title claude-notification-sound-mac)))
+     ;; Linux with notify-send and canberra-gtk-play
+     ((and (eq system-type 'gnu/linux)
+           (executable-find "notify-send"))
+      (let ((args (if claude-notification-auto-dismiss-linux
+                      (list "--hint=int:transient:1" title message)
+                    (list title message))))
+        (apply #'call-process "notify-send" nil nil nil args))
+      (when (and (not (string-empty-p claude-notification-sound-linux))
+                 (executable-find "canberra-gtk-play"))
+        (call-process "canberra-gtk-play" nil nil nil
+                      "--id" claude-notification-sound-linux)))
+     ;; Linux with kdialog (KDE)
+     ((and (eq system-type 'gnu/linux)
+           (executable-find "kdialog"))
+      (call-process "kdialog" nil nil nil "--passivepopup"
+                    (format "%s: %s" title message) "3"))
+     ;; Windows with PowerShell
+     ((eq system-type 'windows-nt)
+      (call-process "powershell" nil nil nil
+                    "-Command" 
+                    (format "[System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms'); [System.Windows.Forms.MessageBox]::Show('%s', '%s')"
+                            message title)))
+     ;; Fallback: show in Emacs message area
+     (t (message "%s: %s" title message)))))
 
-(defface claude-agent-permission-box-face
-  '((t :foreground "#e5c07b" :background "#3e4451" :box (:line-width 1 :color "#5c6370")))
-  "Face for permission dialog box."
-  :group 'claude-agent)
+(defun claude--setup-eat-integration (buffer &optional retry-count)
+  "Set up eat integration (keymap and bell handler) for BUFFER.
+Retries using RETRY-COUNT up to 10 times if eat is not ready yet."
+  (let ((retry-count (or retry-count 0)))
+    (if (and (buffer-live-p buffer)
+             (with-current-buffer buffer
+               (and (boundp 'eat-terminal) eat-terminal)))
+        ;; Eat is ready, set up integration
+        (progn
+          (message "Eat is ready, setting up integrations")
+          (with-current-buffer buffer
+            (claude--setup-buffer-keymap)
+            (claude-setup-bell-handler buffer)
+            ;; Run startup hook after setup is complete
+            (run-hooks 'claude-startup-hook)))
+      ;; Eat not ready yet, retry if we haven't exceeded max attempts
+      (when (< retry-count 10)
+        (message "Eat not ready yet, retrying in 0.5s (attempt %d/10)" (1+ retry-count))
+        (run-with-timer 0.5 nil
+                        (lambda ()
+                          (claude--setup-eat-integration buffer (1+ retry-count))))))))
 
-(defface claude-agent-permission-selected-face
-  '((t :foreground "#282c34" :background "#61afef" :weight bold))
-  "Face for selected option in permission dialog."
-  :group 'claude-agent)
-
-(defface claude-agent-permission-option-face
-  '((t :foreground "#abb2bf"))
-  "Face for unselected options in permission dialog."
-  :group 'claude-agent)
-
-(defun claude-agent--format-tool-input (tool-name tool-input)
-  "Format TOOL-INPUT for display based on TOOL-NAME."
-  (cond
-   ((string= tool-name "Read")
-    (cdr (assq 'file_path tool-input)))
-   ((string= tool-name "Write")
-    (cdr (assq 'file_path tool-input)))
-   ((string= tool-name "Edit")
-    (cdr (assq 'file_path tool-input)))
-   ((string= tool-name "Bash")
-    (cdr (assq 'command tool-input)))
-   (t (format "%s" tool-input))))
-
-(defun claude-agent--generate-permission-pattern (tool-name tool-input scope)
-  "Generate permission pattern for TOOL-NAME with TOOL-INPUT at SCOPE level."
-  (pcase scope
-    ('once
-     (pcase tool-name
-       ("Read" (format "Read(%s)" (cdr (assq 'file_path tool-input))))
-       ("Write" (format "Write(%s)" (cdr (assq 'file_path tool-input))))
-       ("Edit" (format "Edit(%s)" (cdr (assq 'file_path tool-input))))
-       ("Bash" (format "Bash(%s)" (cdr (assq 'command tool-input))))
-       (_ (format "%s" tool-name))))
-    ('session
-     (pcase tool-name
-       ("Read" (format "Read(%s)" (cdr (assq 'file_path tool-input))))
-       ("Write" (format "Write(%s)" (cdr (assq 'file_path tool-input))))
-       ("Edit" (format "Edit(%s)" (cdr (assq 'file_path tool-input))))
-       ("Bash"
-        (let* ((cmd (cdr (assq 'command tool-input)))
-               (first-word (car (split-string cmd))))
-          (format "Bash(%s:*)" first-word)))
-       (_ (format "%s(*)" tool-name))))
-    ('always
-     (pcase tool-name
-       ("Read"
-        (let* ((path (cdr (assq 'file_path tool-input)))
-               (dir (file-name-directory path)))
-          (format "Read(%s*)" (or dir "/"))))
-       ("Write"
-        (let* ((path (cdr (assq 'file_path tool-input)))
-               (dir (file-name-directory path)))
-          (format "Write(%s*)" (or dir "/"))))
-       ("Edit"
-        (let* ((path (cdr (assq 'file_path tool-input)))
-               (dir (file-name-directory path)))
-          (format "Edit(%s*)" (or dir "/"))))
-       ("Bash"
-        (let* ((cmd (cdr (assq 'command tool-input)))
-               (first-word (car (split-string cmd))))
-          (format "Bash(%s:*)" first-word)))
-       (_ (format "%s(*)" tool-name))))))
-
-(defvar-local claude-agent--permission-overlay-specs nil
-  "List of (start end face) specs for permission dialog overlays.")
-
-(defun claude-agent--apply-permission-overlays ()
-  "Apply permission overlays in the current buffer using saved specs."
-  (when claude-agent--permission-overlay-specs
-    ;; Remove existing permission overlays in this buffer
-    (dolist (ov (overlays-in (point-min) (point-max)))
-      (when (overlay-get ov 'claude-permission-face)
-        (delete-overlay ov)))
-    ;; Apply new overlays
-    (dolist (spec claude-agent--permission-overlay-specs)
-      (let ((ov (make-overlay (nth 0 spec) (nth 1 spec))))
-        (overlay-put ov 'face (nth 2 spec))
-        (overlay-put ov 'priority 1000)
-        (overlay-put ov 'evaporate nil)
-        (overlay-put ov 'claude-permission-face t)))))
-
-(defun claude-agent--render-permission-content ()
-  "Insert the permission dialog content at point.
-Called by `render-dynamic-section' when in permission mode.
-Uses compact inline format when in text-with-permission mode."
-  (when claude-agent--permission-data
-    (let* ((tool-name (cdr (assq 'tool_name claude-agent--permission-data)))
-           (tool-input (cdr (assq 'tool_input claude-agent--permission-data)))
-           (input-str (claude-agent--format-tool-input tool-name tool-input))
-           (sel claude-agent--permission-selection)
-           (inhibit-read-only t)
-           (compact (eq claude-agent--input-mode 'text-with-permission))
-           (overlay-specs nil))
-      ;; Helper to insert and record overlay spec
-      (cl-flet ((insert-styled (text face)
-                  (let ((start (point)))
-                    (insert text)
-                    (push (list start (point) face) overlay-specs))))
-        (if compact
-            ;; Compact 3-line format for inline display
-            (let ((short-options '("once" "session" "always" "deny")))
-              ;; Line 1: Tool being requested
-              (insert-styled "⚡ " 'claude-agent-session-face)
-              (insert-styled (format "%s(%s)" tool-name input-str) 'claude-agent-tool-face)
-              (insert "\n")
-              ;; Line 2: Options as inline buttons
-              (insert "  ")
-              (dotimes (i 4)
-                (let* ((selected (= i sel))
-                       (label (nth i short-options))
-                       (face (if selected
-                                 'claude-agent-permission-selected-face
-                               'claude-agent-permission-option-face)))
-                  (insert-styled (format "[%d:%s]" (1+ i) label) face)
-                  (when (< i 3) (insert " "))))
-              (insert "\n")
-              ;; Line 3: Hint
-              (insert-styled "  ↑↓ navigate, RET confirm, C-1..C-4 direct, C-g deny" 'claude-agent-session-face)
-              (insert "\n"))
-          ;; Full format for standalone permission mode
-          (let ((options '("Allow once" "Allow for this session" "Always allow" "Deny")))
-            ;; Header
-            (insert-styled "── Permission Request " 'claude-agent-input-header-face)
-            (insert-styled (make-string 40 ?─) 'claude-agent-input-header-face)
-            (insert "\n")
-            ;; Tool info
-            (insert-styled " Claude wants to run:\n" 'claude-agent-session-face)
-            (insert-styled (format " %s(%s)\n\n" tool-name input-str) 'claude-agent-tool-face)
-            ;; Options
-            (dotimes (i 4)
-              (let* ((selected (= i sel))
-                     (checkbox (if selected "[X]" "[ ]"))
-                     (label (nth i options))
-                     (face (if selected
-                               'claude-agent-permission-selected-face
-                             'claude-agent-permission-option-face)))
-                (insert-styled (format " %d. %s %s\n" (1+ i) checkbox label) face)))
-            ;; Footer
-            (insert-styled (make-string 62 ?─) 'claude-agent-input-header-face)
-            (insert "\n"))))
-      ;; Save overlay specs and apply
-      (setq claude-agent--permission-overlay-specs (nreverse overlay-specs))
-      (claude-agent--apply-permission-overlays)
-      ;; Apply in indirect buffers too
-      (let ((base (current-buffer)))
-        (dolist (buf (buffer-list))
-          (when (and (buffer-live-p buf)
-                     (eq (buffer-base-buffer buf) base))
-            (with-current-buffer buf
-              (setq claude-agent--permission-overlay-specs
-                    (buffer-local-value 'claude-agent--permission-overlay-specs base))
-              (claude-agent--apply-permission-overlays))))))))
-
-(defun claude-agent--render-permission-dialog ()
-  "Re-render the permission dialog (updates selection state).
-This is called when the user navigates options."
-  (claude-agent--render-dynamic-section))
-
-(defun claude-agent--show-permission-prompt (data)
-  "Show permission prompt for DATA above the input area.
-Saves current input text and shows dialog while preserving input.
-If a permission dialog is already showing, queue this request."
-  (if claude-agent--permission-data
-      ;; Already showing a permission prompt - queue this one
-      (progn
-        (push data claude-agent--permission-queue)
-        (claude-agent--set-thinking
-         (format "Awaiting permission... (%d queued)"
-                 (length claude-agent--permission-queue))))
-    ;; No current permission prompt - show this one
-    ;; Save current input text before switching modes
-    (setq claude-agent--saved-input (claude-agent--get-input-text))
-    ;; Set permission state
-    (setq claude-agent--permission-data data)
-    (setq claude-agent--permission-selection 0)
-    ;; Switch to combined mode: permission dialog + text input preserved
-    (setq claude-agent--input-mode 'text-with-permission)
-    ;; Render the dialog (which now uses render-dynamic-section)
-    (claude-agent--render-permission-dialog)
-    ;; Set up keyboard navigation
-    (claude-agent--setup-permission-keymap)))
-
-(defun claude-agent--show-next-queued-permission ()
-  "Show the next queued permission request, if any."
-  (when claude-agent--permission-queue
-    (let ((next-data (pop claude-agent--permission-queue)))
-      ;; Show the next permission prompt
-      (setq claude-agent--permission-data next-data)
-      (setq claude-agent--permission-selection 0)
-      (setq claude-agent--input-mode 'text-with-permission)
-      (claude-agent--render-permission-dialog)
-      (claude-agent--setup-permission-keymap)
-      (when claude-agent--permission-queue
-        (claude-agent--set-thinking
-         (format "Awaiting permission... (%d queued)"
-                 (length claude-agent--permission-queue)))))))
-
-(defun claude-agent--permission-select-next ()
-  "Move selection down in permission dialog."
+;;;###autoload
+(defun claude-setup-bell-handler (&optional buffer)
+  "Set up or re-setup the completion notification handler for BUFFER.
+If BUFFER is not specified, uses the current buffer if it's a Claude buffer,
+otherwise finds the buffer using `claude--get-buffer'.
+Use this if system notifications aren't working after starting a session."
   (interactive)
-  (claude-agent--in-base-buffer
-   (when claude-agent--permission-data
-     (setq claude-agent--permission-selection
-           (mod (1+ claude-agent--permission-selection) 4))
-     (claude-agent--render-permission-dialog))))
+  (let ((target-buffer (or buffer
+                           (when (claude--is-claude-buffer-p)
+                             (current-buffer))
+                           (claude--get-buffer))))
+    (when target-buffer
+      (with-current-buffer target-buffer
+        (when (boundp 'eat-terminal)
+          (setf (eat-term-parameter eat-terminal 'ring-bell-function)
+                #'claude--bell-handler)
+          (message "Bell handler configured for Claude session"))))))
 
-(defun claude-agent--permission-select-prev ()
-  "Move selection up in permission dialog."
+(defun claude--setup-repl-faces ()
+  "Setup faces for the Claude REPL buffer.
+Applies consistent styling to all eat-mode terminal faces."
+  
+  ;; Helper function to remap a face to inherit from claude-repl-face
+  (cl-flet ((remap-face (face &rest props)
+              (apply #'face-remap-add-relative face :inherit 'claude-repl-face props)))
+    
+    ;; Set buffer default face
+    (buffer-face-set :inherit 'claude-repl-face)
+    
+    ;; Remap all eat terminal faces to inherit from claude-repl-face
+    (mapc #'remap-face
+          '(eat-shell-prompt-annotation-running
+            eat-shell-prompt-annotation-success
+            eat-shell-prompt-annotation-failure
+            eat-term-bold eat-term-faint eat-term-italic
+            eat-term-slow-blink eat-term-fast-blink))
+    
+    ;; Remap font faces (eat-term-font-0 through eat-term-font-9)
+    (dotimes (i 10)
+      (remap-face (intern (format "eat-term-font-%d" i))))
+    
+    ;; Specific overrides
+    (face-remap-add-relative 'nobreak-space :underline nil)
+    (remap-face 'eat-term-faint :foreground "#999999" :weight 'light)))
+
+(defun claude--ret-key ()
+  "Send return key event to eat terminal."
   (interactive)
-  (claude-agent--in-base-buffer
-   (when claude-agent--permission-data
-     (setq claude-agent--permission-selection
-           (mod (1- claude-agent--permission-selection) 4))
-     (claude-agent--render-permission-dialog))))
+  (eat-term-input-event eat-terminal 1 'return))
 
-(defun claude-agent--permission-confirm ()
-  "Confirm the current selection in permission dialog."
+(defun claude--meta-ret-key ()
+  "Send meta + return to eat terminal."
   (interactive)
-  (claude-agent--in-base-buffer
-   (when claude-agent--permission-data
-     (pcase claude-agent--permission-selection
-       (0 (claude-agent--send-permission-response "allow_once"))
-       (1 (claude-agent--send-permission-response "allow_session"))
-       (2 (claude-agent--send-permission-response "allow_always"))
-       (3 (claude-agent--send-permission-response "deny"))))))
+  (eat-term-send-string eat-terminal "\e\C-m"))
 
-;; Minor mode for permission dialog - uses chord keys to not interfere with typing
-(defvar claude-agent-permission-mode-map
-  (let ((map (make-sparse-keymap)))
-    ;; Navigation with M-n/M-p and arrow keys
-    (define-key map (kbd "M-p") #'claude-agent--permission-select-prev)
-    (define-key map (kbd "M-n") #'claude-agent--permission-select-next)
-    (define-key map (kbd "<up>") #'claude-agent--permission-select-prev)
-    (define-key map (kbd "<down>") #'claude-agent--permission-select-next)
-    ;; Confirm with RET or C-c C-c
-    (define-key map (kbd "RET") #'claude-agent--permission-confirm)
-    (define-key map (kbd "C-c C-c") #'claude-agent--permission-confirm)
-    ;; Direct selection with C-1 through C-4
-    (define-key map (kbd "C-1") #'claude-agent-permit-once)
-    (define-key map (kbd "C-2") #'claude-agent-permit-session)
-    (define-key map (kbd "C-3") #'claude-agent-permit-always)
-    (define-key map (kbd "C-4") #'claude-agent-deny)
-    ;; C-g to deny (standard Emacs cancel)
-    (define-key map (kbd "C-g") #'claude-agent-deny)
-    map)
-  "Keymap for permission dialog mode.")
-
-;; Use emulation-mode-map-alists to give permission keymap highest priority
-(defvar claude-agent--permission-emulation-map-alist nil
-  "Alist for `emulation-mode-map-alists' to override other keymaps during permission.")
-
-(define-minor-mode claude-agent-permission-mode
-  "Minor mode for permission dialog interaction.
-Uses chord keys so typing is not affected."
-  :lighter " Permit"
-  :keymap claude-agent-permission-mode-map
-  (if claude-agent-permission-mode
-      (progn
-        ;; Use emulation-mode-map-alists for higher priority
-        (setq claude-agent--permission-emulation-map-alist
-              `((claude-agent-permission-mode . ,claude-agent-permission-mode-map)))
-        (add-to-list 'emulation-mode-map-alists 'claude-agent--permission-emulation-map-alist)
-        (message "Permission: ↑↓ navigate, RET confirm, C-1..C-4 direct, C-g deny"))
-    ;; Remove from emulation alist when disabling
-    (setq emulation-mode-map-alists
-          (delq 'claude-agent--permission-emulation-map-alist emulation-mode-map-alists))))
-
-(defun claude-agent--setup-permission-keymap ()
-  "Set up keymap for permission prompt interaction."
-  ;; Enable permission mode in the base buffer
-  (claude-agent-permission-mode 1)
-  ;; For polymode: also enable in all indirect buffers sharing this base
-  (let ((base (or (buffer-base-buffer) (current-buffer))))
-    (dolist (buf (buffer-list))
-      (when (and (buffer-live-p buf)
-                 (eq (buffer-base-buffer buf) base))
-        (with-current-buffer buf
-          (claude-agent-permission-mode 1))))))
-
-(defun claude-agent--send-permission-response (action)
-  "Send permission response with ACTION to the agent process.
-Restores text input mode and any saved input."
-  (claude-agent--in-base-buffer
-   (when claude-agent--permission-data
-     (let* ((tool-name (cdr (assq 'tool_name claude-agent--permission-data)))
-            (tool-input (cdr (assq 'tool_input claude-agent--permission-data)))
-            (tool-use-id (cdr (assq 'tool_use_id claude-agent--permission-data)))
-            (scope (pcase action
-                     ("allow_once" 'once)
-                     ("allow_session" 'session)
-                     ("allow_always" 'always)
-                     (_ nil)))
-            (pattern (when scope
-                       (claude-agent--generate-permission-pattern
-                        tool-name tool-input scope)))
-            (response-msg `((type . "permission_response")
-                            (action . ,action)
-                            (pattern . ,pattern)
-                            ,@(when tool-use-id `((tool_use_id . ,tool-use-id)))))
-            (saved-input claude-agent--saved-input))
-       ;; Clear permission state and disable minor mode in all related buffers
-       (setq claude-agent--permission-data nil)
-       (setq claude-agent--permission-overlay-specs nil)
-       (claude-agent-permission-mode -1)
-       ;; For polymode: also disable in all indirect buffers sharing this base
-       (let ((base (current-buffer)))
-         (dolist (buf (buffer-list))
-           (when (and (buffer-live-p buf)
-                      (eq (buffer-base-buffer buf) base))
-             (with-current-buffer buf
-               (claude-agent-permission-mode -1)
-               ;; Clear permission overlays in indirect buffers too
-               (dolist (ov (overlays-in (point-min) (point-max)))
-                 (when (overlay-get ov 'claude-permission-face)
-                   (delete-overlay ov)))))))
-       ;; Clear permission overlays in base buffer
-       (dolist (ov (overlays-in (point-min) (point-max)))
-         (when (overlay-get ov 'claude-permission-face)
-           (delete-overlay ov)))
-       ;; Send JSON response to process
-       (when (and claude-agent--process
-                  (process-live-p claude-agent--process))
-         (process-send-string claude-agent--process
-                              (concat (json-encode response-msg) "\n")))
-       ;; Check if there are more queued permission requests
-       (if claude-agent--permission-queue
-           ;; Show the next queued permission
-           (claude-agent--show-next-queued-permission)
-         ;; No more queued - switch to empty mode and show thinking
-         (setq claude-agent--input-mode 'empty)
-         (claude-agent--set-thinking "Processing..."))))))
-
-(defun claude-agent-permit-once ()
-  "Allow the tool to run once."
+(defun claude--send-escape ()
+  "Send ESC to eat terminal."
   (interactive)
-  (claude-agent--send-permission-response "allow_once"))
+  (eat-term-send-string eat-terminal "\e"))
 
-(defun claude-agent-permit-session ()
-  "Allow the tool pattern for this session."
+;;;###autoload
+(defun claude-send-yes ()
+  "Send yes (RET) to the active Claude session."
   (interactive)
-  (claude-agent--send-permission-response "allow_session"))
+  (claude--validate-process)
+  (let ((buffer (claude--get-buffer)))
+    (with-current-buffer buffer
+      (eat-term-send-string eat-terminal (kbd "RET")))))
 
-(defun claude-agent-permit-always ()
-  "Always allow this tool pattern (saves to settings)."
+;;;###autoload
+(defun claude-send-no ()
+  "Send no (ESC) to the active Claude session."
   (interactive)
-  (claude-agent--send-permission-response "allow_always"))
+  (claude--validate-process)
+  (let ((buffer (claude--get-buffer)))
+    (with-current-buffer buffer
+      (eat-term-send-string eat-terminal (kbd "ESC")))))
 
-(defun claude-agent-deny ()
-  "Deny the permission request."
-  (interactive)
-  (claude-agent--send-permission-response "deny"))
+(defun claude--setup-buffer-keymap ()
+  "Set up truly buffer-local keymap for Claude buffers with custom key bindings."
+  (when (claude--is-claude-buffer-p)
+    (message "Setting up buffer-local keymap for Claude buffer: %s" (buffer-name))
+    
+    ;; Create a new keymap that inherits from the current local map (eat-mode)
+    (let ((map (make-sparse-keymap)))
+      ;; Inherit all eat functionality by setting parent keymap
+      (set-keymap-parent map (current-local-map))
+      
+      ;; Override specific keys for claudemacs functionality
+      (define-key map (kbd "C-g") #'claude--send-escape)
+      (message "Defined C-g -> claude--send-escape")
 
-;;;; Process management
+      ;; Handle return key swapping if enabled
+      (when claude-m-return-is-submit
+        (define-key map (kbd "<return>") #'claude--meta-ret-key)
+        (define-key map (kbd "<M-return>") #'claude--ret-key)
+        (message "Swapped RET and M-RET"))
+      
+      ;; Handle shift-return newline if enabled
+      (when claude-shift-return-newline
+        (define-key map (kbd "<S-return>") #'claude--meta-ret-key)
+        ;; alternative key representations that eat might use:
+        ;(define-key map (kbd "S-RET") #'claude--meta-ret-key)
+        ;(define-key map (kbd "<shift-return>") #'claude--meta-ret-key)
+        (message "Defined S-RET -> newline"))
 
-(defun claude-agent--get-agent-dir ()
-  "Get the directory containing the Python agent.
-Returns the path to the claude_agent directory, or nil if not found."
-  (when-let ((lib-file (locate-library "claude-agent")))
-    (expand-file-name "claude_agent"
-                      (file-name-directory lib-file))))
+      ;; Apply the keymap as truly buffer-local
+      (use-local-map map)
+      (message "Applied buffer-local keymap successfully"))))
 
-(defun claude-agent--generate-mcp-config (work-dir buffer-name)
-  "Generate MCP config file for emacs_mcp server.
-WORK-DIR is the session working directory.
+(defun claude--get-shell-name ()
+  "Get the path to the user's shell (e.g., '/bin/zsh', '/bin/bash').
+Falls back to '/bin/sh' if SHELL environment variable is not set."
+  (or (getenv "SHELL") "/bin/sh"))
+
+(defun claude--get-mcp-safe-tools ()
+  "Get list of safe MCP tools from the YAML configuration.
+Returns a list of tool names marked as safe."
+  (let* ((this-file (or load-file-name buffer-file-name
+                        (locate-library "claudemacs")))
+         (this-dir (when this-file (file-name-directory this-file)))
+         (mcp-dir (when this-dir
+                    (expand-file-name "emacs_mcp" this-dir))))
+    (when (and mcp-dir (file-directory-p mcp-dir))
+      (let ((output (shell-command-to-string
+                     (format "uv run --directory %s python -m emacs_mcp.server --safe-tools 2>/dev/null"
+                             (shell-quote-argument mcp-dir)))))
+        (when (and output (not (string-empty-p output)))
+          (split-string (string-trim output) "\n" t))))))
+
+(defun claude--get-auto-allow-permissions ()
+  "Generate --allowedTools flag for safe tools.
+Includes both CLI commands (if enabled) and safe MCP tools."
+  (let ((tools '()))
+    ;; Add CLI tools if enabled
+    (when claude-auto-allow-cli-reads
+      (setq tools (append tools
+                          (mapcar (lambda (cmd) (format "Bash(claude-cli %s:*)" cmd))
+                                  '("get-buffer-content" "get-region" "list-buffers" "buffer-info")))))
+    ;; Add safe MCP tools
+    (when claude-use-mcp
+      (let ((mcp-safe-tools (claude--get-mcp-safe-tools)))
+        (when mcp-safe-tools
+          (setq tools (append tools
+                              (mapcar (lambda (tool) (format "mcp__emacs__%s" tool))
+                                      mcp-safe-tools))))))
+    (when tools
+      (list "--allowedTools" (string-join tools " ")))))
+
+(defvar claude--mcp-config-file nil
+  "Path to the dynamically generated MCP config file.")
+
+(defun claude--generate-mcp-config (work-dir buffer-name)
+  "Generate a temporary MCP config file with dynamic paths.
+WORK-DIR is the session's working directory, used to isolate memory buffers.
 BUFFER-NAME is the Claude buffer name for this session.
 Returns the path to the generated config file."
-  (let* ((agent-dir (claude-agent--get-agent-dir))
-         (emacs-mcp-dir (expand-file-name "../emacs_mcp" agent-dir))
+  (let* ((this-dir (or claude--package-dir
+                       (when-let ((f (or load-file-name buffer-file-name)))
+                         (file-name-directory f))
+                       (when-let ((f (locate-library "claudemacs")))
+                         (file-name-directory f))))
+         (mcp-dir (when this-dir
+                    (expand-file-name "emacs_mcp" this-dir)))
+         (expanded-work-dir (expand-file-name work-dir))
          (config-file (make-temp-file "claude-mcp-config-" nil ".json"))
-         (server-socket (expand-file-name (or (bound-and-true-p server-name) "server")
-                                          (or (bound-and-true-p server-socket-dir)
-                                              (expand-file-name "emacs" (temporary-file-directory)))))
-         (config `((mcpServers
-                    . ((emacs
-                        . ((command . "uv")
-                           (args . ["run" "--directory" ,emacs-mcp-dir
-                                    "python" "-m" "emacs_mcp.server"])
-                           (env . ((CLAUDE_AGENT_SOCKET . ,server-socket)
-                                   (CLAUDE_AGENT_CWD . ,(expand-file-name work-dir))
-                                   (CLAUDE_AGENT_BUFFER_NAME . ,buffer-name))))))))))
+         ;; Build environment with optional additional tools files
+         (env-vars `((CLAUDE_AGENT_CWD . ,expanded-work-dir)
+                    (CLAUDE_AGENT_BUFFER_NAME . ,buffer-name)))
+         (env-vars (if claude-additional-tools-files
+                      (append env-vars
+                              `((CLAUDE_MCP_ADDITIONAL_TOOLS_FILES . ,(string-join claude-additional-tools-files ":"))))
+                    env-vars))
+         (config-json (json-encode
+                       `((mcpServers
+                          . ((emacs
+                              . ((command . "uv")
+                                 (args . ["run" "--python-preference" "managed" "--directory" ,mcp-dir
+                                          "-m" "emacs_mcp.server"])
+                                 (env . ,env-vars)))))))))
     (with-temp-file config-file
-      (insert (json-encode config)))
+      (insert config-json))
+    (setq claude--mcp-config-file config-file)
     config-file))
 
-(defvar-local claude-agent--mcp-config-file nil
-  "Path to the MCP config file for this session.")
+(defun claude--get-custom-prompt ()
+  "Generate --append-system-prompt flag if custom prompt file exists.
+Looks for claude-prompt.md in the claudemacs package directory.
+Returns nil if file doesn't exist."
+  (let* ((this-file (or load-file-name buffer-file-name
+                        (locate-library "claudemacs")))
+         (this-dir (when this-file (file-name-directory this-file)))
+         (prompt-file (when this-dir
+                        (expand-file-name "claude-prompt.md" this-dir))))
+    (when (and prompt-file (file-exists-p prompt-file))
+      (let ((content (with-temp-buffer
+                       (insert-file-contents prompt-file)
+                       (buffer-string))))
+        (when (not (string-empty-p (string-trim content)))
+          (list "--append-system-prompt" content))))))
 
-(defun claude-agent--validate-prerequisites ()
-  "Validate that all required commands and directories exist.
-Returns nil if valid, or an error message string if validation fails."
-  (let ((agent-dir (claude-agent--get-agent-dir)))
-    (cond
-     ;; Check if command exists in PATH
-     ((not (executable-find claude-agent-python-command))
-      (format "Command '%s' not found in PATH. Please install it or set `claude-agent-python-command' to the correct command.\n\nFor uv installation, see: https://docs.astral.sh/uv/getting-started/installation/"
-              claude-agent-python-command))
-     ;; Check if agent directory exists
-     ((not agent-dir)
-      "Could not locate claude-agent library using (locate-library \"claude-agent\").\n\nPlease ensure claude-agent is properly installed and in your `load-path'.")
-     ((not (file-directory-p agent-dir))
-      (format "Agent directory not found: %s\n\nThe claude_agent Python package should be in the same directory as claude-agent.el."
-              agent-dir))
-     ;; Check if Python module exists
-     ((not (file-exists-p (expand-file-name "claude_agent/__init__.py" agent-dir)))
-      (format "Python module 'claude_agent' not found in: %s\n\nPlease ensure the claude_agent package is properly installed."
-              agent-dir))
-     ;; All checks passed
-     (t nil))))
+(defun claude--get-mcp-config (work-dir buffer-name)
+  "Generate --mcp-config flag if MCP is enabled.
+WORK-DIR is the session's working directory for memory buffer isolation.
+BUFFER-NAME is the Claude buffer name for this session.
+Returns nil if `claude-use-mcp' is nil."
+  (when claude-use-mcp
+    (let* ((this-dir (or claude--package-dir
+                         (when-let ((f (or load-file-name buffer-file-name)))
+                           (file-name-directory f))
+                         (when-let ((f (locate-library "claudemacs")))
+                           (file-name-directory f))))
+           (mcp-dir (when this-dir
+                      (expand-file-name "emacs_mcp" this-dir))))
+      (when (and mcp-dir (file-directory-p mcp-dir))
+        (list "--mcp-config" (claude--generate-mcp-config work-dir buffer-name))))))
 
-(defun claude-agent--start-process (work-dir buffer &optional resume-session continue-session model system-prompt additional-allowed-tools)
-  "Start the Python agent process for WORK-DIR with BUFFER.
-Optional RESUME-SESSION is a session ID to resume.
-Optional CONTINUE-SESSION, if non-nil, continues the most recent session.
-Optional MODEL is the model to use (e.g., 'sonnet', 'opus', 'haiku').
-Optional SYSTEM-PROMPT is a custom system prompt (for oneshot agents).
-Optional ADDITIONAL-ALLOWED-TOOLS is a list of extra tools to pre-authorize."
-  ;; Validate prerequisites first
-  (when-let ((error-msg (claude-agent--validate-prerequisites)))
-    (error "Cannot start Claude agent:\n%s" error-msg))
+(defun claude--start (work-dir &rest args)
+  "Start Claude Code in WORK-DIR with ARGS.
+WORK-DIR can be either:
+  - A string: \"/path\" creates buffer *claude:/path*
+  - A list: '(\"/path\" \"agent-name\") creates *claude:/path:agent-name*"
+  (require 'eat)
+  ;; Set up environment variables BEFORE spawning the Claude process
+  (claude-mcp-setup-claude-environment)
 
-  ;; Ensure Emacs server is running if MCP is enabled
-  (when (and claude-agent-enable-mcp
-             (not (bound-and-true-p server-process)))
-    (message "Starting Emacs server for MCP...")
-    (server-start))
-  (let* ((agent-dir (claude-agent--get-agent-dir))
-         (log-file (expand-file-name "claude-agent.log" work-dir))
-         (buffer-name (buffer-name buffer))
-         (mcp-config (when claude-agent-enable-mcp
-                       (claude-agent--generate-mcp-config work-dir buffer-name)))
-         (args (list "run" "--directory" agent-dir
-                     "python" "-u" "-m" "claude_agent"  ; -u for unbuffered
-                     "--work-dir" work-dir
-                     "--log-file" log-file)))
-    ;; Add MCP config if enabled
-    (when mcp-config
-      (setq args (append args (list "--mcp-config" mcp-config)))
-      ;; Store MCP config path for cleanup
-      (with-current-buffer buffer
-        (setq claude-agent--mcp-config-file mcp-config)))
-    ;; Add resume or continue flags
-    (when resume-session
-      (setq args (append args (list "--resume" resume-session))))
-    (when continue-session
-      (setq args (append args (list "--continue"))))
-    ;; Add model if specified
-    (when model
-      (setq args (append args (list "--model" model))))
-    ;; Add system prompt if specified (for oneshot agents)
-    ;; Write to temp file to avoid shell escaping issues with multiline prompts
-    (when system-prompt
-      (let ((prompt-file (make-temp-file "claude-system-prompt-" nil ".txt")))
-        (with-temp-file prompt-file
-          (insert system-prompt))
-        (setq args (append args (list "--system-prompt-file" prompt-file)))
-        ;; Store for cleanup
-        (with-current-buffer buffer
-          (setq-local claude-agent--system-prompt-file prompt-file))))
-    ;; Add safe MCP tools as --allowedTools (pre-authorized, no permission prompts)
-    ;; Also include any additional allowed tools passed by caller
-    (let ((all-allowed-tools
-           (append (when claude-agent-enable-mcp
-                     (claude-mcp-get-safe-tools-for-cli))
-                   additional-allowed-tools)))
-      (when all-allowed-tools
-        (setq args (append args (list "--allowed-tools"
-                                      (mapconcat #'identity all-allowed-tools ","))))))
-    ;; Use pipe (nil) instead of PTY to avoid focus-related buffering issues
-    ;; Bind default-directory so the process starts in work-dir
-    (let ((default-directory work-dir)
-          (process-connection-type nil)
-          (process-environment (cons "PYTHONUNBUFFERED=1" process-environment)))
-      (condition-case err
-          (let ((proc (apply #'start-process
-                             "claude-agent"
-                             buffer
-                             claude-agent-python-command
-                             args)))
-            (set-process-coding-system proc 'utf-8 'utf-8)
-            (set-process-filter proc #'claude-agent--process-filter)
-            (set-process-sentinel proc #'claude-agent--process-sentinel)
-            (set-process-query-on-exit-flag proc nil)
-            proc)
-        (error
-         (error "Failed to start Claude agent process:\n\nCommand: %s %s\n\nError: %s\n\nPlease check that:\n- %s is installed and in your PATH\n- The agent directory exists: %s\n- Python is available"
-                claude-agent-python-command
-                (mapconcat #'identity args " ")
-                (error-message-string err)
-                claude-agent-python-command
-                agent-dir))))))
+  ;; Parse work-dir - it can be a string or (dir agent-name) list
+  (let* ((dir-string (if (listp work-dir) (car work-dir) work-dir))
+         (agent-name (when (listp work-dir) (cadr work-dir)))
+         (expanded-dir (expand-file-name dir-string))
+         (buffer-name (if agent-name
+                         (format "*claude:%s:%s*" expanded-dir agent-name)
+                       (format "*claude:%s*" expanded-dir)))
+         (default-directory dir-string)
+         (buffer (get-buffer-create buffer-name))
+         (cli-dir (file-name-directory (claude-mcp-get-cli-path)))
+         (claude-socket (when (and (boundp 'server-socket-dir)
+                                        server-socket-dir
+                                        (boundp 'server-name)
+                                        server-name
+                                        (server-running-p))
+                              (expand-file-name server-name server-socket-dir)))
+         (process-environment
+          (append (list (format "PATH=%s:%s" cli-dir (getenv "PATH"))
+                        "TERM=xterm-256color"
+                        "CLAUDE_AGENT_SESSION=1")
+                  (when claude-socket
+                    (list (format "CLAUDE_AGENT_SOCKET=%s" claude-socket)))
+                  process-environment)))
+    (with-current-buffer buffer
+      (cd dir-string)
+      (setq-local eat-term-name "xterm-256color")
+      (let ((process-adaptive-read-buffering nil)
+            (switches (remove nil (append args
+                                         claude-program-switches
+                                         (claude--get-auto-allow-permissions)
+                                         (claude--get-custom-prompt)
+                                         (claude--get-mcp-config dir-string buffer-name)))))
+        (if claude-use-shell-env
+            ;; New behavior: Run through shell to source profile (e.g., .zprofile, .bash_profile)
+            ;; Explicitly set environment variables in the shell command to survive shell config sourcing
+            (let* ((shell (claude--get-shell-name))
+                   (env-vars (format "PATH=%s:$PATH CLAUDE_AGENT_SESSION=1%s"
+                                   cli-dir
+                                   (if claude-socket
+                                       (format " CLAUDE_AGENT_SOCKET=%s" claude-socket)
+                                     "")))
+                   (claude-cmd (format "%s %s %s"
+                                      env-vars
+                                      claude-program
+                                      (mapconcat 'shell-quote-argument switches " "))))
+              (eat-make (substring buffer-name 1 -1) shell nil "-c" claude-cmd))
+          ;; Original behavior: Run Claude directly without shell environment
+          (apply #'eat-make (substring buffer-name 1 -1) claude-program nil switches)))
+      
+      ;; Set buffer-local variables after eat-make to ensure they persist
+      (setq-local claude--cwd dir-string)
 
-(defun claude-agent--process-sentinel (proc event)
-  "Handle process PROC state change EVENT."
-  (when (memq (process-status proc) '(exit signal))
-    (let ((buf (process-buffer proc)))
-      (when (buffer-live-p buf)
-        (with-current-buffer buf
-          (claude-agent--set-thinking nil)
-          (claude-agent--append-to-log
-           (format "\n[Process %s]\n" (string-trim event))
-           'claude-agent-session-face)
-          ;; Clean up MCP config file
-          (when (and claude-agent--mcp-config-file
-                     (file-exists-p claude-agent--mcp-config-file))
-            (delete-file claude-agent--mcp-config-file)
-            (setq claude-agent--mcp-config-file nil)))))))
+      ;; Store session ID for this buffer
+      ;; For multi-agent setups, try to read from cache file first, otherwise use most recent
+      (let* ((session-cache-dir (expand-file-name ".claude/" dir-string))
+             (session-cache-file (expand-file-name
+                                  (format "session-%s" (md5 buffer-name))
+                                  session-cache-dir)))
+        (run-at-time 2 nil
+                     (lambda (buf dir cache-file)
+                       (when (buffer-live-p buf)
+                         (let ((session-id (claude--get-most-recent-session-id dir)))
+                           (when session-id
+                             (with-current-buffer buf
+                               (setq-local claude--session-id session-id))
+                             ;; Cache it to a file for future restarts
+                             (make-directory (file-name-directory cache-file) t)
+                             (with-temp-file cache-file
+                               (insert session-id))))))
+                     (current-buffer) dir-string session-cache-file))
 
-;;;; User commands
+      (claude--setup-repl-faces)
+      ;; Optimize scrolling for terminal input - allows text to go to bottom
+      (setq-local scroll-conservatively 10000)  ; Never recenter
+      (setq-local scroll-margin 0)              ; No margin so text goes to edge
+      (setq-local maximum-scroll-margin 0)      ; No maximum margin
+      (setq-local scroll-preserve-screen-position t)  ; Preserve position during scrolling
+      
+      ;; Additional stabilization for blinking character height changes
+      (setq-local auto-window-vscroll nil)      ; Disable automatic scrolling adjustments
+      (setq-local scroll-step 1)                ; Scroll one line at a time
+      (setq-local hscroll-step 1)               ; Horizontal scroll one column at a time
+      (setq-local hscroll-margin 0)             ; No horizontal scroll margin
+      
+      ;; Force consistent line spacing to prevent height fluctuations
+      (setq-local line-spacing 0)               ; No extra line spacing
+      
+      ;; Disable eat's text blinking to reduce display changes
+      (when (bound-and-true-p eat-enable-blinking-text)
+        (setq-local eat-enable-blinking-text nil))
+      
+      ;; Force consistent character metrics for blinking symbols
+      ;;(setq-local char-width-table nil)         ; causes emacs to crash!
+      (setq-local vertical-scroll-bar nil)      ; Disable scroll bar
+      (setq-local fringe-mode 0)                ; Disable fringes that can cause reflow
+      
+      ;; Replace problematic blinking character with consistent asterisk
+      (let ((display-table (make-display-table)))
+        (aset display-table #x23fa [?✽])  ; Replace ⏺ (U+23FA) with ✽
+        (setq-local buffer-display-table display-table))
+      
+      ;; Enable claude-mode for keybindings
+      (claude-mode 1)
 
-(defun claude-agent--is-busy-p ()
-  "Return t if the agent is currently busy (thinking)."
-  claude-agent--thinking-status)
+      ;; Set up custom key mappings & completion notifications after eat initialization
+      (run-with-timer 0.1 nil
+                      (lambda ()
+                        (claude--setup-eat-integration buffer))))
+    
+    (let ((window (display-buffer buffer)))
+      (when claude-switch-to-buffer-on-create
+        (select-window window)))))
 
-(defun claude-agent--render-queue ()
-  "Render queued messages by rebuilding the dynamic section."
-  (claude-agent--render-dynamic-section))
+(defun claude--run-with-args (&optional arg &rest args)
+  "Start Claude Code with ARGS or switch to existing session.
+With prefix ARG, prompt for the project directory."
+  (let* ((explicit-dir (when arg (read-directory-name "Project directory: ")))
+         (work-dir (or explicit-dir (claude--project-root))))
+    (unless (claude--switch-to-buffer)
+      (apply #'claude--start work-dir args))))
 
-(defun claude-agent--send-next-queued ()
-  "Send the next queued message if any and not busy."
-  (when (and claude-agent--message-queue
-             (not (claude-agent--is-busy-p))
-             claude-agent--process
-             (process-live-p claude-agent--process))
-    (let ((msg (pop claude-agent--message-queue)))
-      ;; Send JSON message to process
-      (process-send-string claude-agent--process
-                           (concat (json-encode `((type . "message") (text . ,msg))) "\n")))))
-
-(defun claude-agent-send ()
-  "Send the current input to Claude, or queue if busy."
-  (interactive)
-  (claude-agent--in-base-buffer
-   (when (and claude-agent--input-start-marker
-              claude-agent--process
-              (process-live-p claude-agent--process))
-     (let* ((input (string-trim (buffer-substring-no-properties
-                                  claude-agent--input-start-marker (point-max)))))
-       ;; Ignore if empty
-       (unless (string-empty-p input)
-         ;; Clear the input area first
-         (let ((inhibit-read-only t))
-           (delete-region claude-agent--input-start-marker (point-max)))
-         ;; Add to history
-         (push input claude-agent--input-history)
-         (setq claude-agent--input-history-index 0)
-         ;; If busy, queue the message; otherwise send directly
-         (if (claude-agent--is-busy-p)
-             (progn
-               (push input claude-agent--message-queue)
-               (claude-agent--render-dynamic-section)
-               (message "Message queued (agent is busy)"))
-           ;; Send JSON message to process
-           (process-send-string claude-agent--process
-                                (concat (json-encode `((type . "message") (text . ,input))) "\n"))
-           ;; Re-render dynamic section (input already cleared)
-           (claude-agent--render-dynamic-section)))))))
-
-(defun claude-agent-send-or-newline ()
-  "Send input if on last line, otherwise insert newline."
-  (interactive)
-  (if (claude-agent--in-input-area-p)
-      (if (save-excursion (end-of-line) (eobp))
-          (claude-agent-send)
-        (newline))
-    (newline)))
-
-(defun claude-agent-interrupt ()
-  "Interrupt the current Claude operation."
-  (interactive)
-  (claude-agent--in-base-buffer
-   (when (and claude-agent--process
-              (process-live-p claude-agent--process))
-     (process-send-string claude-agent--process
-                          (concat (json-encode '((type . "interrupt"))) "\n")))))
-
-(defun claude-agent-quit ()
-  "Quit the Claude session."
-  (interactive)
-  (when (yes-or-no-p "Quit Claude session? ")
-    (claude-agent--in-base-buffer
-     (when (and claude-agent--process
-                (process-live-p claude-agent--process))
-       (process-send-string claude-agent--process
-                            (concat (json-encode '((type . "quit"))) "\n"))))))
-
-(defun claude-agent--send-json (msg)
-  "Send MSG as JSON to the agent process.
-MSG should be an alist that will be encoded as JSON."
-  (claude-agent--in-base-buffer
-   (when (and claude-agent--process
-              (process-live-p claude-agent--process))
-     (process-send-string claude-agent--process
-                          (concat (json-encode msg) "\n")))))
-
-(defun claude-agent-previous-input ()
-  "Recall previous input from history."
-  (interactive)
-  (claude-agent--in-base-buffer
-   (when (and claude-agent--input-history
-              (< claude-agent--input-history-index
-                 (length claude-agent--input-history)))
-     (let ((inhibit-read-only t))
-       (delete-region claude-agent--input-start-marker (point-max))
-       (goto-char claude-agent--input-start-marker)
-       (insert (nth claude-agent--input-history-index
-                    claude-agent--input-history))
-       (cl-incf claude-agent--input-history-index)))))
-
-(defun claude-agent-next-input ()
-  "Recall next input from history."
-  (interactive)
-  (claude-agent--in-base-buffer
-   (when (> claude-agent--input-history-index 0)
-     (cl-decf claude-agent--input-history-index)
-     (let ((inhibit-read-only t))
-       (delete-region claude-agent--input-start-marker (point-max))
-       (goto-char claude-agent--input-start-marker)
-       (when (> claude-agent--input-history-index 0)
-         (insert (nth (1- claude-agent--input-history-index)
-                      claude-agent--input-history)))))))
-
-;;;; MCP status functions
-
-(defun claude-agent-mcp-server-status ()
-  "Return list of MCP server statuses for current session.
-Each element is an alist with keys: name, status."
-  (claude-agent--in-base-buffer
-   claude-agent--mcp-server-status))
+;;;; Interactive Commands
+;;;###autoload
+(defun claude-run (&optional arg)
+  "Start Claude Code or switch to existing session.
+If a session already exists for this project, prompts for a slug
+to create a named session (e.g., *claude:project:my-slug*).
+With prefix ARG, prompt for the project directory."
+  (interactive "P")
+  (require 'claude-transient)
+  (let* ((explicit-dir (when arg (read-directory-name "Project directory: ")))
+         (work-dir (or explicit-dir (claude--project-root)))
+         (existing (claude-transient--session-exists-for-dir work-dir)))
+    (if existing
+        ;; Session exists - prompt for slug
+        (let ((slug (claude-transient--read-slug)))
+          (claude-agent-run work-dir nil nil slug))
+      ;; No existing session - ask if they want a named session or default
+      (if (y-or-n-p "Create named session? ")
+          (let ((slug (claude-transient--read-slug)))
+            (claude-agent-run work-dir nil nil slug))
+        (claude-agent-run work-dir)))))
 
 ;;;###autoload
-(defun claude-agent-show-mcp-status ()
-  "Display MCP server connection status for current Claude session."
-  (interactive)
-  (claude-agent--in-base-buffer
-   (let ((status claude-agent--mcp-server-status))
-     (if status
-         (let ((msg (mapconcat
-                     (lambda (s)
-                       (let ((name (cdr (assq 'name s)))
-                             (st (cdr (assq 'status s))))
-                         (format "%s: %s" name
-                                 (if (equal st "connected")
-                                     (propertize st 'face 'success)
-                                   (propertize st 'face 'error)))))
-                     status "\n")))
-           (message "MCP Servers:\n%s" msg))
-       (message "No MCP status available (send a message first to initialize)")))))
-
-;;;; Session history loading
-
-(defun claude-agent--get-session-file (work-dir session-id)
-  "Get the session file path for SESSION-ID in WORK-DIR."
-  (let* ((encoded-dir (replace-regexp-in-string
-                       "/" "-"
-                       (directory-file-name (expand-file-name work-dir))))
-         (sessions-dir (expand-file-name encoded-dir "~/.claude/projects/")))
-    (expand-file-name (concat session-id ".jsonl") sessions-dir)))
-
-(defun claude-agent--load-session-history (work-dir session-id &optional max-messages)
-  "Load conversation history from SESSION-ID in WORK-DIR.
-Returns a list of message plists with :role, :content, :timestamp.
-Loads at most MAX-MESSAGES (default 50) most recent messages."
-  (let* ((file (claude-agent--get-session-file work-dir session-id))
-         (max-msgs (or max-messages 50))
-         (messages nil))
-    (when (and file (file-exists-p file))
-      (with-temp-buffer
-        (insert-file-contents file)
-        (goto-char (point-min))
-        (while (not (eobp))
-          (let* ((line (buffer-substring-no-properties
-                        (line-beginning-position) (line-end-position)))
-                 (json (condition-case nil
-                           (json-read-from-string line)
-                         (error nil))))
-            (when json
-              (let ((type (cdr (assq 'type json)))
-                    (msg (cdr (assq 'message json)))
-                    (ts (cdr (assq 'timestamp json))))
-                (when (and msg (member type '("user" "assistant")))
-                  (let* ((role (cdr (assq 'role msg)))
-                         (content (cdr (assq 'content msg)))
-                         ;; Handle content that's either a string or array
-                         (text-content
-                          (cond
-                           ((stringp content) content)
-                           ((vectorp content)
-                            ;; Extract text from content array
-                            (mapconcat
-                             (lambda (item)
-                               (when (equal (cdr (assq 'type item)) "text")
-                                 (cdr (assq 'text item))))
-                             content ""))
-                           (t nil))))
-                    (when (and role text-content (not (string-empty-p text-content)))
-                      (push (list :role role
-                                  :content text-content
-                                  :timestamp ts)
-                            messages)))))))
-          (forward-line 1)))
-      ;; Return most recent messages, in chronological order
-      (let ((recent (seq-take (nreverse messages) max-msgs)))
-        (nreverse recent)))))
-
-(defun claude-agent--format-history-message (msg)
-  "Format a history message MSG for display in the buffer."
-  (let* ((role (plist-get msg :role))
-         (content (plist-get msg :content))
-         (timestamp (plist-get msg :timestamp))
-         ;; Truncate very long messages for history display
-         (max-len 500)
-         (truncated (if (> (length content) max-len)
-                        (concat (substring content 0 max-len) "\n[...truncated...]")
-                      content)))
-    (concat
-     (if (equal role "user")
-         (propertize "┌─ You" 'face 'claude-agent-user-header-face)
-       (propertize "┌─ Claude" 'face 'claude-agent-assistant-header-face))
-     (when timestamp
-       (propertize (format " (%s)" (format-time-string "%m-%d %H:%M" (date-to-time timestamp)))
-                   'face 'claude-agent-session-face))
-     "\n"
-     (propertize truncated
-                 'face (if (equal role "user")
-                          'claude-agent-user-face
-                        'claude-agent-assistant-face))
-     "\n\n")))
-
-(defun claude-agent--insert-history-header ()
-  "Insert the history section header."
-  (let ((start (point)))
-    (insert "─── Previous Conversation History ───────────────────────────\n\n")
-    (claude-agent--apply-face start (point) 'claude-agent-session-face)))
-
-(defun claude-agent--insert-history-footer ()
-  "Insert the history section footer."
-  (let ((start (point)))
-    (insert "─── Resuming Session ────────────────────────────────────────\n\n")
-    (claude-agent--apply-face start (point) 'claude-agent-session-face)))
-
-(defun claude-agent--display-session-history (work-dir session-id)
-  "Display conversation history from SESSION-ID in the current buffer."
-  (let ((history (claude-agent--load-session-history work-dir session-id 20)))
-    (when history
-      (claude-agent--insert-history-header)
-      (dolist (msg history)
-        (let ((formatted (claude-agent--format-history-message msg)))
-          (claude-agent--append-to-log formatted nil nil)))
-      (claude-agent--insert-history-footer))))
-
-;;;; Entry point
+(defun claude-resume (&optional arg)
+  "Resume a previous Claude session with session picker.
+Shows a dropdown of previous sessions with timestamps and summaries.
+With prefix ARG, prompt for the project directory."
+  (interactive "P")
+  (require 'claude-transient)
+  (let* ((explicit-dir (when arg (read-directory-name "Project directory: ")))
+         (default-directory (or explicit-dir (claude--project-root))))
+    (claude-transient-resume-session)))
 
 ;;;###autoload
-(defun claude-agent-run (work-dir &optional resume-session continue-session slug model additional-allowed-tools)
-  "Start a Claude agent session for WORK-DIR.
-Optional RESUME-SESSION is a session ID to resume.
-Optional CONTINUE-SESSION, if non-nil, continues the most recent session.
-Optional SLUG is a suffix for the buffer name (e.g., *claude:project:slug*).
-Optional MODEL is the model to use (e.g., 'sonnet', 'opus', 'haiku').
-Optional ADDITIONAL-ALLOWED-TOOLS is a list of extra tools to pre-authorize."
-  (interactive
-   (list (read-directory-name "Project directory: "
-                              (or (vc-git-root default-directory)
-                                  default-directory))))
-  (let* ((expanded-dir (expand-file-name work-dir))
-         (short-name (file-name-nondirectory
-                      (directory-file-name expanded-dir)))
-         (buf-name (if slug
-                       (format "*claude:%s:%s*" short-name slug)
-                     (format "*claude:%s*" short-name)))
-         (buf (get-buffer-create buf-name)))
-
-    ;; Set up buffer
-    (with-current-buffer buf
-      (claude-agent-mode)
-      (claude-agent--init-buffer short-name)
-      (setq claude-agent--parse-state nil
-            claude-agent--pending-output ""
-            claude-agent--session-info nil
-            claude-agent--has-conversation nil
-            claude-agent--work-dir expanded-dir
-            default-directory expanded-dir)
-
-      ;; Display history if resuming a specific session
-      (when resume-session
-        (claude-agent--display-session-history expanded-dir resume-session)))
-
-    ;; Start process with optional resume/continue/model/allowed-tools
-    (let ((proc (claude-agent--start-process expanded-dir buf resume-session continue-session model nil additional-allowed-tools)))
-      (with-current-buffer buf
-        (setq claude-agent--process proc)))
-
-    ;; Display buffer
-    (pop-to-buffer buf)
-    ;; Ensure default-directory is set correctly (defensive - should already be set)
-    (with-current-buffer buf
-      (setq default-directory expanded-dir))
-    buf))
-
-;;;; Transient Menu
-
-(defvar claude-agent--available-models
-  '(("sonnet" . "claude-sonnet-4-20250514")
-    ("opus" . "claude-opus-4-20250514")
-    ("haiku" . "claude-haiku-3-5-20241022"))
-  "Available Claude models as (alias . full-name) pairs.")
-
-(defun claude-agent--current-model ()
-  "Get the current model from session info."
-  (plist-get claude-agent--session-info :model))
-
-(defun claude-agent--format-model-for-display (model-string)
-  "Format MODEL-STRING for display, extracting key info."
-  (cond
-   ((string-match "sonnet" model-string) "Sonnet")
-   ((string-match "opus" model-string) "Opus")
-   ((string-match "haiku" model-string) "Haiku")
-   (t model-string)))
-
-(defun claude-agent-set-model (model)
-  "Change the model for the current session to MODEL.
-MODEL should be an alias like 'sonnet', 'opus', or 'haiku'.
-This restarts the session with the new model while preserving the conversation."
-  (interactive
-   (list (completing-read "Model: "
-                          (mapcar #'car claude-agent--available-models)
-                          nil t)))
-  (if (and claude-agent--process (process-live-p claude-agent--process))
-      (let ((session-id (plist-get claude-agent--session-info :session-id))
-            (work-dir claude-agent--work-dir))
-        (if session-id
-            (progn
-              ;; Kill current process
-              (delete-process claude-agent--process)
-              (setq claude-agent--process nil)
-              ;; Clear thinking state
-              (claude-agent--set-thinking nil)
-              ;; Notify user
-              (claude-agent--append-to-log
-               (format "\n🔄 Switching to %s model...\n" model)
-               'claude-agent-session-face)
-              ;; Start new process with same session ID but new model
-              (let ((proc (claude-agent--start-process
-                           work-dir (current-buffer) session-id nil model)))
-                (setq claude-agent--process proc))
-              (message "Restarting session with %s model..." model))
-          (message "No session ID available - cannot switch model")))
-    (message "No active Claude session")))
-
-(defun claude-agent-mcp-list ()
-  "List configured MCP servers."
+(defun claude-kill ()
+  "Kill Claude process and close its window."
   (interactive)
-  (let ((output (shell-command-to-string "claude mcp list 2>/dev/null")))
-    (if (string-match-p "No MCP servers" output)
-        (message "No MCP servers configured")
-      (with-current-buffer (get-buffer-create "*Claude MCP Servers*")
-        (read-only-mode -1)
-        (erase-buffer)
-        (insert "MCP Servers\n")
-        (insert "===========\n\n")
-        (insert output)
-        (read-only-mode 1)
-        (goto-char (point-min))
-        (display-buffer (current-buffer))))))
-
-(defun claude-agent-mcp-add ()
-  "Add an MCP server interactively."
-  (interactive)
-  (let* ((name (read-string "Server name: "))
-         (type (completing-read "Type: " '("stdio" "sse") nil t))
-         (command-or-url (read-string (if (equal type "stdio")
-                                          "Command: "
-                                        "URL: "))))
-    (if (equal type "stdio")
-        (let ((args (read-string "Arguments (space-separated, optional): ")))
-          (shell-command (format "claude mcp add %s %s %s"
-                                 (shell-quote-argument name)
-                                 (shell-quote-argument command-or-url)
-                                 args)))
-      (shell-command (format "claude mcp add --transport sse %s %s"
-                             (shell-quote-argument name)
-                             (shell-quote-argument command-or-url))))
-    (message "Added MCP server: %s" name)))
-
-(defun claude-agent-mcp-remove ()
-  "Remove an MCP server."
-  (interactive)
-  (let* ((output (shell-command-to-string "claude mcp list --json 2>/dev/null"))
-         (servers (ignore-errors (json-read-from-string output)))
-         (names (mapcar (lambda (s) (cdr (assq 'name s))) servers)))
-    (if names
-        (let ((name (completing-read "Remove server: " names nil t)))
-          (shell-command (format "claude mcp remove %s" (shell-quote-argument name)))
-          (message "Removed MCP server: %s" name))
-      (message "No MCP servers to remove"))))
-
-(defun claude-agent-compact ()
-  "Compact the conversation history.
-Sends /compact as a message to Claude."
-  (interactive)
-  (if (and claude-agent--process (process-live-p claude-agent--process))
+  (if-let* ((claude-buffer (claude--get-buffer)))
       (progn
-        (claude-agent--send-json '((type . "message") (text . "/compact")))
-        (message "Compacting conversation..."))
-    (message "No active Claude session")))
+        (with-current-buffer claude-buffer
+          ;; Check if using new agent architecture
+          (if (and (boundp 'claude-agent--process) claude-agent--process)
+              ;; New agent architecture
+              (when (process-live-p claude-agent--process)
+                (delete-process claude-agent--process))
+            ;; Old eat-based architecture
+            (when (and (boundp 'eat-terminal) eat-terminal)
+              (eat-kill-process)))
+          (kill-buffer claude-buffer))
+        (message "Claude session killed"))
+    (error "There is no Claude session in this workspace or project")))
 
-(defun claude-agent-clear ()
-  "Clear the conversation history and start fresh.
-Sends /clear as a message to Claude."
+;;;###autoload
+(defun claude-clear-buffer ()
+  "Clear/trim the current Claude buffer to improve performance.
+Removes accumulated history, keeping only the last 10KB of content."
   (interactive)
-  (if (and claude-agent--process (process-live-p claude-agent--process))
-      (when (yes-or-no-p "Clear conversation history? ")
-        (claude-agent--send-json '((type . "message") (text . "/clear")))
-        (message "Clearing conversation..."))
-    (message "No active Claude session")))
+  (if (claude--is-claude-buffer-p)
+      (let ((result (claude-mcp-clear-buffer (buffer-name))))
+        (message "%s" result))
+    (error "Not in a Claude buffer")))
 
-(defun claude-agent-restart ()
-  "Restart the Claude session, continuing the same conversation.
-Kills the current process and starts a new one with --continue.
-This reloads the MCP server and Python agent while preserving the session."
+;;;###autoload
+(defun claude-spawn-agent (directory &optional agent-name &rest extra-args)
+  "Spawn a new claudemacs agent in DIRECTORY with optional AGENT-NAME.
+When called interactively, uses current directory and prompts for agent identifier.
+If AGENT-NAME is nil or empty, buffer will be named *claude:/path*.
+If provided, buffer will be named *claude:/path:agent-name*.
+EXTRA-ARGS are additional command-line arguments to pass to Claude.
+Returns the buffer name."
+  (interactive
+   (list (if (claude--is-claude-buffer-p)
+            (or claude--cwd default-directory)
+          (claude--project-root))
+         (let ((input (read-string "Agent identifier (leave empty for primary): " nil nil "")))
+           (if (string-empty-p input) nil input))))
+  (let* ((expanded-dir (expand-file-name directory))
+         (buffer-name (if agent-name
+                         (format "*claude:%s:%s*" expanded-dir agent-name)
+                       (format "*claude:%s*" expanded-dir)))
+         (work-dir-arg (if agent-name
+                          (list directory agent-name)
+                        directory)))
+    ;; Check if buffer already exists
+    (when (get-buffer buffer-name)
+      (error "Agent already exists with buffer name: %s" buffer-name))
+
+    ;; Check directory exists
+    (unless (file-directory-p expanded-dir)
+      (error "Directory does not exist: %s" expanded-dir))
+
+    ;; Spawn the agent with any extra args
+    (apply #'claude--start work-dir-arg extra-args)
+
+    (when (called-interactively-p 'interactive)
+      (message "Spawned agent: %s" buffer-name))
+
+    buffer-name))
+
+(defun claude--get-most-recent-session-id (work-dir)
+  "Get the most recent session ID for WORK-DIR.
+Returns the UUID of the most recently modified session file, or nil if none found."
+  (let* ((expanded-dir (expand-file-name work-dir))
+         ;; Convert /home/user/.path/to/dir to -home-user--path-to-dir
+         ;; Claude's format: replace / with -, replace . with -
+         (slug-with-slashes (replace-regexp-in-string "/" "-" expanded-dir))
+         (project-slug (replace-regexp-in-string "\\." "-" slug-with-slashes))
+         (sessions-dir (expand-file-name project-slug "~/.claude/projects/")))
+    (when (file-directory-p sessions-dir)
+      (let* ((files (directory-files sessions-dir t "\\.jsonl$"))
+             (sorted-files (sort files
+                                 (lambda (a b)
+                                   (time-less-p (nth 5 (file-attributes b))
+                                               (nth 5 (file-attributes a)))))))
+        (when sorted-files
+          ;; Extract UUID from filename (remove path and .jsonl extension)
+          (file-name-sans-extension (file-name-nondirectory (car sorted-files))))))))
+
+(defun claude--send-message-when-ready (work-dir message delay &optional attempt target-buffer-name)
+  "Send MESSAGE to Claude after DELAY seconds.
+WORK-DIR identifies the session (can be nil if TARGET-BUFFER-NAME is provided).
+DELAY is the number of seconds to wait before sending.
+TARGET-BUFFER-NAME is the exact buffer name to use (optional)."
+  (let ((buffer-name (or target-buffer-name
+                         (when work-dir (format "*claude:%s*" work-dir)))))
+    (unless buffer-name
+      (error "claude--send-message-when-ready: Cannot determine buffer name. work-dir=%S target-buffer-name=%S"
+             work-dir target-buffer-name))
+    (run-with-timer
+     delay nil
+     (lambda (buf-name msg)
+       (let ((buffer (get-buffer buf-name)))
+         (if (and buffer
+                  (buffer-live-p buffer)
+                  (with-current-buffer buffer
+                    (and (boundp 'eat-terminal) eat-terminal)))
+             ;; Send the message
+             (with-current-buffer buffer
+               (eat-term-send-string eat-terminal msg)
+               (sit-for 0.1)
+               (eat-term-send-string eat-terminal "\r")
+               (message "Continuation message sent to Claude"))
+           (message "Warning: Buffer %s not ready to receive message" buf-name))))
+     buffer-name message)))
+
+;;;###autoload
+(defun claude-restart (&optional target-work-dir target-buffer-name)
+  "Restart Claude session, reloading elisp files and MCP server.
+This kills the current session, reloads claudemacs elisp files,
+and starts a new session with --resume to continue the conversation.
+If TARGET-WORK-DIR is provided, restart the session for that directory.
+If TARGET-BUFFER-NAME is provided, restart that specific buffer (for custom-named agents).
+Otherwise, restart the session for the current project."
   (interactive)
-  (claude-agent--in-base-buffer
-   (unless claude-agent--work-dir
-     (error "No work directory set for this session"))
-   (let ((work-dir claude-agent--work-dir)
-         (buf (current-buffer)))
-     ;; Kill existing process
-     (when (and claude-agent--process (process-live-p claude-agent--process))
-       (delete-process claude-agent--process))
-     ;; Clean up MCP config file if it exists
-     (when (and claude-agent--mcp-config-file
-                (file-exists-p claude-agent--mcp-config-file))
-       (delete-file claude-agent--mcp-config-file))
-     ;; Reset state but keep conversation markers
-     (setq claude-agent--process nil
-           claude-agent--mcp-config-file nil
-           claude-agent--thinking-status nil
-           claude-agent--progress-indicators nil)
-     ;; Append restart message to log
-     (claude-agent--append-to-log
-      "\n⟳ Restarting session...\n"
-      'claude-agent-session-face)
-     ;; Start new process with --continue to resume the session
-     (let ((proc (claude-agent--start-process work-dir buf nil t)))
-       (setq claude-agent--process proc))
-     (claude-agent--render-dynamic-section)
-     ;; Send a message to the agent after a short delay to let it initialize
-     (run-with-timer
-      2 nil
-      (lambda (buffer)
-        (when (buffer-live-p buffer)
-          (with-current-buffer buffer
-            (when (and claude-agent--process
-                       (process-live-p claude-agent--process))
-              (process-send-string
-               claude-agent--process
-               (concat (json-encode
-                        '((type . "message")
-                          (text . "Session restarted. MCP server reloaded with any code changes. Please continue.")))
-                       "\n"))))))
-      buf)
-     (message "Session restarted, MCP server reloaded."))))
+  (let* ((work-dir (when-let ((dir (or target-work-dir
+                                       (when-let ((buf (or (when target-buffer-name
+                                                             (get-buffer target-buffer-name))
+                                                           (claude--get-buffer))))
+                                         (with-current-buffer buf claude--cwd)))))
+                     (expand-file-name dir)))
+         ;; FIX: Find any Claude buffer for work-dir, not just simple pattern
+         (claude-buffer (or (when target-buffer-name
+                                  (get-buffer target-buffer-name))
+                                (when work-dir
+                                  (cl-find-if
+                                   (lambda (buf)
+                                     (and (string-match-p "^\\*claude:" (buffer-name buf))
+                                          (with-current-buffer buf
+                                            (equal (expand-file-name claude--cwd) work-dir))))
+                                   (buffer-list)))))
+         ;; FIX: Parse buffer name to extract agent name
+         (buffer-components (when claude-buffer
+                              (claude--parse-buffer-name (buffer-name claude-buffer))))
+         (agent-name (when buffer-components (cdr buffer-components)))
+         ;; FIX: Build work-dir-arg as list for agent-name sessions
+         (work-dir-arg (if agent-name
+                          (list work-dir agent-name)
+                        work-dir))
+         ;; For now, don't try to restore specific sessions for multi-agent buffers
+         ;; Just use --continue which will resume the most recent session
+         (session-id nil)
+         (this-file (or load-file-name
+                        (locate-library "claudemacs")))
+         (this-dir (when this-file (file-name-directory this-file)))
+         ;; Check if buffer was visible before we kill it
+         (buffer-was-visible (and claude-buffer
+                                  (get-buffer-window claude-buffer t))))
+    ;; Validate we have a session to restart
+    (unless work-dir
+      (error "No Claude session to restart (no work-dir)"))
+    (unless claude-buffer
+      (error "No Claude session found for directory: %s (buffer: %s)"
+             work-dir target-buffer-name))
 
+    ;; Kill the target session
+    (message "Killing Claude session for %s..." work-dir)
+    (with-current-buffer claude-buffer
+      (eat-kill-process)
+      (kill-buffer claude-buffer))
 
+    ;; Reload elisp files
+    (message "Reloading claudemacs elisp files...")
+    (when this-dir
+      (load-file (expand-file-name "claude-ai.el" this-dir))
+      (load-file (expand-file-name "claudemacs.el" this-dir)))
 
-(defun claude-agent-show-cost ()
-  "Show token usage and cost for current session."
+    ;; Start new session with either --resume <id> or --continue
+    ;; Always spawn without stealing focus
+    (let ((session-args (if session-id
+                           (list "--resume" session-id)
+                         (list "--continue"))))
+      (message "Starting new Claude session with %s %s..."
+               (car session-args)
+               (or (cadr session-args) ""))
+      (let ((claude-switch-to-buffer-on-create nil)
+            ;; FIX: Compute expected buffer name from work-dir-arg
+            (new-buffer-name (if agent-name
+                                (format "*claude:%s:%s*" work-dir agent-name)
+                              (format "*claude:%s*" work-dir))))
+        ;; FIX: Pass work-dir-arg instead of just work-dir
+        (apply #'claude--start work-dir-arg session-args)
+
+        ;; If buffer wasn't visible before, hide it now
+        (unless buffer-was-visible
+          (when-let* ((new-buffer (get-buffer new-buffer-name))
+                      (window (get-buffer-window new-buffer t)))
+            (delete-window window)))
+
+        ;; Send continuation message after a delay
+        (claude--send-message-when-ready
+         work-dir
+         "Session restarted - elisp and MCP server reloaded. Please continue."
+         5  ;; delay in seconds
+         nil  ;; attempt parameter (unused but kept for backwards compatibility)
+         new-buffer-name)
+
+        (message "Claude restarted successfully for %s" work-dir)))))
+
+(defun claude--validate-process ()
+  "Validate that the Claude process is alive and running."
+  (let ((buffer (claude--get-buffer)))
+    (unless buffer
+      (error "No Claude session is active"))
+    (with-current-buffer buffer
+      (unless (and (boundp 'eat-terminal) eat-terminal)
+        (error "Claude session exists but terminal is not initialized. Please kill buffer and restart"))
+      (let ((process (eat-term-parameter eat-terminal 'eat--process)))
+        (unless (and process (process-live-p process))
+          (error "Claude session exists but process is not running. Please  kill buffer and restart")))))
+  t)
+
+(defun claude--validate-file-and-session ()
+  "Validate that we have a file, project, and active Claude session."
+  ;; Buffer must be visiting a file because all calling functions use claude--get-file-context
+  ;; which depends on buffer-file-name for relative path calculation and Claude context
+  (unless (buffer-file-name)
+    (error "Buffer is not visiting a file - save the buffer first or switch to a file buffer"))
+  (unless (claude--project-root)
+    (error "Not in a project"))
+  (claude--validate-process))
+
+(defun claude--get-session-cwd ()
+  "Get the stored cwd from the current session."
+  (if-let* ((buffer (claude--get-buffer)))
+      (with-current-buffer buffer
+        claude--cwd)))
+
+(defun claude--get-file-context ()
+  "Get file context information for the current buffer.
+Returns a plist with :file-path, :project-cwd, and :relative-path."
+  (let* ((file-path (buffer-file-name))
+         (cwd (claude--get-session-cwd))
+         (relative-path (file-relative-name file-path cwd)))
+    (list :file-path file-path
+          :project-cwd cwd
+          :relative-path relative-path)))
+
+(defun claude--send-message-to-claude (message &optional no-return no-switch clear-first)
+  "Send MESSAGE to the active Claude session.
+If NO-RETURN is non-nil, don't send a return/newline.
+If NO-SWITCH is non-nil, don't switch to the Claude buffer.
+If CLEAR-FIRST is non-nil, send C-u to clear any partial input first."
+  (claude--validate-process)
+  (let ((claude-buffer (claude--get-buffer)))
+    (with-current-buffer claude-buffer
+      (when clear-first
+        (eat-term-send-string eat-terminal "\C-u"))
+      (eat-term-send-string eat-terminal message)
+      (unless no-return
+        ;; Use eat-term-input-event for proper terminal input handling
+        (eat-term-input-event eat-terminal 1 'return)))
+    (unless no-switch
+      (claude--switch-to-buffer))))
+
+(defun claude--format-context-line-range (relative-path start-line end-line)
+  "Format context for a line range in RELATIVE-PATH from START-LINE to END-LINE."
+  (if (= start-line end-line)
+      (format "File context: %s:%d\n" relative-path start-line)
+    (format "File context: %s:%d-%d\n" relative-path start-line end-line)))
+
+(defun claude--scroll-to-bottom ()
+  "Scroll the Claude buffer to bottom without switching to it."
   (interactive)
-  (let ((cost (plist-get claude-agent--session-info :cost))
-        (input claude-agent--input-tokens)
-        (output claude-agent--output-tokens))
-    (message "Session cost: $%.4f | Last turn: %s in / %s out tokens"
-             (or cost 0)
-             (or input 0)
-             (or output 0))))
+  (when-let* ((claude-buffer (claude--get-buffer))
+              (claude-window (get-buffer-window claude-buffer)))
+    (with-current-buffer claude-buffer
+      (goto-char (point-max))
+      (set-window-point claude-window (point-max)))))
 
-;;;; Progress indicator management
-
-(defun claude-agent-toggle-progress ()
-  "Toggle visibility of progress indicators."
+(defun claude--scroll-to-top ()
+  "Scroll the Claude buffer to top without switching to it."
   (interactive)
-  (setq claude-agent--progress-visible (not claude-agent--progress-visible))
-  (claude-agent--render-dynamic-section)
-  (message "Progress indicators %s" (if claude-agent--progress-visible "shown" "hidden")))
+  (when-let* ((claude-buffer (claude--get-buffer))
+              (claude-window (get-buffer-window claude-buffer)))
+    (with-current-buffer claude-buffer
+      (goto-char (point-min))
+      (set-window-point claude-window (point-min)))))
 
-(defun claude-agent-toggle-todos ()
-  "Toggle visibility of todo list."
+;;;###autoload
+(defun claude-fix-error-at-point ()
+  "Send a request to Claude to fix the error at point using flycheck."
   (interactive)
-  (setq claude-agent--todos-visible (not claude-agent--todos-visible))
-  (claude-agent--render-dynamic-section)
-  (message "Todo list %s" (if claude-agent--todos-visible "shown" "hidden")))
+  (claude--validate-file-and-session)
+  
+  (let* ((context (claude--get-file-context))
+         (relative-path (plist-get context :relative-path))
+         (line-number (line-number-at-pos))
+         (errors (claude--get-flycheck-errors-on-line))
+         (error-message (claude--format-flycheck-errors errors))
+         (message-text (if (string-empty-p error-message)
+                          (format "Please fix any issues at %s:%d"
+                                  relative-path line-number)
+                        (format "Please fix the error at %s:%d, error message: %s"
+                                relative-path line-number error-message))))
+    
+    (claude--send-message-to-claude message-text
+                                        nil
+                                        (not claude-switch-to-buffer-on-send-error))
+    (message "Sent error fix request to Claude")))
 
-(defun claude-agent-progress-start (label &optional id percent)
-  "Start a progress indicator with LABEL at PERCENT (default 0).
-Returns the progress ID. Optional ID allows specifying a custom identifier."
-  (unless claude-agent--progress-indicators
-    (setq claude-agent--progress-indicators (make-hash-table :test 'equal)))
-  (let ((progress-id (or id (format "progress-%s" (format-time-string "%s%N"))))
-        (pct (or percent 0)))
-    (puthash progress-id
-             (list :label label
-                   :percent (if (numberp pct) pct (string-to-number pct))
-                   :start-time (current-time))
-             claude-agent--progress-indicators)
-    (claude-agent--render-dynamic-section)
-    progress-id))
+;;;###autoload
+(defun claude-execute-request ()
+  "Execute a Claude request with file context.
+If a region is selected, use it as context with line range.
+Otherwise, use current line as context."
+  (interactive)
+  (claude--validate-file-and-session)
+  
+  (let* ((context (claude--get-file-context))
+         (relative-path (plist-get context :relative-path))
+         (has-region (use-region-p))
+         (start-line (if has-region
+                         (line-number-at-pos (region-beginning))
+                       (line-number-at-pos)))
+         (end-line (if has-region
+                       (line-number-at-pos (region-end))
+                     (line-number-at-pos)))
+         (context-text (claude--format-context-line-range relative-path start-line end-line))
+         (request (read-string "Claude request: "))
+         (message-text (concat context-text request)))
+    
+    (when (string-empty-p (string-trim request))
+      (error "Request cannot be empty"))
+    
+    (claude--send-message-to-claude message-text)
+    (message "Sent request to Claude with context")))
 
-(defun claude-agent-progress-update (id &optional label percent)
-  "Update progress indicator ID.
-LABEL updates the text label (nil keeps current).
-PERCENT sets progress 0-100 (nil keeps current)."
-  (when (and claude-agent--progress-indicators
-             (gethash id claude-agent--progress-indicators))
-    (let ((info (gethash id claude-agent--progress-indicators)))
-      (when label
-        (plist-put info :label label))
-      (when percent
-        (plist-put info :percent (if (numberp percent) percent (string-to-number percent))))
-      (puthash id info claude-agent--progress-indicators))
-    (claude-agent--render-dynamic-section))
-  id)
+;;;###autoload
+(defun claude-ask-without-context ()
+  "Ask Claude a question without file or line context.
+Prompts for a question and sends it directly to Claude without any 
+file location or context information."
+  (interactive)
+  (claude--validate-process)
+  
+  (let ((request (read-string "Ask Claude: ")))
+    (when (string-empty-p (string-trim request))
+      (error "Request cannot be empty"))
+    
+    (claude--send-message-to-claude request)
+    (message "Sent question to Claude")))
 
-(defun claude-agent-progress-stop (id &optional final-message)
-  "Stop progress indicator ID.
-Optional FINAL-MESSAGE is displayed briefly in the echo area."
-  (when (and claude-agent--progress-indicators
-             (gethash id claude-agent--progress-indicators))
-    (remhash id claude-agent--progress-indicators)
-    (claude-agent--render-dynamic-section)
-    (when final-message
-      (message "✓ %s" final-message)))
-  "stopped")
+;;;###autoload
+(defun claude-add-file-reference ()
+  "Add a file reference to the Claude conversation.
+Prompts for a file and sends @rel/path/to/file without newline."
+  (interactive)
+  (claude--validate-file-and-session)
+  
+  (let* ((context (claude--get-file-context))
+         (cwd (plist-get context :project-cwd))
+         (selected-file (read-file-name "Add file reference: "))
+         (relative-path (file-relative-name selected-file cwd))
+         (reference-text (format "@%s " relative-path)))
+    
+    (claude--send-message-to-claude reference-text t (not claude-switch-to-buffer-on-file-add))
+    (message "Added file reference: @%s" relative-path)))
 
-(defun claude-agent--model-description ()
-  "Return a description of the current model for transient."
-  (let ((model (claude-agent--current-model)))
-    (if model
-        (format "Current: %s" (claude-agent--format-model-for-display model))
-      "No model set")))
+;;;###autoload
+(defun claude-add-current-file-reference ()
+  "Add current file reference to the Claude conversation.
+Sends @rel/path/to/current/file without newline."
+  (interactive)
+  (claude--validate-file-and-session)
+  
+  (let* ((context (claude--get-file-context))
+         (relative-path (plist-get context :relative-path))
+         (reference-text (format "@%s " relative-path)))
+    
+    (claude--send-message-to-claude reference-text t (not claude-switch-to-buffer-on-file-add))
+    (message "Added current file reference: @%s" relative-path)))
 
-(defun claude-agent--session-description ()
-  "Return session info description for transient."
-  (let ((session-id (plist-get claude-agent--session-info :session-id)))
-    (if session-id
-        (format "Session: %s" (substring session-id 0 (min 8 (length session-id))))
-      "No session")))
+;;;###autoload
+(defun claude-add-context ()
+  "Add file context with line number(s) to the Claude conversation.
+If a region is selected, uses line range (path:start-end).
+Otherwise, uses current line (path:line).
+Sends without newline so you can continue typing."
+  (interactive)
+  (claude--validate-file-and-session)
+
+  (let* ((context (claude--get-file-context))
+         (relative-path (plist-get context :relative-path))
+         (has-region (use-region-p))
+         (start-line (if has-region
+                         (line-number-at-pos (region-beginning))
+                       (line-number-at-pos)))
+         (end-line (if has-region
+                       (line-number-at-pos (region-end))
+                     (line-number-at-pos)))
+         (context-text (if (and has-region (not (= start-line end-line)))
+                           (format "%s:%d-%d " relative-path start-line end-line)
+                         (format "%s:%d " relative-path start-line))))
+
+    (claude--send-message-to-claude context-text t (not claude-switch-to-buffer-on-add-context))
+    (message "Added context: %s" (string-trim context-text))))
+
+;;;###autoload
+(defun claude-paste-context-to-shell ()
+  "Paste current point/selection context into claudemacs shell without sending.
+Shows buffer name, file name, line numbers, and the actual content with line number prefixes.
+Works with both file buffers and non-file buffers.
+This allows you to review and edit the context before sending to Claude."
+  (interactive)
+  (claude--validate-process)
+
+  (let* ((has-file (buffer-file-name))
+         (context (when has-file
+                    (condition-case nil
+                        (claude--get-file-context)
+                      (error nil))))
+         (relative-path (when context (plist-get context :relative-path)))
+         (buffer-identifier (if has-file
+                               (or relative-path (file-name-nondirectory has-file))
+                             (buffer-name)))
+         (has-region (use-region-p))
+         (start-pos (if has-region
+                        (region-beginning)
+                      (line-beginning-position)))
+         (end-pos (if has-region
+                      (region-end)
+                    (line-end-position)))
+         (start-line (line-number-at-pos start-pos))
+         (end-line (line-number-at-pos end-pos))
+         (content (buffer-substring-no-properties start-pos end-pos))
+         ;; Split content into lines and add line number prefixes
+         (content-lines (split-string content "\n"))
+         (numbered-lines (let ((line-num start-line)
+                               (result '()))
+                           (dolist (line content-lines)
+                             (push (format "%4d %s" line-num line) result)
+                             (setq line-num (1+ line-num)))
+                           (nreverse result)))
+         (numbered-content (string-join numbered-lines "\n"))
+         ;; Build header with buffer name and location
+         (header (if (= start-line end-line)
+                    (format "Buffer: %s\nFile: %s:%d\n"
+                            (buffer-name)
+                            buffer-identifier
+                            start-line)
+                  (format "Buffer: %s\nFile: %s:%d-%d\n"
+                          (buffer-name)
+                          buffer-identifier
+                          start-line
+                          end-line)))
+         (message-text (format "%s%s\n\n" header numbered-content)))
+
+    ;; Send to Claude without return and without switching
+    (claude--send-message-to-claude message-text t t)
+    ;; Now switch to Claude buffer so user can see and edit
+    (claude--switch-to-buffer)
+    (message "Pasted context to Claude shell (not sent)")))
+
+;;;###autoload
+(defun claude-generate-commit-message ()
+  "Generate a commit message using Claude based on staged git changes.
+This runs a one-shot Claude session in the background and inserts the result.
+No interaction with the Claude buffer is needed."
+  (interactive)
+
+  ;; Check if we're in a commit buffer
+  (unless (or (and (buffer-file-name)
+                   (string-match-p "COMMIT_EDITMSG" (buffer-file-name)))
+              (and (boundp 'git-commit-mode) git-commit-mode)
+              (string-match-p "\\*magit.*commit\\*" (buffer-name)))
+    (error "This command should be run from a git commit message buffer"))
+
+  ;; Get the staged diff
+  (let* ((default-directory (or (vc-git-root default-directory)
+                                default-directory))
+         (diff-output (shell-command-to-string "git diff --staged")))
+
+    (when (string-empty-p (string-trim diff-output))
+      (error "No staged changes found. Stage some changes first with 'git add'"))
+
+    ;; Save current buffer to insert into later
+    (let ((target-buffer (current-buffer))
+          (temp-buffer (generate-new-buffer " *claude-commit-temp*")))
+
+      (message "Generating commit message with Claude...")
+
+      ;; Create the prompt
+      (let* ((prompt (format "Analyze these git staged changes and generate ONLY a commit message (no extra text, no markdown, no explanations).
+
+Format:
+- First line: Clear title in imperative mood, under 50 characters
+- Blank line
+- Description: Explain what changed and why (2-4 sentences)
+
+Staged changes:
+```
+%s
+```
+
+Return ONLY the commit message, nothing else." diff-output))
+             (prompt-file (make-temp-file "claude-commit-prompt-" nil ".txt" prompt)))
+
+        ;; Run Claude asynchronously
+        (set-process-sentinel
+         (start-process "claude-commit" temp-buffer
+                       claude-program
+                       "--dangerously-skip-permissions"
+                       "--prompt" (format "@%s" prompt-file))
+         (lambda (process event)
+           (when (string-match-p "finished" event)
+             (with-current-buffer (process-buffer process)
+               ;; Extract commit message from Claude's output
+               (goto-char (point-min))
+               ;; Skip to the actual response (after prompt echo and thinking)
+               (let ((response-start (or (search-forward "\n\n" nil t)
+                                        (point-min))))
+                 (goto-char response-start)
+                 (let ((commit-msg (buffer-substring-no-properties (point) (point-max))))
+                   ;; Clean up the message
+                   (setq commit-msg (string-trim commit-msg))
+                   ;; Remove any markdown code blocks
+                   (setq commit-msg (replace-regexp-in-string "^```.*\n" "" commit-msg))
+                   (setq commit-msg (replace-regexp-in-string "\n```$" "" commit-msg))
+
+                   ;; Insert into target buffer
+                   (when (buffer-live-p target-buffer)
+                     (with-current-buffer target-buffer
+                       (goto-char (point-min))
+                       (insert commit-msg "\n\n")
+                       (goto-char (point-min))
+                       (message "Commit message generated!")))
+
+                   ;; Clean up
+                   (delete-file prompt-file)
+                   (kill-buffer (process-buffer process))))))
+
+           (when (string-match-p "\\(exited\\|failed\\)" event)
+             (delete-file prompt-file)
+             (kill-buffer temp-buffer)
+             (message "Failed to generate commit message: %s" event))))))))
+
+
+
+;;;###autoload
+(defun claude-implement-comment ()
+  "Send comment at point or region to Claude for implementation.
+If region is active, uses the exact region.
+If no region, finds the comment block at point.
+Extracts comment text and sends it to Claude with implementation instructions."
+  (interactive)
+  (claude--validate-file-and-session)
+  
+  (let* ((context (claude--get-file-context))
+         (relative-path (plist-get context :relative-path))
+         comment-bounds
+         comment-text
+         start-line
+         end-line)
+    
+    (cond
+     ;; Case 1: Region is active - use exact region (respect user's intentions)
+     ((use-region-p)
+      (let ((region-start (region-beginning))
+            (region-end (region-end)))
+        (setq start-line (line-number-at-pos region-start))
+        (setq end-line (line-number-at-pos region-end))
+        (setq comment-text (claude--extract-comment-text region-start region-end))))
+     
+     ;; Case 2: No region - find comment at point
+     (t
+      (setq comment-bounds (claude--get-comment-bounds))
+      
+      (unless comment-bounds
+        (error "Point is not inside a comment"))
+      
+      (setq start-line (line-number-at-pos (car comment-bounds)))
+      (setq end-line (line-number-at-pos (cdr comment-bounds)))
+      (setq comment-text (claude--extract-comment-text 
+                         (car comment-bounds) 
+                         (cdr comment-bounds)))))
+    
+    ;; Validate we have comment text
+    (when (string-empty-p (string-trim comment-text))
+      (error "No comment text found to implement"))
+    
+    ;; Format the message with file context and implementation request
+    (let* ((context-text (claude--format-context-line-range 
+                         relative-path start-line end-line))
+           (message-text (format "%sPlease implement this comment:\n\n%s"
+                                context-text comment-text)))
+      
+      (claude--send-message-to-claude message-text)
+      (message "Sent comment implementation request to Claude (%d lines)" 
+               (1+ (- end-line start-line))))))
+
+;;;###autoload
+(defun claude-toggle-buffer ()
+  "Toggle Claude buffer visibility.
+Hide if current, focus if visible elsewhere, show if hidden."
+  (interactive)
+  (let ((claude-buffer (claude--get-buffer)))
+    (cond
+     ;; Case 1: No Claude session exists
+     ((not (claude--validate-process))
+      (error "No Claude session is active"))
+     
+     ;; Case 2: Current buffer IS the Claude buffer
+     ((eq (current-buffer) claude-buffer)
+      ;; Hide using quit-window (automatically handles window vs buffer logic)
+      (quit-window))
+     
+     ;; Case 3: Claude buffer visible in another window
+     ((get-buffer-window claude-buffer)
+      ;; Quit that window (automatically handles created vs reused)
+      ;;
+      ;; Edge case: the window was created for Claude, but in the meantime you
+      ;; have switched to another workspace and back, the window is no longer
+      ;; created just for claudemacs -- it has shown something previous, so it
+      ;; will no longer go away if you toggle. Them's the breaks.
+      (with-selected-window (get-buffer-window claude-buffer)
+        (quit-window)))
+     
+     ;; Case 4: Claude buffer exists but not visible
+     (t
+      ;; Show Claude buffer
+      (if claude-switch-to-buffer-on-toggle
+          (claude--switch-to-buffer)
+        (progn
+          (display-buffer claude-buffer)
+          ;; Move to bottom without switching focus
+          (with-current-buffer claude-buffer
+            (set-window-point (get-buffer-window claude-buffer) (point-max)))))))))
+
+;;;; User Interface
+;;;###autoload (autoload 'claude-transient-menu "claudemacs" nil t)
+(transient-define-prefix claude-transient-menu ()
+  "Claude Code AI Pair Programming Interface."
+  ["Claude: AI pair programming with Claude Code"
+   ["Core"
+    ("s" "Start/Open Session" claude-run)
+    ("r" "Start with Resume" claude-resume)
+    ("R" "Restart Session" claude-restart)
+    ("k" "Kill Session" claude-kill)
+    ("t" "Toggle Buffer" claude-toggle-buffer)
+    ("l" "List All Sessions" claude-list-sessions)]
+   ["Actions"
+    ("e" "Fix Error at Point" claude-fix-error-at-point)
+    ("x" "Execute Request (with context)" claude-execute-request)
+    ("X" "Execute Request (no context)" claude-ask-without-context)
+    ("i" "Implement Comment" claude-implement-comment)
+    ("c" "Generate Commit Message" claude-generate-commit-message)
+    ("f" "Add File Reference" claude-add-file-reference)
+    ("F" "Add Current File" claude-add-current-file-reference)
+    ("a" "Add Context" claude-add-context)
+    ("p" "Paste Context to Shell" claude-paste-context-to-shell)]
+   ["Quick Responses"
+     ("y" "Send Yes (RET)" claude-send-yes)
+     ("n" "Send No (ESC)" claude-send-no)]]
+   ["Maintenance"
+     ("u" "Unstick Claude buffer" claude-unstick-terminal)])
+
+;;;###autoload
+(defvar claude-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-c t") #'claude-clear-buffer)
+    (define-key map (kbd "C-c s") #'claude-spawn-agent)
+    map)
+  "Keymap for `claude-mode'.")
+
+;;;###autoload
+(define-minor-mode claude-mode
+  "Minor mode for Claude Code AI pair programming.
+
+\\{claude-mode-map}"
+  :lighter " Claude"
+  :keymap claude-mode-map
+  :group 'claude-agent)
+
+(defun claude--show-cursor (&rest _args)
+  "Show cursor in Claude buffers when in Emacs mode."
+  (when (claude--is-claude-buffer-p)
+    (setq-local cursor-type 'box)))
+
+(defun claude--hide-cursor (&rest _args)
+  "Hide cursor in Claude buffers when in semi-char mode."
+  (when (claude--is-claude-buffer-p)
+    (setq-local cursor-type nil)))
+
+(defun claude--check-and-disable-window-adjust (&rest _)
+  "Check if buffer is longer than one screen and disable window adjustment if so."
+  (when (and (not (eq window-adjust-process-window-size-function 'ignore))
+             (claude--is-claude-buffer-p))
+    (let* ((claude-buffer (current-buffer))
+           (claude-window (get-buffer-window claude-buffer))
+           (window-ht (when claude-window (window-height claude-window)))
+           (buffer-lines (count-lines (point-min) (point-max))))
+      ;; If buffer has more lines than window height, switch to 'ignore mode
+      (when (and window-ht (> buffer-lines window-ht))
+        (goto-char (point-min))
+        (redisplay)
+        (goto-char (point-max))
+        (redisplay)
+        ;; CRITICAL: Disable window-adjust-process-window-size-function to prevent
+        ;; terminal redraw/scroll reset on buffer switching (same issue as vterm #149)
+        (setq-local window-adjust-process-window-size-function 'ignore)))))
+
+(defun claude--eat-force-redraw ()
+  "Forces the eat terminal and the underlying program to redraw.
+
+This is useful if the display becomes corrupted after Emacs window
+resizes or other external changes that might not have been fully
+propagated. It attempts to resynchronize the PTY size, the
+eat emulator's internal dimensions, and trigger a redisplay."
+  (interactive)
+  (with-current-buffer (claude--get-buffer)
+    (when (and (boundp 'eat-terminal) eat-terminal)
+        (let* ((process (eat-term-parameter eat-terminal 'eat--process))
+               (claude-window (get-buffer-window (claude--get-buffer))))
+          (if (and process (process-live-p process) claude-window)
+              (eat--adjust-process-window-size process (list claude-window)))))))
+
+;; You might want to bind this to a key, for example:
+;; (define-key eat-mode-map (kbd "C-c C-r") #'eat-force-redraw) ;; 'r' for redraw
+
+(defun claude-unstick-terminal ()
+  "Reset the Claude buffer's vertical rest point.
+Sometimes the input box gets stuck mid or top of the buffer because of
+the idiosyncracies of eat-mode. This will reset the input box to the
+bottom of the buffer."
+  (interactive)
+  (claude--validate-process)
+  (when (claude--is-claude-buffer-p)
+    (error "Reset buffer cannot be used while visiting the Claude buffer itself"))
+  (claude--eat-force-redraw)
+  (with-current-buffer (claude--get-buffer)
+    (setq-local window-adjust-process-window-size-function
+                'window-adjust-process-window-size-smallest))
+  (claude--scroll-to-top)
+  (redisplay)
+  (claude--scroll-to-bottom)
+  (redisplay)
+  (with-current-buffer (claude--get-buffer)
+    ;; CRITICAL: Disable window-adjust-process-window-size-function to prevent
+    ;; terminal redraw/scroll reset on buffer switching (same issue as vterm #149)
+    (setq-local window-adjust-process-window-size-function 'ignore)))
+
+;; Set up hooks when package is loaded
+(unless (memq 'claude--check-and-disable-window-adjust window-buffer-change-functions)
+  (add-hook 'window-buffer-change-functions #'claude--check-and-disable-window-adjust))
+
+;; Set up advice when package is loaded
+(unless (advice-member-p #'claude--show-cursor 'eat-emacs-mode)
+  (advice-add 'eat-emacs-mode :after #'claude--show-cursor))
+
+(unless (advice-member-p #'claude--hide-cursor 'eat-semi-char-mode)
+  (advice-add 'eat-semi-char-mode :after #'claude--hide-cursor))
 
 (provide 'claude-agent)
 ;;; claude-agent.el ends here

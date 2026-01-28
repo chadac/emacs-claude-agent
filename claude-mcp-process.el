@@ -9,7 +9,7 @@
 
 ;;; Code:
 
-(require 'claude-agent)
+(require 'claude-agent-repl)
 (require 'claude-mcp)  ; Will be renamed from claude-ai.el
 (require 'claude-sessions)
 

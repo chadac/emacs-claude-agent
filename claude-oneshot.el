@@ -17,7 +17,7 @@
 ;; - C-c c d: Directory scope - can edit files in current directory
 ;; - C-c c p: Project scope - can edit any file in project
 ;;; Code:
-(require 'claude-agent)
+(require 'claude-agent-repl)
 (require 'claude-mcp)
 
 ;;;; Customization
@@ -447,6 +447,7 @@ Long messages are wrapped to fit within the box."
             (delete-overlay ov)))
         (setq claude-oneshot--tooltip-overlays nil)))))
 
+;;;###autoload
 (defun claude-oneshot-dismiss-tooltips ()
   "Dismiss all oneshot completion tooltips in the current buffer."
   (interactive)

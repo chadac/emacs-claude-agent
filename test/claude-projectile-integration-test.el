@@ -23,7 +23,7 @@
 
 ;; Add parent directory to load path to find claudemacs
 (add-to-list 'load-path (file-name-directory (directory-file-name (file-name-directory load-file-name))))
-(require 'claude)
+(require 'claude-agent)
 
 ;; Smart projectile loading - try to find projectile in user's installation
 (defun claudemacs-test--try-load-projectile ()
