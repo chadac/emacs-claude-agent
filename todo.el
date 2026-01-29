@@ -565,29 +565,25 @@ TODO Management:
 
 ;;;; Create Worktree
 
-(defun org-roam-todo--send-task-to-buffer (buffer-name content worktree-path &optional delay)
-  "Send task CONTENT to BUFFER-NAME after optional DELAY seconds.
-WORKTREE-PATH is included in the message for context."
-  (let ((send-fn (lambda (buf-name task-content wpath)
-                   (message "Sending task to %s..." buf-name)
-                   (let ((buffer (get-buffer buf-name)))
-                     (if (not buffer)
-                         (message "ERROR: Buffer %s not found" buf-name)
-                       (with-current-buffer buffer
-                         (if (not (and (boundp 'claude-agent--process)
-                                       claude-agent--process
-                                       (process-live-p claude-agent--process)))
-                             (message "ERROR: Claude agent not ready in %s" buf-name)
-                           (let ((msg (format "[WORKTREE TASK]\n\n%s\n\nWorktree: %s\nPlease help me with this task."
-                                              task-content wpath)))
-                             (process-send-string
-                              claude-agent--process
-                              (concat (json-encode `((type . "message") (text . ,msg))) "\n"))
-                             (message "Task sent to %s" buf-name)))))))))
-    (if delay
-        (run-with-timer delay nil send-fn buffer-name content worktree-path)
-      (funcall send-fn buffer-name content worktree-path))))
-
+(defun org-roam-todo--send-task-to-buffer (buffer-name content worktree-path &optional _delay)
+  "Send task CONTENT to BUFFER-NAME by queuing it for the agent.
+WORKTREE-PATH is included in the message for context.
+_DELAY is ignored (kept for API compatibility); messages are queued
+and sent automatically when the agent is ready."
+  (let ((buffer (get-buffer buffer-name)))
+    (if (not buffer)
+        (message "ERROR: Buffer %s not found" buffer-name)
+      (with-current-buffer buffer
+        (let ((msg (format "[WORKTREE TASK]\n\n%s\n\nWorktree: %s\nPlease help me with this task."
+                           content worktree-path)))
+          ;; Use the agent's message queue so it sends when ready
+          (push msg claude-agent--message-queue)
+          ;; If already ready, send immediately
+          (when (and claude-agent--process
+                     (process-live-p claude-agent--process)
+                     (not (claude-agent--is-busy-p)))
+            (claude-agent--send-next-queued))
+          (message "Task queued for %s" buffer-name))))))
 ;;;###autoload
 (defun org-roam-todo-create-worktree ()
   "Create a worktree for the current TODO and spawn a Claude session.
@@ -643,10 +639,9 @@ If the worktree and session already exist, sends the task to the existing sessio
       (let* ((buf (claude-agent-run worktree-path nil nil nil nil
                                     org-roam-todo-agent-allowed-tools))
              (buffer-name (buffer-name buf)))
-        ;; Wait for session to be ready (5 seconds for Claude to initialize)
-        (org-roam-todo--send-task-to-buffer buffer-name content worktree-path 5)
+        ;; Queue task - will be sent when agent emits "ready"
+        (org-roam-todo--send-task-to-buffer buffer-name content worktree-path)
         (message "Created worktree and spawned Claude session: %s" buffer-name)))))
-
 ;;;; Select TODO → Create Worktree
 
 ;;;###autoload
