@@ -1,11 +1,10 @@
 ;;; claude-comment.el --- Comment parsing and handling for Claude -*- lexical-binding: t; -*-
 
-;; Author: Christopher Poile (extracted from Claude.el)
+;; Author: chadac <chad@cacrawford.org>
 ;; Version: 0.1.0
 ;; Package-Requires: ((emacs "28.1"))
 ;; Keywords: comments parsing text-manipulation
-;; URL: https://github.com/cpoile/Claude
-
+;; URL: https://github.com/chadac/emacs-claude-agent
 ;; This file is not part of GNU Emacs.
 
 ;;; Commentary:

@@ -1,10 +1,9 @@
 ;;; todo.el --- Org-roam TODO management with Claude integration -*- lexical-binding: t; -*-
-;; Author: Claude + Chad Crawford
+;; Author: chadac <chad@cacrawford.org>
 ;; Version: 0.2.0
 ;; Package-Requires: ((emacs "28.1") (org-roam "2.0"))
 ;; Keywords: org-roam todo ai emacs llm tools
-;; URL: https://github.com/cpoile/Claude
-;; SPDX-License-Identifier: MIT
+;; URL: https://github.com/chadac/emacs-claude-agent;; SPDX-License-Identifier: MIT
 
 ;; This file is not part of GNU Emacs.
 

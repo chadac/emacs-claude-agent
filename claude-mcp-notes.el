@@ -1,10 +1,9 @@
 ;;; claude-mcp-notes.el --- Structured org-mode notes for Claude AI -*- lexical-binding: t; -*-
-;; Author: Christopher Poile <cpoile@gmail.com>
+;; Author: chadac <chad@cacrawford.org>
 ;; Version: 0.1.0
 ;; Package-Requires: ((emacs "28.1"))
 ;; Keywords: claudecode ai emacs llm tools org-mode
-;; URL: https://github.com/cpoile/Claude
-;; SPDX-License-Identifier: MIT
+;; URL: https://github.com/chadac/emacs-claude-agent;; SPDX-License-Identifier: MIT
 
 ;; This file is not part of GNU Emacs.
 

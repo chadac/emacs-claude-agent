@@ -1,7 +1,6 @@
 ;;; claude-actions-test.el --- Tests for claude actions -*- lexical-binding: t; -*-
 
-;; Author: Christopher Poile
-;; Version: 0.1.0
+;; Author: chadac <chad@cacrawford.org>;; Version: 0.1.0
 ;; Package-Requires: ((emacs "28.1") (ert "1.0"))
 
 ;;; Commentary:
