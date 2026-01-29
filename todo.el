@@ -75,6 +75,14 @@ Only has effect when `org-roam-todo-auto-commit' is also non-nil."
   :type 'boolean
   :group 'org-roam-todo)
 
+(defcustom org-roam-todo-branch-prefix "feat"
+  "Prefix for generated branch names.
+Branch names are formatted as {prefix}/{slug}.
+For example, with prefix \"chadac\", a TODO titled \"Add feature\"
+would create branch \"chadac/add_feature\"."
+  :type 'string
+  :group 'org-roam-todo)
+
 (defcustom org-roam-todo-agent-allowed-tools
   '("Edit(**)"
     "Write(**)"
@@ -211,7 +219,7 @@ Returns the project root path. Defaults to inferred project from context."
 (defun org-roam-todo--default-branch-name (title)
   "Generate default branch name from TITLE."
   (let ((slug (org-roam-todo--slugify title)))
-    (format "feature/%s" slug)))
+    (format "%s/%s" org-roam-todo-branch-prefix slug)))
 
 ;;;; Node Property Helpers
 
@@ -290,7 +298,7 @@ Auto-infers project from context (including worktree detection)."
   "Pre-trust WORKTREE-PATH in Claude's global config to skip trust dialog.
 Calls the pretrust-directory.py script to add an entry to ~/.claude.json."
   (let* ((script-dir (file-name-directory (or load-file-name buffer-file-name
-                                               (locate-library "todo"))))
+                                               (locate-library "claude-agent"))))
          (script-path (expand-file-name "scripts/pretrust-directory.py" script-dir))
          (expanded-path (expand-file-name worktree-path)))
     (if (file-exists-p script-path)
