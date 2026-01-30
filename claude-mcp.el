@@ -987,12 +987,15 @@ BUF should be a buffer object."
       ;; Replace the region content
       (goto-char start-pos)
       (delete-region start-pos end-pos)
-      (let ((new-start start-pos))
-        (insert content)
+      ;; Ensure content ends with a newline (locked regions include trailing newline)
+      (let* ((normalized-content (if (string-suffix-p "\n" content)
+                                     content
+                                   (concat content "\n")))
+             (new-start start-pos))
+        (insert normalized-content)
         (let ((new-end (point)))
           ;; Flash the new content briefly
-          (claude-mcp--flash-region new-start new-end)))
-      ;; Remove lock from hash
+          (claude-mcp--flash-region new-start new-end)))      ;; Remove lock from hash
       (remhash lock-id claude-mcp--locked-regions)
       ;; Auto-save if buffer was originally unmodified
       (when (and (not was-modified) (buffer-file-name))
