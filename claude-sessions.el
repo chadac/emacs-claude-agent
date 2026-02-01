@@ -148,16 +148,36 @@ and the old eat-based architecture."
     ('dead (propertize "Dead" 'face 'claude-sessions-status-dead))
     (_ (propertize "Unknown" 'face 'font-lock-comment-face))))
 
+(defun claude-sessions--worktree-name (directory)
+  "If DIRECTORY is inside a git worktree, return the worktree name.
+Otherwise return nil."
+  (let ((git-file (expand-file-name ".git" directory)))
+    (when (file-regular-p git-file)
+      ;; .git is a file => this is a worktree
+      (file-name-nondirectory (directory-file-name directory)))))
+
+(defun claude-sessions--worktree-main-project (directory)
+  "If DIRECTORY is a git worktree, return the main project name.
+Otherwise return nil."
+  (let ((git-file (expand-file-name ".git" directory)))
+    (when (file-regular-p git-file)
+      (with-temp-buffer
+        (insert-file-contents git-file)
+        (when (re-search-forward "gitdir: \\(.+\\)" nil t)
+          (let ((gitdir (match-string 1)))
+            (when (string-match "/\\.git/worktrees/" gitdir)
+              (let ((main-repo (substring gitdir 0 (match-beginning 0))))
+                (file-name-nondirectory
+                 (directory-file-name (expand-file-name main-repo)))))))))))
+
 (defun claude-sessions--parse-buffer-name (buffer-name)
   "Parse Claude buffer name into components.
-Returns plist with :directory, :label, and :project."
+Returns plist with :directory and :label."
   (when (string-match "^\\*claude:\\([^:*]+\\)\\(?::\\([^*]+\\)\\)?\\*$" buffer-name)
     (let* ((directory (match-string 1 buffer-name))
-           (label (match-string 2 buffer-name))
-           (project (file-name-nondirectory (directory-file-name directory))))
+           (label (match-string 2 buffer-name)))
       (list :directory directory
-            :label (or label "main")
-            :project project))))
+            :label (or label "main")))))
 
 (defun claude-sessions--get-all-sessions ()
   "Get list of all Claude session buffers with their info.
@@ -169,31 +189,43 @@ Returns a list of plists with session information."
           (let* ((parsed (claude-sessions--parse-buffer-name name))
                  (status (claude-sessions--get-session-status buffer)))
             (when parsed
-              (push (append parsed
-                           (list :buffer-name name
-                                 :buffer buffer
-                                 :status status))
-                    sessions))))))
+              (let* ((real-dir (with-current-buffer buffer
+                                 (directory-file-name default-directory)))
+                     (worktree-name (claude-sessions--worktree-name real-dir))
+                     (main-project (and worktree-name
+                                        (claude-sessions--worktree-main-project real-dir)))
+                     (project (or main-project
+                                  (file-name-nondirectory real-dir))))
+                (push (append parsed
+                              (list :buffer-name name
+                                    :buffer buffer
+                                    :status status
+                                    :project project
+                                    :worktree (or worktree-name "")
+                                    :real-directory real-dir))
+                      sessions)))))))
     (nreverse sessions)))
 
 ;;;; Tabulated List Mode Implementation
 
 (defun claude-sessions--get-entries ()
-  "Get tabulated list entries for all Claude sessions."
+  "Get tabulated list entries for all Claude sessions.
+Columns: Project, Label, Status, Worktree, Directory."
   (mapcar
    (lambda (session)
      (let* ((buffer-name (plist-get session :buffer-name))
             (project (plist-get session :project))
-            (directory (plist-get session :directory))
+            (real-directory (plist-get session :real-directory))
             (label (plist-get session :label))
+            (worktree (plist-get session :worktree))
             (status (plist-get session :status)))
        (list buffer-name
              (vector
               (propertize project 'face 'claude-sessions-project)
-              (propertize buffer-name 'face 'claude-sessions-buffer)
               (propertize label 'face 'claude-sessions-label)
               (claude-sessions--format-status status)
-              directory))))
+              worktree
+              real-directory))))
    (claude-sessions--get-all-sessions)))
 
 (defun claude-sessions--get-marked-ids ()
@@ -373,9 +405,9 @@ Handles both new agent and old eat-based architectures."
 \\{claude-sessions-mode-map}"
   (setq tabulated-list-format
         [("Project" 20 t)
-         ("Buffer" 50 t)
          ("Label" 15 t)
          ("Status" 10 t)
+         ("Worktree" 30 t)
          ("Directory" 40 t)])
   (setq tabulated-list-padding 2)
   (setq tabulated-list-sort-key '("Project" . nil))
