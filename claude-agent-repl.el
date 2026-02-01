@@ -2659,6 +2659,11 @@ Optional ADDITIONAL-ALLOWED-TOOLS is a list of extra tools to pre-authorize."
             claude-agent--work-dir expanded-dir
             default-directory expanded-dir)
 
+      ;; Apply .dir-locals.el from the work directory
+      ;; This activates worktree-specific settings like auto-reject-rules
+      ;; and extra-system-prompt before the process is started.
+      (hack-dir-local-variables-non-file-buffer)
+
       ;; Display history if resuming a specific session
       (when resume-session
         (claude-agent--display-session-history expanded-dir resume-session)))

@@ -329,6 +329,9 @@ class ClaudeAgent:
                 domain = pattern_content[7:]  # Remove "domain:"
                 return domain in url
             input_value = url
+        elif tool_name.startswith("mcp__emacs__"):
+            # MCP emacs tools - match against file_path parameter
+            input_value = tool_input.get("file_path", "")
         else:
             # For unknown tools, try to match any input value
             input_value = str(tool_input)

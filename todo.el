@@ -83,9 +83,7 @@ would create branch \"chadac/add_feature\"."
   :group 'org-roam-todo)
 
 (defcustom org-roam-todo-agent-allowed-tools
-  '("Edit(**)"
-    "Write(**)"
-    "Read(**)"
+  '("Read(**)"
     "Glob(**)"
     "Grep(**)"
     "Bash(git *)"
@@ -110,9 +108,7 @@ would create branch \"chadac/add_feature\"."
     "Bash(diff *)"
     "Bash(tree *)"
     "mcp__emacs__read_file"
-    "mcp__emacs__edit_file"
     "mcp__emacs__read_buffer"
-    "mcp__emacs__edit_buffer"
     "mcp__emacs__magit_status"
     "mcp__emacs__magit_diff"
     "mcp__emacs__magit_log"
@@ -124,7 +120,6 @@ would create branch \"chadac/add_feature\"."
     "mcp__emacs__todo_update_status"
     "mcp__emacs__kb_search"
     "mcp__emacs__kb_get"
-    "mcp__emacs__lock"
     "mcp__emacs__edit"
     "mcp__emacs__unlock"
     "mcp__emacs__request_attention")
@@ -133,7 +128,10 @@ These tools will be allowed without permission prompts, enabling
 more autonomous operation.  Uses Claude Code permission pattern syntax:
 - ToolName(**) for recursive file access
 - Bash(pattern*) for specific bash commands
-- mcp__server__tool for MCP tools"
+- mcp__server__tool for MCP tools
+Note: mcp__emacs__lock is NOT in this list because it is added
+dynamically with path-scoping at worktree dispatch time.
+Edit/Write are also excluded since agents must use lock/edit/unlock."
   :type '(repeat string)
   :group 'org-roam-todo)
 
@@ -714,9 +712,11 @@ If the worktree and session already exist, sends the task to the existing sessio
           (pop-to-buffer existing-buffer)
           (message "Sent task to existing session: %s" buffer-name))
       ;; New session - pre-trust and spawn with TODO-specific allowed tools
+      ;; Add path-scoped mcp__emacs__lock for worktree directory
       (org-roam-todo--pre-trust-worktree worktree-path)
-      (let* ((buf (claude-agent-run worktree-path nil nil nil nil
-                                    org-roam-todo-agent-allowed-tools))
+      (let* ((lock-pattern (format "mcp__emacs__lock(%s*)" (expand-file-name worktree-path)))
+             (all-tools (append org-roam-todo-agent-allowed-tools (list lock-pattern)))
+             (buf (claude-agent-run worktree-path nil nil nil nil all-tools))
              (buffer-name (buffer-name buf)))
         ;; Queue task - will be sent when agent emits "ready"
         (org-roam-todo--send-task-to-buffer buffer-name content worktree-path)

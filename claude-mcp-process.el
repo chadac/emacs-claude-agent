@@ -124,7 +124,7 @@ use its name, otherwise fall back to the project root."
                 (file-name-nondirectory (directory-file-name session-id)))
       (format "*claude:%s*" session-id))))
 
-(defun claude-mcp--get-buffer ()
+(defun claude-mcp--session-buffer ()
   "Return existing claude buffer for current session."
   (get-buffer (claude-mcp--get-buffer-name)))
 
@@ -145,7 +145,7 @@ Returns cons cell (name . agent-name) or (name . nil)."
 (defun claude-mcp--switch-to-buffer ()
   "Switch to the claude buffer for current session.
 Returns t if switched successfully, nil if no buffer exists."
-  (if-let* ((buffer (claude-mcp--get-buffer)))
+  (if-let* ((buffer (claude-mcp--session-buffer)))
       (progn
         (with-current-buffer buffer
           (unless (and claude-agent--process (process-live-p claude-agent--process))
@@ -158,7 +158,7 @@ Returns t if switched successfully, nil if no buffer exists."
 
 (defun claude-mcp--validate-process ()
   "Validate that the Claude MCP process is alive and running."
-  (let ((buffer (claude-mcp--get-buffer)))
+  (let ((buffer (claude-mcp--session-buffer)))
     (unless buffer
       (error "No Claude MCP session is active"))
     (with-current-buffer buffer
@@ -212,7 +212,7 @@ This works across macOS, Linux, and Windows platforms."
 (defun claude-mcp--scroll-to-bottom ()
   "Scroll the claude buffer to bottom without switching to it."
   (interactive)
-  (when-let* ((claude-buffer (claude-mcp--get-buffer))
+  (when-let* ((claude-buffer (claude-mcp--session-buffer))
               (claude-window (get-buffer-window claude-buffer)))
     (with-current-buffer claude-buffer
       (goto-char (point-max))
@@ -221,7 +221,7 @@ This works across macOS, Linux, and Windows platforms."
 (defun claude-mcp--scroll-to-top ()
   "Scroll the claude buffer to top without switching to it."
   (interactive)
-  (when-let* ((claude-buffer (claude-mcp--get-buffer))
+  (when-let* ((claude-buffer (claude-mcp--session-buffer))
               (claude-window (get-buffer-window claude-buffer)))
     (with-current-buffer claude-buffer
       (goto-char (point-min))
@@ -314,7 +314,7 @@ If NO-RETURN is non-nil, don't send the message (just insert into input area).
 If NO-SWITCH is non-nil, don't switch to the Claude buffer.
 If CLEAR-FIRST is non-nil, clear the input area before inserting."
   (claude-mcp--validate-process)
-  (let ((buffer (claude-mcp--get-buffer)))
+  (let ((buffer (claude-mcp--session-buffer)))
     (with-current-buffer buffer
       (when clear-first
         ;; Clear input area (agent buffer specific)
@@ -410,7 +410,7 @@ With prefix ARG, prompt for the project directory."
 (defun claude-mcp-kill ()
   "Kill Claude MCP process and close its window."
   (interactive)
-  (if-let* ((claude-buffer (claude-mcp--get-buffer)))
+  (if-let* ((claude-buffer (claude-mcp--session-buffer)))
       (progn
         (with-current-buffer claude-buffer
           (when (and claude-agent--process (process-live-p claude-agent--process))
@@ -464,7 +464,7 @@ Returns the buffer name."
   "Toggle Claude buffer visibility.
 Hide if current, focus if visible elsewhere, show if hidden."
   (interactive)
-  (let ((claude-buffer (claude-mcp--get-buffer)))
+  (let ((claude-buffer (claude-mcp--session-buffer)))
     (cond
      ;; Case 1: No Claude session exists
      ((not (ignore-errors (claude-mcp--validate-process)))

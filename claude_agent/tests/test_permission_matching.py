@@ -146,3 +146,106 @@ class TestPermissionMatching:
         assert agent._pattern_matches(pattern, tool_name, {"command": "echo hello"})
         assert agent._pattern_matches(pattern, tool_name, {"command": "echo -n test"})
         assert not agent._pattern_matches(pattern, tool_name, {"command": "ls"})
+
+    def test_mcp_emacs_lock_path_scoped(self):
+        """Test that mcp__emacs__lock can be path-scoped to a worktree."""
+        agent = ClaudeAgent("/tmp/test")
+
+        pattern = "mcp__emacs__lock(/home/user/worktree/*)"
+        tool_name = "mcp__emacs__lock"
+
+        # Should match files within the worktree
+        assert agent._pattern_matches(pattern, tool_name, {"file_path": "/home/user/worktree/foo.el"})
+        assert agent._pattern_matches(pattern, tool_name, {"file_path": "/home/user/worktree/src/bar.py"})
+
+        # Should NOT match files outside the worktree
+        assert not agent._pattern_matches(pattern, tool_name, {"file_path": "/home/user/main-repo/foo.el"})
+        assert not agent._pattern_matches(pattern, tool_name, {"file_path": "/tmp/other.el"})
+
+    def test_mcp_emacs_lock_no_file_path(self):
+        """Test that mcp__emacs__lock with path pattern doesn't match when no file_path."""
+        agent = ClaudeAgent("/tmp/test")
+
+        pattern = "mcp__emacs__lock(/home/user/worktree/*)"
+        tool_name = "mcp__emacs__lock"
+
+        # No file_path in input — should not match
+        assert not agent._pattern_matches(pattern, tool_name, {"buffer_name": "foo.el", "start_line": 1, "end_line": 5})
+
+    def test_mcp_emacs_lock_unconditional(self):
+        """Test that bare mcp__emacs__lock matches any invocation."""
+        agent = ClaudeAgent("/tmp/test")
+
+        pattern = "mcp__emacs__lock"
+        tool_name = "mcp__emacs__lock"
+
+        assert agent._pattern_matches(pattern, tool_name, {"file_path": "/any/path.el"})
+        assert agent._pattern_matches(pattern, tool_name, {"buffer_name": "foo"})
+
+    def test_mcp_emacs_edit_unconditional(self):
+        """Test that mcp__emacs__edit matches unconditionally (safe — requires prior lock)."""
+        agent = ClaudeAgent("/tmp/test")
+
+        pattern = "mcp__emacs__edit"
+        tool_name = "mcp__emacs__edit"
+
+        assert agent._pattern_matches(pattern, tool_name, {"content": "new stuff"})
+        assert agent._pattern_matches(pattern, tool_name, {"file_path": "/any/path.el", "content": "x"})
+
+    def test_mcp_emacs_read_file_path_scoped(self):
+        """Test that mcp__emacs__read_file can be path-scoped."""
+        agent = ClaudeAgent("/tmp/test")
+
+        pattern = "mcp__emacs__read_file(/home/user/worktree/*)"
+        tool_name = "mcp__emacs__read_file"
+
+        assert agent._pattern_matches(pattern, tool_name, {"file_path": "/home/user/worktree/foo.el"})
+        assert not agent._pattern_matches(pattern, tool_name, {"file_path": "/home/user/main/foo.el"})
+
+
+class TestAutoRejectRules:
+    """Tests for auto-reject rules (worktree confinement)."""
+
+    def test_path_prefix_rejects_main_repo(self):
+        """Test that path_prefix rule rejects tools targeting main repo."""
+        agent = ClaudeAgent("/tmp/test")
+
+        rule = {
+            "path_prefix": "/home/user/main-repo/",
+            "message": "REJECTED: Edit in worktree instead.",
+        }
+
+        # Should reject tools targeting the main repo
+        assert agent._matches_auto_reject(rule, "mcp__emacs__lock", {"file_path": "/home/user/main-repo/foo.el"})
+        assert agent._matches_auto_reject(rule, "mcp__emacs__lock", {"file_path": "/home/user/main-repo/src/bar.py"})
+        assert agent._matches_auto_reject(rule, "Read", {"file_path": "/home/user/main-repo/README.md"})
+
+        # Should NOT reject tools targeting the worktree
+        assert not agent._matches_auto_reject(rule, "mcp__emacs__lock", {"file_path": "/home/user/worktree/foo.el"})
+        assert not agent._matches_auto_reject(rule, "Read", {"file_path": "/tmp/other.txt"})
+
+    def test_path_prefix_no_file_path(self):
+        """Test that path_prefix rule doesn't reject tools without file_path."""
+        agent = ClaudeAgent("/tmp/test")
+
+        rule = {
+            "path_prefix": "/home/user/main-repo/",
+            "message": "REJECTED",
+        }
+
+        # Tools without file_path should NOT be rejected
+        assert not agent._matches_auto_reject(rule, "Bash", {"command": "ls"})
+        assert not agent._matches_auto_reject(rule, "mcp__emacs__edit", {"content": "new stuff"})
+
+    def test_extract_file_path_for_various_tools(self):
+        """Test _extract_file_path for different tool types."""
+        agent = ClaudeAgent("/tmp/test")
+
+        assert agent._extract_file_path("Read", {"file_path": "/a/b"}) == "/a/b"
+        assert agent._extract_file_path("Write", {"file_path": "/a/b"}) == "/a/b"
+        assert agent._extract_file_path("Edit", {"file_path": "/a/b"}) == "/a/b"
+        assert agent._extract_file_path("mcp__emacs__lock", {"file_path": "/a/b"}) == "/a/b"
+        assert agent._extract_file_path("mcp__emacs__read_file", {"file_path": "/a/b"}) == "/a/b"
+        assert agent._extract_file_path("Glob", {"path": "/a/b"}) == "/a/b"
+        assert agent._extract_file_path("Grep", {"path": "/a/b"}) == "/a/b"
+        assert agent._extract_file_path("Bash", {"command": "ls"}) is None
