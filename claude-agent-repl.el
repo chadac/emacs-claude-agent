@@ -50,6 +50,25 @@ Example: Setting to \\='(\"WebSearch\") would disable web search."
   :type '(repeat string)
   :group 'claude-agent)
 
+(defcustom claude-agent-auto-reject-rules nil
+  "List of auto-reject rules for tool permissions.
+Each element is a plist with keys:
+  :path-prefix PATH   - reject tools operating on files under PATH
+  :pattern PATTERN     - tool permission pattern (e.g. \"Edit(/path/*)\")
+  :message MESSAGE     - rejection reason shown to the agent
+Can be set via .dir-locals.el for worktree-specific configuration."
+  :type '(repeat (plist :key-type symbol :value-type string))
+  :safe #'listp
+  :group 'claude-agent)
+
+(defcustom claude-agent-extra-system-prompt nil
+  "Extra text appended to the system prompt.
+When set, this text is appended to the system prompt passed to the agent.
+Can be set via .dir-locals.el for worktree-specific instructions."
+  :type '(choice (const nil) string)
+  :safe #'stringp
+  :group 'claude-agent)
+
 ;;;; Faces
 
 (defface claude-agent-header-face
@@ -2283,7 +2302,13 @@ Optional ADDITIONAL-ALLOWED-TOOLS is a list of extra tools to pre-authorize."
     ;; Add model if specified
     (when model
       (setq args (append args (list "--model" model))))
-    ;; Add system prompt if specified (for oneshot agents)
+    ;; Append extra system prompt if set (e.g., from .dir-locals.el)
+    (when claude-agent-extra-system-prompt
+      (setq system-prompt
+            (if system-prompt
+                (concat system-prompt "\n\n" claude-agent-extra-system-prompt)
+              claude-agent-extra-system-prompt)))
+    ;; Add system prompt if specified (for oneshot agents or extra system prompt)
     ;; Write to temp file to avoid shell escaping issues with multiline prompts
     (when system-prompt
       (let ((prompt-file (make-temp-file "claude-system-prompt-" nil ".txt")))
@@ -2302,6 +2327,22 @@ Optional ADDITIONAL-ALLOWED-TOOLS is a list of extra tools to pre-authorize."
       (when all-allowed-tools
         (setq args (append args (list "--allowed-tools"
                                       (mapconcat #'identity all-allowed-tools ","))))))
+    ;; Write auto-reject config if rules exist (e.g., from .dir-locals.el)
+    (when claude-agent-auto-reject-rules
+      (let ((reject-file (make-temp-file "claude-auto-reject-" nil ".json"))
+            (rules (mapcar (lambda (rule)
+                             (let (alist)
+                               (when (plist-get rule :path-prefix)
+                                 (push (cons "path_prefix" (plist-get rule :path-prefix)) alist))
+                               (when (plist-get rule :pattern)
+                                 (push (cons "pattern" (plist-get rule :pattern)) alist))
+                               (when (plist-get rule :message)
+                                 (push (cons "message" (plist-get rule :message)) alist))
+                               alist))
+                           claude-agent-auto-reject-rules)))
+        (with-temp-file reject-file
+          (insert (json-encode rules)))
+        (setq args (append args (list "--auto-reject-config" reject-file)))))
     ;; Use pipe (nil) instead of PTY to avoid focus-related buffering issues
     ;; Bind default-directory so the process starts in work-dir
     (let ((default-directory work-dir)

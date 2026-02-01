@@ -140,6 +140,7 @@ class ClaudeAgent:
         model: Optional[str] = None,
         system_prompt: Optional[str] = None,
         block_direct_edit: bool = True,
+        auto_reject_rules: Optional[list[dict]] = None,
     ):
         self.work_dir = work_dir
         self.mcp_config = mcp_config
@@ -154,6 +155,7 @@ class ClaudeAgent:
         self._model = model
         self._system_prompt = system_prompt
         self._block_direct_edit = block_direct_edit  # Block Edit/Write tools for Emacs integration
+        self._auto_reject_rules = auto_reject_rules or []  # Auto-reject rules for worktree confinement
         self._first_message = True  # Track if this is the first message
         if log_file:
             os.makedirs(os.path.dirname(log_file), exist_ok=True)
@@ -351,6 +353,42 @@ class ClaudeAgent:
         # Handle exact match
         return pattern_content == input_value
 
+    def _extract_file_path(self, tool_name: str, tool_input: dict) -> str | None:
+        """Extract file path from tool input for path-based matching."""
+        if tool_name in ("Read", "Write", "Edit"):
+            return tool_input.get("file_path")
+        elif tool_name.startswith("mcp__emacs__"):
+            # MCP emacs tools use file_path parameter
+            return tool_input.get("file_path")
+        elif tool_name == "Glob":
+            return tool_input.get("path")
+        elif tool_name == "Grep":
+            return tool_input.get("path")
+        return None
+
+    def _matches_auto_reject(self, rule: dict, tool_name: str, tool_input: dict) -> bool:
+        """Check if a tool call matches an auto-reject rule.
+
+        Rules have:
+          pattern: Tool pattern like "Edit(/path/*)" or "mcp__emacs__lock"
+          path_prefix: Optional path prefix - if the tool operates on a file
+                       within this prefix, it matches.
+          message: Rejection message to show the agent.
+        """
+        pattern = rule.get("pattern")
+        path_prefix = rule.get("path_prefix")
+
+        if pattern:
+            return self._pattern_matches(pattern, tool_name, tool_input)
+
+        if path_prefix:
+            # Match any tool that operates on files within this path prefix
+            file_path = self._extract_file_path(tool_name, tool_input)
+            if file_path and file_path.startswith(path_prefix):
+                return True
+
+        return False
+
     async def _fix_empty_error_content(
         self,
         hook_input: PostToolUseHookInput,
@@ -410,6 +448,17 @@ class ClaudeAgent:
                         f"Use mcp__emacs__lock_region + mcp__emacs__write_region instead for pair programming support. "
                         f"See claude-agent-prompt.md for details."
             )
+
+        # Check auto-reject rules (worktree confinement, etc.)
+        for rule in self._auto_reject_rules:
+            if self._matches_auto_reject(rule, tool_name, tool_input):
+                reason = rule.get("message", "Auto-rejected by configuration")
+                self._log_json("PERMISSION_AUTO_REJECT", {
+                    "tool": tool_name, "reason": reason,
+                    "pattern": rule.get("pattern", ""),
+                    "path_prefix": rule.get("path_prefix", ""),
+                })
+                return PermissionResultDeny(message=reason)
 
         # Always allow workflow/planning tools without prompting
         if tool_name in self.ALWAYS_SAFE_TOOLS:
@@ -852,6 +901,7 @@ async def run_agent(
     model: Optional[str] = None,
     system_prompt: Optional[str] = None,
     block_direct_edit: bool = True,
+    auto_reject_rules: Optional[list[dict]] = None,
 ) -> None:
     """Run the agent, reading commands from stdin."""
     agent = ClaudeAgent(
@@ -865,6 +915,7 @@ async def run_agent(
         model=model,
         system_prompt=system_prompt,
         block_direct_edit=block_direct_edit,
+        auto_reject_rules=auto_reject_rules,
     )
 
     # Show initial session info
@@ -1010,6 +1061,11 @@ def main() -> None:
         action="store_true",
         help="Disable blocking of Edit/Write tools (allow direct file editing)",
     )
+    parser.add_argument(
+        "--auto-reject-config",
+        default=None,
+        help="Path to JSON file with auto-reject rules",
+    )
     args = parser.parse_args()
 
     allowed_tools = None
@@ -1026,6 +1082,12 @@ def main() -> None:
         with open(args.system_prompt_file, "r") as f:
             system_prompt = f.read()
 
+    # Load auto-reject rules from JSON file if specified
+    auto_reject_rules = None
+    if args.auto_reject_config:
+        with open(args.auto_reject_config, "r") as f:
+            auto_reject_rules = json.load(f)
+
     asyncio.run(
         run_agent(
             work_dir=args.work_dir,
@@ -1038,6 +1100,7 @@ def main() -> None:
             model=args.model,
             system_prompt=system_prompt,
             block_direct_edit=not args.no_block_direct_edit,
+            auto_reject_rules=auto_reject_rules,
         )
     )
 
