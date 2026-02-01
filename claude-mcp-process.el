@@ -17,8 +17,9 @@
 (declare-function claude--generate-mcp-config "claude-mcp")
 (declare-function claude-mcp-setup-claude-environment "claude-mcp")
 
-;; Declare variable from Claude.el
+;; Declare variable and function from Claude.el
 (defvar claude--package-dir)
+(declare-function claude--package-root "claude-agent")
 
 ;;;; Customization
 
@@ -232,11 +233,7 @@ This works across macOS, Linux, and Windows platforms."
   "Start agent process with custom ARGS for BUFFER in WORK-DIR.
 This is a wrapper that allows passing custom arguments to the Python wrapper
 (for MCP config, resume, etc.)."
-  (let* ((this-dir (or claude--package-dir
-                       (when-let ((f (or load-file-name buffer-file-name)))
-                         (file-name-directory f))
-                       (when-let ((f (locate-library "Claude")))
-                         (file-name-directory f))))
+  (let* ((this-dir (claude--package-root))
          (agent-dir (when this-dir
                       (expand-file-name "claude_agent" this-dir)))
          (process-connection-type t)
@@ -283,7 +280,7 @@ WORK-DIR can be either:
                         (if (file-name-absolute-p claude-mcp-system-prompt-file)
                             claude-mcp-system-prompt-file
                           (expand-file-name claude-mcp-system-prompt-file
-                                           (or claude--package-dir default-directory))))))
+                                           (or (claude--package-root) default-directory))))))
     ;; Add --system-prompt-file if configured
     (when (and prompt-file (file-exists-p prompt-file))
       (setq agent-args (append agent-args

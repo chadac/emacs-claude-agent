@@ -296,8 +296,9 @@ Auto-infers project from context (including worktree detection)."
 (defun org-roam-todo--pre-trust-worktree (worktree-path)
   "Pre-trust WORKTREE-PATH in Claude's global config to skip trust dialog.
 Calls the pretrust-directory.py script to add an entry to ~/.claude.json."
-  (let* ((script-dir (file-name-directory (or load-file-name buffer-file-name
-                                               (locate-library "claude-agent"))))
+  (let* ((script-dir (or (and (fboundp 'claude--package-root) (claude--package-root))
+                         (file-name-directory (or load-file-name buffer-file-name
+                                                  (locate-library "claude-agent")))))
          (script-path (expand-file-name "scripts/pretrust-directory.py" script-dir))
          (expanded-path (expand-file-name worktree-path)))
     (if (file-exists-p script-path)

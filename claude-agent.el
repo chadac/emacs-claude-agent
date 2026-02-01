@@ -24,6 +24,35 @@
   "Directory where claude.el is located.
 Set at load time to avoid issues with locate-library finding wrong version.")
 
+(defcustom claude-agent-root-directory nil
+  "Root directory of the claude-agent package.
+When non-nil, this overrides automatic detection of the package root.
+All paths to the Python agent, MCP server, scripts, and prompts are
+derived from this directory.
+
+This is particularly useful when developing claude-agent in a git
+worktree, where `load-file-name' and `locate-library' resolve to the
+main installed version rather than the worktree copy.
+
+When nil (the default), the package root is auto-detected from
+`claude--package-dir', `load-file-name', or `locate-library'."
+  :type '(choice (const :tag "Auto-detect" nil)
+                 (directory :tag "Package root directory"))
+  :group 'claude-agent)
+
+(defun claude--package-root ()
+  "Return the root directory of the claude-agent package.
+Checks `claude-agent-root-directory' first (user override), then falls
+back to `claude--package-dir' (set at load time), and finally tries
+`locate-library' as a last resort.  Returns nil if the package root
+cannot be determined."
+  (or claude-agent-root-directory
+      claude--package-dir
+      (when-let ((f (locate-library "claudemacs")))
+        (file-name-directory f))
+      (when-let ((f (locate-library "claude-agent")))
+        (file-name-directory f))))
+
 ;;;; Dependencies
 (require 'cl-lib)
 (require 'json)
@@ -523,10 +552,8 @@ Applies consistent styling to all eat-mode terminal faces."
 (defun claude-agent--get-agent-dir ()
   "Get the directory containing the Python agent.
 Returns the path to the claude_agent directory, or nil if not found.
-Prefers `claude--package-dir' if set, otherwise falls back to `locate-library'."
-  (when-let ((base-dir (or claude--package-dir
-                           (when-let ((lib-file (locate-library "claude-agent")))
-                             (file-name-directory lib-file)))))
+Uses `claude--package-root' to resolve the package root."
+  (when-let ((base-dir (claude--package-root)))
     (expand-file-name "claude_agent" base-dir)))
 
 (defun claude--get-shell-name ()
@@ -537,9 +564,7 @@ Falls back to '/bin/sh' if SHELL environment variable is not set."
 (defun claude--get-mcp-safe-tools ()
   "Get list of safe MCP tools from the YAML configuration.
 Returns a list of tool names marked as safe."
-  (let* ((this-file (or load-file-name buffer-file-name
-                        (locate-library "claudemacs")))
-         (this-dir (when this-file (file-name-directory this-file)))
+  (let* ((this-dir (claude--package-root))
          (mcp-dir (when this-dir
                     (expand-file-name "emacs_mcp" this-dir))))
     (when (and mcp-dir (file-directory-p mcp-dir))
@@ -576,11 +601,7 @@ Includes both CLI commands (if enabled) and safe MCP tools."
 WORK-DIR is the session's working directory, used to isolate memory buffers.
 BUFFER-NAME is the Claude buffer name for this session.
 Returns the path to the generated config file."
-  (let* ((this-dir (or claude--package-dir
-                       (when-let ((f (or load-file-name buffer-file-name)))
-                         (file-name-directory f))
-                       (when-let ((f (locate-library "claudemacs")))
-                         (file-name-directory f))))
+  (let* ((this-dir (claude--package-root))
          (mcp-dir (when this-dir
                     (expand-file-name "emacs_mcp" this-dir)))
          (expanded-work-dir (expand-file-name work-dir))
@@ -608,9 +629,7 @@ Returns the path to the generated config file."
   "Generate --append-system-prompt flag if custom prompt file exists.
 Looks for claude-prompt.md in the claudemacs package directory.
 Returns nil if file doesn't exist."
-  (let* ((this-file (or load-file-name buffer-file-name
-                        (locate-library "claudemacs")))
-         (this-dir (when this-file (file-name-directory this-file)))
+  (let* ((this-dir (claude--package-root))
          (prompt-file (when this-dir
                         (expand-file-name "claude-prompt.md" this-dir))))
     (when (and prompt-file (file-exists-p prompt-file))
@@ -626,11 +645,7 @@ WORK-DIR is the session's working directory for memory buffer isolation.
 BUFFER-NAME is the Claude buffer name for this session.
 Returns nil if `claude-use-mcp' is nil."
   (when claude-use-mcp
-    (let* ((this-dir (or claude--package-dir
-                         (when-let ((f (or load-file-name buffer-file-name)))
-                           (file-name-directory f))
-                         (when-let ((f (locate-library "claudemacs")))
-                           (file-name-directory f))))
+    (let* ((this-dir (claude--package-root))
            (mcp-dir (when this-dir
                       (expand-file-name "emacs_mcp" this-dir))))
       (when (and mcp-dir (file-directory-p mcp-dir))
@@ -947,9 +962,7 @@ Otherwise, restart the session for the current project."
          ;; For now, don't try to restore specific sessions for multi-agent buffers
          ;; Just use --continue which will resume the most recent session
          (session-id nil)
-         (this-file (or load-file-name
-                        (locate-library "claudemacs")))
-         (this-dir (when this-file (file-name-directory this-file)))
+         (this-dir (claude--package-root))
          ;; Check if buffer was visible before we kill it
          (buffer-was-visible (and claude-buffer
                                   (get-buffer-window claude-buffer t))))

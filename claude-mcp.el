@@ -1695,13 +1695,16 @@ Designed to be called via emacsclient by Claude AI."
 
 ;;;; Setup and Integration
 
+(declare-function claude--package-root "claude-agent")
+
 (defun claude-mcp-get-cli-path ()
   "Get the path to the claude-cli executable.
 Assumes it's in the same directory as this file."
-  (let* ((this-file (or load-file-name
-                        buffer-file-name
-                        (locate-library "claude-mcp")))
-         (this-dir (when this-file (file-name-directory this-file))))
+  (let* ((this-dir (or (and (fboundp 'claude--package-root) (claude--package-root))
+                       (when-let ((f (or load-file-name buffer-file-name)))
+                         (file-name-directory f))
+                       (when-let ((f (locate-library "claude-mcp")))
+                         (file-name-directory f)))))
     (if this-dir
         (expand-file-name "claude-cli" this-dir)
       (error "Cannot determine claude-mcp.el location"))))
