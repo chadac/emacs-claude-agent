@@ -312,6 +312,26 @@ Calls the pretrust-directory.py script to add an entry to ~/.claude.json."
             (message "Warning: Failed to pre-trust worktree (exit %d)" result)))
       (message "Warning: pretrust-directory.py not found at %s" script-path))))
 
+(defun org-roam-todo--translate-worktree-settings (project-root worktree-path)
+  "Translate .claude/settings.local.json paths for WORKTREE-PATH.
+Reads settings from PROJECT-ROOT, rewrites permission patterns that
+reference PROJECT-ROOT to use WORKTREE-PATH instead, and writes the
+result to the worktree.  This is a no-op if the source file doesn't
+exist."
+  (let* ((script-dir (or (and (fboundp 'claude--package-root) (claude--package-root))
+                         (file-name-directory (or load-file-name buffer-file-name
+                                                  (locate-library "claude-agent")))))
+         (script-path (expand-file-name "scripts/translate-settings.py" script-dir))
+         (expanded-root (directory-file-name (expand-file-name project-root)))
+         (expanded-wt (directory-file-name (expand-file-name worktree-path))))
+    (if (file-exists-p script-path)
+        (let ((result (call-process "uv" nil "*org-roam-todo-worktree-output*" nil
+                                    "run" script-path expanded-root expanded-wt)))
+          (if (= result 0)
+              (message "Translated settings.local.json for worktree: %s" expanded-wt)
+            (message "Warning: Failed to translate settings (exit %d)" result)))
+      (message "Warning: translate-settings.py not found at %s" script-path))))
+
 (defun org-roam-todo--expand-glob-pattern (pattern directory)
   "Expand glob PATTERN in DIRECTORY, returning list of matching files.
 If PATTERN contains no glob characters, returns a list with just that path
@@ -419,7 +439,8 @@ If you see paths pointing to the main repo, translate them to the worktree equiv
 (defun org-roam-todo--create-worktree (project-root branch-name worktree-path)
   "Create a git worktree at WORKTREE-PATH for BRANCH-NAME from PROJECT-ROOT.
 Creates the branch if it doesn't exist.  Also copies permission files
-configured in `org-roam-todo-worktree-copy-patterns'."
+configured in `org-roam-todo-worktree-copy-patterns' and translates
+any hardcoded paths in .claude/settings.local.json."
   (let ((default-directory project-root))
     ;; Ensure parent directory exists
     (make-directory (file-name-directory worktree-path) t)
@@ -436,7 +457,9 @@ configured in `org-roam-todo-worktree-copy-patterns'."
         (unless (= 0 result)
           (error "Failed to create worktree with new branch: see *org-roam-todo-worktree-output*"))))
     ;; Copy permission files to the new worktree
-    (org-roam-todo--copy-files-to-worktree project-root worktree-path)))
+    (org-roam-todo--copy-files-to-worktree project-root worktree-path)
+    ;; Translate paths in .claude/settings.local.json for the worktree
+    (org-roam-todo--translate-worktree-settings project-root worktree-path)))
 
 ;;;; TODO Query & Selection
 
