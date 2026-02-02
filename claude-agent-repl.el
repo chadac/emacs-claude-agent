@@ -69,6 +69,163 @@ Can be set via .dir-locals.el for worktree-specific instructions."
   :safe #'stringp
   :group 'claude-agent)
 
+(defcustom claude-agent-system-hooks nil
+  "List of system message hooks injected into Claude conversations.
+Hooks are evaluated on the Emacs side before each user message is sent.
+Matched hooks have their messages sent as system_message commands to the
+Python agent, which wraps them in <system-reminder> tags and appends
+them to the user message.
+
+Each entry is a plist with keys:
+  :name      - unique hook name (string, required)
+  :trigger   - when to fire: \"every_n\", \"on_start\", \"on_resume\" (required)
+  :interval  - for every_n triggers, the message interval (integer, default 10)
+  :message   - static message string (optional)
+  :message-fn - function returning a message string, called at fire time (optional)
+  :elisp-fn  - elisp expression string, evaluated at fire time via `eval' (optional)
+
+Resolution priority: :elisp-fn > :message-fn > :message.
+If a resolver returns nil, the hook is skipped for that message.
+
+Can be set via .dir-locals.el for project-specific hook configuration.
+
+Example:
+  \\='((:name \"lint-reminder\"
+     :trigger \"every_n\"
+     :interval 15
+     :message \"Remember to run make lint before committing.\")
+    (:name \"project-rules\"
+     :trigger \"on_start\"
+     :message \"This project uses conventional commits.\")
+    (:name \"todo-reminder\"
+     :trigger \"every_n\"
+     :interval 15
+     :elisp-fn \"(claude-agent--todo-acceptance-reminder)\"))"
+  :type '(repeat (plist :key-type symbol :value-type sexp))
+  :safe #'listp
+  :group 'claude-agent)
+
+(defun claude-agent--todo-acceptance-reminder ()
+  "Generate a TODO acceptance criteria reminder message.
+Returns a formatted string with the current TODO's acceptance criteria,
+or nil if no TODO is active.  This is intended to be used as an :elisp-fn
+for a system message hook that reminds the agent of its task periodically."
+  (when (and (fboundp 'org-roam-todo-mcp-get-current)
+             (fboundp 'org-roam-todo-mcp-get-acceptance-criteria))
+    (condition-case nil
+        (let* ((current (org-roam-todo-mcp-get-current))
+               (parsed (json-read-from-string current))
+               (title (alist-get 'title parsed))
+               (status (alist-get 'status parsed)))
+          (when (and title (equal status "active"))
+            (let* ((criteria-json (org-roam-todo-mcp-get-acceptance-criteria))
+                   (criteria (json-read-from-string criteria-json))
+                   (lines '()))
+              (seq-doseq (item criteria)
+                (let ((text (alist-get 'text item))
+                      (checked (alist-get 'checked item)))
+                  (push (format "- [%s] %s"
+                                (if (eq checked t) "X" " ")
+                                text)
+                        lines)))
+              (when lines
+                (format "TASK REMINDER: You are working on: %s\n\nAcceptance Criteria:\n%s\n\nStay focused on completing unchecked items."
+                        title
+                        (mapconcat #'identity (nreverse lines) "\n"))))))
+      (error nil))))
+
+(defun claude-agent--hook-should-fire-p (hook message-count is-resumed)
+  "Return non-nil if HOOK should fire given MESSAGE-COUNT and IS-RESUMED.
+HOOK is a plist from `claude-agent-system-hooks'.
+MESSAGE-COUNT is the 1-based index of the current user message.
+IS-RESUMED is non-nil if this session was resumed from a previous one."
+  (let ((trigger (plist-get hook :trigger))
+        (interval (or (plist-get hook :interval) 10)))
+    (pcase trigger
+      ("every_n"
+       (and (> interval 0)
+            (= 1 (mod message-count interval))))
+      ("on_start"
+       (and (= message-count 1) (not is-resumed)))
+      ("on_resume"
+       (and (= message-count 1) is-resumed))
+      (_ nil))))
+
+(defun claude-agent--resolve-hook-message (hook)
+  "Resolve the message text for HOOK.
+Resolution priority: :elisp-fn > :message-fn > :message.
+Returns a string or nil if no message could be resolved."
+  (let ((elisp-fn (plist-get hook :elisp-fn))
+        (message-fn (plist-get hook :message-fn))
+        (message (plist-get hook :message)))
+    (or
+     ;; :elisp-fn - evaluate elisp expression directly
+     (when elisp-fn
+       (condition-case err
+           (let ((result (eval (read elisp-fn))))
+             (when (stringp result) result))
+         (error
+          (message "Claude agent: hook %s elisp-fn error: %s"
+                   (plist-get hook :name) (error-message-string err))
+          nil)))
+     ;; :message-fn - call function
+     (when (and message-fn (functionp message-fn))
+       (condition-case err
+           (let ((result (funcall message-fn)))
+             (when (stringp result) result))
+         (error
+          (message "Claude agent: hook %s message-fn error: %s"
+                   (plist-get hook :name) (error-message-string err))
+          nil)))
+     ;; :message - static string
+     message)))
+
+(defun claude-agent--evaluate-hooks ()
+  "Evaluate all system message hooks and return list of message strings.
+Uses buffer-local `claude-agent--message-count' and `claude-agent--is-resumed'
+to determine which hooks should fire."
+  (let ((messages '()))
+    (dolist (hook claude-agent-system-hooks)
+      (when (claude-agent--hook-should-fire-p
+             hook claude-agent--message-count claude-agent--is-resumed)
+        (when-let ((msg (claude-agent--resolve-hook-message hook)))
+          (push msg messages))))
+    (nreverse messages)))
+
+(defun claude-agent--send-system-message (text)
+  "Send a system_message command to the agent process.
+TEXT is the message string to inject into the next user message."
+  (when (and claude-agent--process
+             (process-live-p claude-agent--process)
+             text
+             (not (string-empty-p text)))
+    (process-send-string
+     claude-agent--process
+     (concat (json-encode `((type . "system_message") (text . ,text))) "\n"))))
+
+(defun claude-agent-send-test-system-message (text)
+  "Send a test system message TEXT to the agent for debugging.
+This injects a system message that will be displayed in the REPL
+with the \"system>\" prompt and appended to the next user message.
+Useful for testing the system message display pipeline."
+  (interactive "sSystem message: ")
+  (claude-agent--send-system-message text))
+
+(defun claude-agent--dispatch-user-message (text)
+  "Send user message TEXT with system hook injection.
+Increments the message count, evaluates hooks, sends any system messages
+to the agent process, then sends the user message.  Also displays
+system messages in the REPL buffer."
+  (setq claude-agent--message-count (1+ claude-agent--message-count))
+  ;; Evaluate and send system message hooks
+  (let ((hook-messages (claude-agent--evaluate-hooks)))
+    (dolist (msg hook-messages)
+      (claude-agent--send-system-message msg)))
+  ;; Send the actual user message
+  (process-send-string
+   claude-agent--process
+   (concat (json-encode `((type . "message") (text . ,text))) "\n")))
+
 ;;;; Faces
 
 (defface claude-agent-header-face
@@ -149,6 +306,16 @@ Can be set via .dir-locals.el for worktree-specific instructions."
 (defface claude-agent-session-face
   '((t :foreground "#56b6c2" :slant italic))
   "Face for session info messages."
+  :group 'claude-agent)
+
+(defface claude-agent-system-header-face
+  '((t :foreground "#5c6370" :weight bold))
+  "Face for system message headers (the \"system>\" prompt)."
+  :group 'claude-agent)
+
+(defface claude-agent-system-message-face
+  '((t :foreground "#5c6370" :slant italic))
+  "Face for system message body text shown in the REPL."
   :group 'claude-agent)
 
 (defface claude-agent-input-header-face
@@ -316,6 +483,15 @@ Keys are tool_use_id strings, values are plists with:
 (defvar-local claude-agent--message-queue nil
   "List of messages queued while agent is busy. Each is a string.")
 
+;;;; Buffer-local variables - System message hooks state
+
+(defvar-local claude-agent--message-count 0
+  "Number of user messages sent in this session.
+Used by system message hooks to determine when to fire.")
+
+(defvar-local claude-agent--is-resumed nil
+  "Whether this session was resumed from a previous session.
+Used by on_start/on_resume hooks to determine if they should fire.")
 
 (defface claude-agent-queued-face
   '((t :foreground "#5c6370" :slant italic))
@@ -1684,6 +1860,20 @@ If VIRTUAL-INDENT is non-nil, apply it as line-prefix/wrap-prefix."
     ("assistant_end"
      (setq claude-agent--parse-state nil))
 
+    ;; System message start
+    ("system_start"
+     (setq claude-agent--parse-state 'system)
+     (claude-agent--append-to-log "system> " 'claude-agent-system-header-face))
+
+    ;; System message text
+    ("system_text"
+     (let ((text (cdr (assq 'text msg))))
+       (claude-agent--append-to-log (concat text "\n") 'claude-agent-system-message-face "  ")))
+
+    ;; System message end
+    ("system_end"
+     (setq claude-agent--parse-state nil))
+
     ;; Tool call - all tools use the same simple format now
     ("tool_call"
      (let* ((name (cdr (assq 'name msg)))
@@ -2343,6 +2533,8 @@ Optional ADDITIONAL-ALLOWED-TOOLS is a list of extra tools to pre-authorize."
         (with-temp-file reject-file
           (insert (json-encode rules)))
         (setq args (append args (list "--auto-reject-config" reject-file)))))
+    ;; System message hooks are now evaluated on the Emacs side
+    ;; (see claude-agent--dispatch-user-message)
     ;; Use pipe (nil) instead of PTY to avoid focus-related buffering issues
     ;; Bind default-directory so the process starts in work-dir
     (let ((default-directory work-dir)
@@ -2400,9 +2592,7 @@ Optional ADDITIONAL-ALLOWED-TOOLS is a list of extra tools to pre-authorize."
              claude-agent--process
              (process-live-p claude-agent--process))
     (let ((msg (pop claude-agent--message-queue)))
-      ;; Send JSON message to process
-      (process-send-string claude-agent--process
-                           (concat (json-encode `((type . "message") (text . ,msg))) "\n")))))
+      (claude-agent--dispatch-user-message msg))))
 
 (defun claude-agent-send ()
   "Send the current input to Claude, or queue if busy."
@@ -2427,9 +2617,8 @@ Optional ADDITIONAL-ALLOWED-TOOLS is a list of extra tools to pre-authorize."
                (push input claude-agent--message-queue)
                (claude-agent--render-dynamic-section)
                (message "Message queued (agent is busy)"))
-           ;; Send JSON message to process
-           (process-send-string claude-agent--process
-                                (concat (json-encode `((type . "message") (text . ,input))) "\n"))
+           ;; Dispatch with hook evaluation
+           (claude-agent--dispatch-user-message input)
            ;; Re-render dynamic section (input already cleared)
            (claude-agent--render-dynamic-section)))))))
 
@@ -2657,6 +2846,8 @@ Optional ADDITIONAL-ALLOWED-TOOLS is a list of extra tools to pre-authorize."
             claude-agent--session-info nil
             claude-agent--has-conversation nil
             claude-agent--work-dir expanded-dir
+            claude-agent--message-count 0
+            claude-agent--is-resumed (or resume-session continue-session)
             default-directory expanded-dir)
 
       ;; Apply .dir-locals.el from the work directory

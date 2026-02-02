@@ -70,6 +70,23 @@ class AssistantMessageEndMessage(TypedDict):
     type: Literal["assistant_end"]
 
 
+# System message display messages
+
+class SystemMessageStartMessage(TypedDict):
+    """System message block started (for REPL display)."""
+    type: Literal["system_start"]
+
+
+class SystemMessageTextMessage(TypedDict):
+    """System message text content."""
+    type: Literal["system_text"]
+    text: str
+
+
+class SystemMessageEndMessage(TypedDict):
+    """System message block ended."""
+    type: Literal["system_end"]
+
 # Tool call messages
 
 class ToolCallMessage(TypedDict):
@@ -202,6 +219,9 @@ AgentMessage = (
     | AssistantMessageStartMessage
     | AssistantMessageTextMessage
     | AssistantMessageEndMessage
+    | SystemMessageStartMessage
+    | SystemMessageTextMessage
+    | SystemMessageEndMessage
     | ToolCallMessage
     | ToolResultMessage
     | ToolEndMessage
@@ -248,6 +268,12 @@ class PermissionResponseMessage(TypedDict):
     pattern: str | None  # None for deny
 
 
+class SystemMessageInput(TypedDict):
+    """System message to inject into the next user message."""
+    type: Literal["system_message"]
+    text: str
+
+
 # Union type for all emacs→agent messages
 
 EmacsMessage = (
@@ -255,4 +281,5 @@ EmacsMessage = (
     | InterruptMessage
     | QuitMessage
     | PermissionResponseMessage
+    | SystemMessageInput
 )

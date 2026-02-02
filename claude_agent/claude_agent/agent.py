@@ -114,8 +114,20 @@ class AgentState:
     # Permission tracking
     session_permissions: set = field(default_factory=set)  # Patterns allowed for session
     always_permissions: set = field(default_factory=set)  # Patterns always allowed
-    # Message counter for periodic reminders
-    message_count: int = 0
+
+
+
+def _build_system_reminder_block(messages: list[str]) -> str:
+    """Wrap messages in <system-reminder> tags for injection.
+
+    Each message gets its own <system-reminder> block, which is consistent
+    with the existing filtering in _filter_system_reminders().
+    """
+    parts = []
+    for msg in messages:
+        parts.append(f"<system-reminder>\n{msg}\n</system-reminder>")
+    return "\n\n".join(parts)
+
 
 
 class ClaudeAgent:
@@ -161,6 +173,9 @@ class ClaudeAgent:
         if log_file:
             os.makedirs(os.path.dirname(log_file), exist_ok=True)
             self._log_handle = open(log_file, "w")
+
+        # Pending system messages from Emacs (injected via stdin)
+        self._pending_system_messages: list[str] = []
 
         # SDK client - persistent across conversation turns
         self._client: Optional[ClaudeSDKClient] = None
@@ -696,10 +711,11 @@ class ClaudeAgent:
         self._emit({"type": "user_text", "text": message})
         self._emit({"type": "user_end"})
 
-        # Add org-mode reminder periodically (every 10 messages, starting with first)
-        self.state.message_count += 1
-        if self.state.message_count % 10 == 1:
-            full_message = f"{message}\n\n(Reminder: Your response will be displayed in an Emacs buffer with org-mode formatting. Always use org-mode syntax, NOT markdown. Use *bold* not **bold**, use /italic/ not *italic*, use =code= not `code`, use #+begin_src/#+end_src not ```)"
+        # Consume any pending system messages (display already happened at receipt time)
+        if self._pending_system_messages:
+            reminder_block = _build_system_reminder_block(self._pending_system_messages)
+            full_message = f"{message}\n\n{reminder_block}"
+            self._pending_system_messages.clear()
         else:
             full_message = message
 
@@ -1053,6 +1069,16 @@ async def run_agent(
                 elif msg_type == "message":
                     # Queue user messages for processing
                     await message_queue.put(msg.get("text", ""))
+                elif msg_type == "system_message":
+                    # Display immediately in REPL and queue for injection
+                    text = msg.get("text", "")
+                    if text:
+                        # Emit display events right away so REPL shows them
+                        agent._emit({"type": "system_start"})
+                        agent._emit({"type": "system_text", "text": text})
+                        agent._emit({"type": "system_end"})
+                        # Queue for injection into next user message
+                        agent._pending_system_messages.append(text)
                 else:
                     agent._emit_error(f"Unknown message type: {msg_type}")
 
@@ -1154,6 +1180,7 @@ def main() -> None:
         default=None,
         help="Path to JSON file with auto-reject rules",
     )
+
     args = parser.parse_args()
 
     allowed_tools = None
