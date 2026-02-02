@@ -5,6 +5,7 @@ See protocol.py for message type definitions.
 """
 
 import asyncio
+import glob
 import io
 import json
 import os
@@ -424,6 +425,75 @@ class ClaudeAgent:
 
         return {"tool_response": tool_response}
 
+    async def _clear_plan_mode_on_exit(
+        self,
+        hook_input: PostToolUseHookInput,
+        tool_use_id: Optional[str],
+        context: HookContext,
+    ) -> HookJSONOutput:
+        """Hook to clear plan mode state when ExitPlanMode is called.
+
+        The Claude CLI tracks plan mode via plan files in ~/.claude/plans/.
+        When ExitPlanMode is called, it marks the plan as approved but doesn't
+        remove the plan file. This causes the plan mode system prompt to persist
+        on subsequent turns, giving the agent conflicting instructions.
+
+        This hook deletes the plan file after ExitPlanMode succeeds, so the
+        CLI won't re-inject the plan mode system prompt.
+        """
+        tool_name = hook_input.get("tool_name", "")
+        if tool_name != "ExitPlanMode":
+            return {}
+
+        tool_response = hook_input.get("tool_response", {})
+        # Only clear if ExitPlanMode succeeded (not an error)
+        is_error = False
+        if isinstance(tool_response, dict):
+            is_error = tool_response.get("is_error", False)
+        if is_error:
+            self._log_json("PLAN_MODE", {
+                "action": "exit_plan_mode_failed",
+                "response": str(tool_response)[:200],
+            })
+            return {}
+
+        # Find and delete plan files in ~/.claude/plans/
+        plans_dir = os.path.join(os.path.expanduser("~"), ".claude", "plans")
+        if not os.path.isdir(plans_dir):
+            self._log_json("PLAN_MODE", {
+                "action": "no_plans_dir",
+                "path": plans_dir,
+            })
+            return {}
+
+        # Find the most recently modified plan file (the active one)
+        plan_files = glob.glob(os.path.join(plans_dir, "*.md"))
+        if not plan_files:
+            self._log_json("PLAN_MODE", {
+                "action": "no_plan_files",
+                "path": plans_dir,
+            })
+            return {}
+
+        # Sort by modification time, most recent first
+        plan_files.sort(key=lambda f: os.path.getmtime(f), reverse=True)
+        most_recent = plan_files[0]
+
+        try:
+            os.remove(most_recent)
+            self._log_json("PLAN_MODE", {
+                "action": "deleted_plan_file",
+                "path": most_recent,
+            })
+        except OSError as e:
+            self._log_json("PLAN_MODE", {
+                "action": "failed_to_delete_plan_file",
+                "path": most_recent,
+                "error": str(e),
+            })
+
+        return {}
+
     # Workflow tools that should always be allowed without permission prompts
     # These have no side effects on the filesystem and are required for plan mode
     ALWAYS_SAFE_TOOLS = {
@@ -584,7 +654,11 @@ class ClaudeAgent:
         # This prevents API errors when tools fail without providing error messages
         hooks = {
             "PostToolUse": [
-                HookMatcher(hooks=[self._fix_empty_error_content])
+                HookMatcher(hooks=[self._fix_empty_error_content]),
+                HookMatcher(
+                    matcher="ExitPlanMode",
+                    hooks=[self._clear_plan_mode_on_exit],
+                ),
             ]
         }
 
