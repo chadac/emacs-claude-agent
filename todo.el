@@ -82,6 +82,21 @@ would create branch \"chadac/add_feature\"."
   :type 'string
   :group 'org-roam-todo)
 
+(defcustom org-roam-todo-worktree-base-branch nil
+  "Base branch/ref for new worktree branches.
+When non-nil, new branches are created from this ref (e.g. \"origin/main\").
+When nil, branches from the current HEAD.
+Can be set per-project via .dir-locals.el."
+  :type '(choice (const :tag "Current HEAD" nil) string)
+  :group 'org-roam-todo)
+
+(defcustom org-roam-todo-worktree-fetch-before-create t
+  "Whether to run `git fetch' before creating a worktree.
+When non-nil, fetches from the remote before creating the worktree
+to ensure the base branch is up-to-date.
+Can be set per-project via .dir-locals.el."
+  :type 'boolean
+  :group 'org-roam-todo)
 (defcustom org-roam-todo-agent-allowed-tools
   '("Read(**)"
     "Glob(**)"
@@ -436,10 +451,20 @@ If you see paths pointing to the main repo, translate them to the worktree equiv
 
 (defun org-roam-todo--create-worktree (project-root branch-name worktree-path)
   "Create a git worktree at WORKTREE-PATH for BRANCH-NAME from PROJECT-ROOT.
-Creates the branch if it doesn't exist.  Also copies permission files
-configured in `org-roam-todo-worktree-copy-patterns' and translates
-any hardcoded paths in .claude/settings.local.json."
+Creates the branch if it doesn't exist.  Optionally fetches first
+if `org-roam-todo-worktree-fetch-before-create' is non-nil, and uses
+`org-roam-todo-worktree-base-branch' as the start point for new branches.
+Also copies permission files configured in
+`org-roam-todo-worktree-copy-patterns' and translates any hardcoded
+paths in .claude/settings.local.json."
   (let ((default-directory project-root))
+    ;; Fetch from remote if configured
+    (when org-roam-todo-worktree-fetch-before-create
+      (message "Fetching from remote...")
+      (let ((result (call-process "git" nil "*org-roam-todo-worktree-output*" nil
+                                  "fetch")))
+        (unless (= 0 result)
+          (message "Warning: git fetch failed (see *org-roam-todo-worktree-output*)"))))
     ;; Ensure parent directory exists
     (make-directory (file-name-directory worktree-path) t)
     ;; Create worktree (with new branch if needed)
@@ -449,9 +474,12 @@ any hardcoded paths in .claude/settings.local.json."
                                     "worktree" "add" worktree-path branch-name)))
           (unless (= 0 result)
             (error "Failed to create worktree: see *org-roam-todo-worktree-output*")))
-      ;; Create new branch with worktree
-      (let ((result (call-process "git" nil "*org-roam-todo-worktree-output*" nil
-                                  "worktree" "add" "-b" branch-name worktree-path)))
+      ;; Create new branch with worktree, optionally from base branch
+      (let* ((args (if org-roam-todo-worktree-base-branch
+                       (list "worktree" "add" "-b" branch-name
+                             worktree-path org-roam-todo-worktree-base-branch)
+                     (list "worktree" "add" "-b" branch-name worktree-path)))
+             (result (apply #'call-process "git" nil "*org-roam-todo-worktree-output*" nil args)))
         (unless (= 0 result)
           (error "Failed to create worktree with new branch: see *org-roam-todo-worktree-output*"))))
     ;; Copy permission files to the new worktree
@@ -701,7 +729,20 @@ If the worktree and session already exist, sends the task to the existing sessio
     ;; Create worktree if needed
     (unless (org-roam-todo--worktree-exists-p worktree-path)
       (message "Creating worktree at %s..." worktree-path)
-      (org-roam-todo--create-worktree project-root branch-name worktree-path)
+      ;; Load project's .dir-locals.el so per-project defcustoms
+      ;; (e.g. org-roam-todo-worktree-base-branch) take effect
+      (let ((org-roam-todo-worktree-base-branch org-roam-todo-worktree-base-branch)
+            (org-roam-todo-worktree-fetch-before-create org-roam-todo-worktree-fetch-before-create))
+        (with-temp-buffer
+          (setq default-directory (file-name-as-directory project-root))
+          (hack-dir-local-variables-non-file-buffer)
+          (when (local-variable-p 'org-roam-todo-worktree-base-branch)
+            (setq org-roam-todo-worktree-base-branch
+                  (buffer-local-value 'org-roam-todo-worktree-base-branch (current-buffer))))
+          (when (local-variable-p 'org-roam-todo-worktree-fetch-before-create)
+            (setq org-roam-todo-worktree-fetch-before-create
+                  (buffer-local-value 'org-roam-todo-worktree-fetch-before-create (current-buffer)))))
+        (org-roam-todo--create-worktree project-root branch-name worktree-path))
       ;; Write .dir-locals.el for worktree agent confinement
       (org-roam-todo--write-worktree-dir-locals worktree-path project-root)
       ;; Store worktree info in node
