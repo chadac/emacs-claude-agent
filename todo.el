@@ -505,9 +505,15 @@ Returns a list of plists with :id, :title, :project, :status, :file, :created."
               (when (and project
                          (or (null project-filter)
                              (string= project project-filter)
+                             ;; Also match filter's directory basename against project name
+                             ;; (handles case where filter is a path like ~/org-roam/projects/foo/)
+                             (string= project
+                                      (file-name-nondirectory
+                                       (directory-file-name (expand-file-name project-filter))))
                              ;; Normalize paths: expand ~ and remove trailing slashes
-                             (string= (directory-file-name (expand-file-name project-root))
-                                      (directory-file-name (expand-file-name project-filter)))))
+                             (and project-root
+                                  (string= (directory-file-name (expand-file-name project-root))
+                                           (directory-file-name (expand-file-name project-filter))))))
                 (push (list :id id
                             :title title
                             :project project

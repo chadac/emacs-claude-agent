@@ -168,9 +168,10 @@ class ClaudeAgent:
         self._stderr_lines: list[str] = []
 
         # Permission handling - async event for waiting on user response
-        self._permission_event: Optional[asyncio.Event] = None
-        self._permission_response: Optional[dict] = None
-        self._pending_permission_request: Optional[dict] = None
+        # Per-request permission tracking, keyed by tool_use_id
+        self._permission_events: dict[str, asyncio.Event] = {}
+        self._permission_responses: dict[str, Optional[dict]] = {}
+        self._pending_permission_requests: dict[str, dict] = {}
 
         # Load existing permissions from settings
         self._load_permissions()
@@ -474,7 +475,7 @@ class ClaudeAgent:
             return PermissionResultAllow()
 
         # Need to ask user - emit permission request
-        self._pending_permission_request = {
+        self._pending_permission_requests[tool_use_id] = {
             "tool_use_id": tool_use_id,
             "tool_name": tool_name,
             "tool_input": tool_input,
@@ -486,21 +487,24 @@ class ClaudeAgent:
             "tool_input": tool_input,
         })
 
-        # Wait for user response via stdin
-        self._permission_event = asyncio.Event()
-        self._permission_response = None
+        # Wait for user response via stdin (per-request event)
+        event = asyncio.Event()
+        self._permission_events[tool_use_id] = event
+        self._permission_responses[tool_use_id] = None
 
         try:
             # Wait for permission response (with timeout - 1 hour to allow user to step away)
-            await asyncio.wait_for(self._permission_event.wait(), timeout=3600.0)
+            await asyncio.wait_for(event.wait(), timeout=3600.0)
         except asyncio.TimeoutError:
+            self._permission_events.pop(tool_use_id, None)
+            self._permission_responses.pop(tool_use_id, None)
+            self._pending_permission_requests.pop(tool_use_id, None)
             self._emit_session_message("Permission request timed out")
             return PermissionResultDeny(message="Permission request timed out after 1 hour")
 
-        response = self._permission_response
-        self._permission_response = None
-        self._permission_event = None
-        self._pending_permission_request = None
+        response = self._permission_responses.pop(tool_use_id, None)
+        self._permission_events.pop(tool_use_id, None)
+        self._pending_permission_requests.pop(tool_use_id, None)
 
         if not response:
             return PermissionResultDeny(message="Permission request failed: no response received")
@@ -562,10 +566,17 @@ class ClaudeAgent:
             self._emit_error(f"Failed to save permission: {e}")
 
     def handle_permission_response(self, response: dict) -> None:
-        """Handle permission response from Emacs (called from stdin reader)."""
-        self._permission_response = response
-        if self._permission_event:
-            self._permission_event.set()
+        """Handle permission response from Emacs (called from stdin reader).
+        Routes response to the correct waiting coroutine by tool_use_id."""
+        tool_use_id = response.get("tool_use_id")
+        if tool_use_id and tool_use_id in self._permission_events:
+            self._permission_responses[tool_use_id] = response
+            self._permission_events[tool_use_id].set()
+        else:
+            self._log_json("PERMISSION_RESPONSE_ORPHAN", {
+                "tool_use_id": tool_use_id,
+                "reason": "no matching pending request",
+            })
 
     async def connect(self) -> None:
         """Initialize and connect the SDK client."""
