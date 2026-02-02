@@ -222,6 +222,86 @@ Returns the project root path. Defaults to inferred project from context."
   "Get short project name from PROJECT-ROOT."
   (file-name-nondirectory (directory-file-name project-root)))
 
+(defun org-roam-todo--org-roam-projects-dir ()
+  "Return the expanded path to the org-roam projects directory."
+  (expand-file-name "projects" org-roam-directory))
+
+(defun org-roam-todo--is-org-roam-projects-path-p (path)
+  "Return non-nil if PATH is inside the org-roam projects directory.
+This detects paths like ~/org-roam/projects/my-project/ which are
+org-roam storage directories, not actual git repositories."
+  (let ((expanded (directory-file-name (expand-file-name path)))
+        (projects-dir (directory-file-name (org-roam-todo--org-roam-projects-dir))))
+    (string-prefix-p (concat projects-dir "/") (concat expanded "/"))))
+
+(defun org-roam-todo--resolve-project-root (project-root)
+  "Resolve PROJECT-ROOT to an actual git repository path.
+If PROJECT-ROOT points to an org-roam projects directory (e.g.
+~/org-roam/projects/my-project/), attempt to find the real git
+repository root by:
+1. Checking existing TODOs with the same project name for a valid root
+2. Searching projectile known projects for a name match
+3. Falling back to PROJECT-ROOT if no resolution is found.
+
+Always returns an expanded, resolved path."
+  (let* ((expanded (expand-file-name project-root))
+         (is-org-roam-path (org-roam-todo--is-org-roam-projects-path-p expanded)))
+    (if (and is-org-roam-path
+             (not (file-directory-p (expand-file-name ".git" expanded))))
+        ;; This is an org-roam projects dir, not a real git repo -- resolve it
+        (let* ((project-name (file-name-nondirectory (directory-file-name expanded)))
+               (resolved (or
+                          ;; Strategy 1: Look through existing TODOs for the same
+                          ;; project with a valid PROJECT_ROOT
+                          (org-roam-todo--find-project-root-from-todos project-name)
+                          ;; Strategy 2: Search projectile known projects
+                          (org-roam-todo--find-project-root-from-projectile project-name))))
+          (if resolved
+              (progn
+                (message "Resolved project root: %s -> %s" expanded resolved)
+                resolved)
+            (display-warning 'org-roam-todo
+                             (format "Could not resolve org-roam project path %s to a real git repo"
+                                     expanded)
+                             :warning)
+            expanded))
+      expanded)))
+
+(defun org-roam-todo--find-project-root-from-todos (project-name)
+  "Search existing TODOs for PROJECT-NAME and return a valid PROJECT_ROOT.
+Returns nil if no valid root is found."
+  (let ((nodes (org-roam-db-query
+                [:select [nodes:file]
+                 :from nodes
+                 :where (and (like nodes:file "%/todo-%.org")
+                             (= nodes:level 0))])))
+    (cl-loop for (file) in nodes
+             when (file-exists-p file)
+             do (with-temp-buffer
+                  (insert-file-contents file nil 0 2000)
+                  (let ((name (when (re-search-forward "^:PROJECT_NAME:\\s-*\\(.+\\)$" nil t)
+                                (string-trim (match-string 1))))
+                        (root (progn
+                                (goto-char (point-min))
+                                (when (re-search-forward "^:PROJECT_ROOT:\\s-*\\(.+\\)$" nil t)
+                                  (string-trim (match-string 1))))))
+                    (when (and name root
+                               (string= name project-name)
+                               (not (org-roam-todo--is-org-roam-projects-path-p root))
+                               (file-directory-p (expand-file-name ".git" root)))
+                      (cl-return (expand-file-name root))))))))
+
+(defun org-roam-todo--find-project-root-from-projectile (project-name)
+  "Search projectile known projects for one matching PROJECT-NAME.
+Returns the project root or nil."
+  (when (and (fboundp 'projectile-known-projects)
+             (projectile-known-projects))
+    (cl-loop for proj in (projectile-known-projects)
+             when (and (string= (file-name-nondirectory (directory-file-name proj))
+                                project-name)
+                       (file-directory-p (expand-file-name ".git" proj)))
+             return (expand-file-name proj))))
+
 ;;;; Slug Helpers
 
 (defun org-roam-todo--slugify (text)
@@ -265,7 +345,8 @@ If PROJECT-ROOT is nil, prompts for project selection."
   (interactive)
   (unless (featurep 'org-roam)
     (user-error "org-roam is required"))
-  (let* ((project-root (or project-root (org-roam-todo--select-project)))
+  (let* ((project-root (org-roam-todo--resolve-project-root
+                        (or project-root (org-roam-todo--select-project))))
          (project-name (org-roam-todo--project-name project-root))
          (project-dir (expand-file-name (concat "projects/" project-name) org-roam-directory))
          ;; Generate timestamps with random suffix to ensure uniqueness
@@ -319,7 +400,8 @@ Calls the pretrust-directory.py script to add an entry to ~/.claude.json."
          (expanded-path (expand-file-name worktree-path)))
     (if (file-exists-p script-path)
         (let ((result (call-process "uv" nil nil nil
-                                    "run" script-path expanded-path)))
+                                    "run" "--directory" script-dir
+                                    script-path expanded-path)))
           (if (= result 0)
               (message "Pre-trusted worktree: %s" expanded-path)
             (message "Warning: Failed to pre-trust worktree (exit %d)" result)))
@@ -339,7 +421,8 @@ exist."
          (expanded-wt (directory-file-name (expand-file-name worktree-path))))
     (if (file-exists-p script-path)
         (let ((result (call-process "uv" nil "*org-roam-todo-worktree-output*" nil
-                                    "run" script-path expanded-root expanded-wt)))
+                                    "run" "--directory" script-dir
+                                    script-path expanded-root expanded-wt)))
           (if (= result 0)
               (message "Translated settings.local.json for worktree: %s" expanded-wt)
             (message "Warning: Failed to translate settings (exit %d)" result)))
@@ -702,7 +785,8 @@ If the worktree and session already exist, sends the task to the existing sessio
   (unless (org-roam-todo--node-p)
     (user-error "Not in an org-roam TODO node"))
   (require 'claude-agent)
-  (let* ((project-root (org-roam-todo--get-property "PROJECT_ROOT"))
+  (let* ((project-root (org-roam-todo--resolve-project-root
+                        (org-roam-todo--get-property "PROJECT_ROOT")))
          (existing-worktree (org-roam-todo--get-property "WORKTREE_PATH"))
          (title (save-excursion
                   (goto-char (point-min))
@@ -1588,6 +1672,8 @@ Returns JSON with the created TODO's file path and ID."
     (error "project_root is required"))
   (unless title
     (error "title is required"))
+  ;; Resolve org-roam project paths to actual git repo roots
+  (setq project-root (org-roam-todo--resolve-project-root project-root))
   (let* ((project-name (org-roam-todo--project-name project-root))
          (project-dir (expand-file-name (concat "projects/" project-name) org-roam-directory))
          (slug (org-roam-todo--slugify title))
