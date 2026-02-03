@@ -582,6 +582,73 @@ paths in .claude/settings.local.json."
     ;; Translate paths in .claude/settings.local.json for the worktree
     (org-roam-todo--translate-worktree-settings project-root worktree-path)))
 
+(defun org-roam-todo--ensure-worktree-from-plist (todo)
+  "Ensure a worktree exists for TODO plist, creating one if needed.
+Returns the worktree path.  If the worktree already exists, returns
+its path immediately.  If not, prompts for branch name and creates it.
+Updates the TODO file properties accordingly."
+  (let* ((project-root (org-roam-todo--resolve-project-root
+                        (plist-get todo :project-root)))
+         (file (plist-get todo :file))
+         (existing-worktree (plist-get todo :worktree-path))
+         (title (plist-get todo :title))
+         (default-branch (org-roam-todo--default-branch-name
+                          (or title "feature")))
+         (branch-name (or (plist-get todo :worktree-branch)
+                          (read-string "Branch name: " default-branch)))
+         (worktree-path (or existing-worktree
+                            (org-roam-todo--worktree-path
+                             project-root branch-name))))
+    (unless project-root
+      (user-error "No PROJECT_ROOT property found"))
+    ;; Create worktree if needed
+    (unless (org-roam-todo--worktree-exists-p worktree-path)
+      (message "Creating worktree at %s..." worktree-path)
+      (let ((org-roam-todo-worktree-base-branch
+             org-roam-todo-worktree-base-branch)
+            (org-roam-todo-worktree-fetch-before-create
+             org-roam-todo-worktree-fetch-before-create))
+        (with-temp-buffer
+          (setq default-directory (file-name-as-directory project-root))
+          (hack-dir-local-variables-non-file-buffer)
+          (when (local-variable-p 'org-roam-todo-worktree-base-branch)
+            (setq org-roam-todo-worktree-base-branch
+                  (buffer-local-value
+                   'org-roam-todo-worktree-base-branch
+                   (current-buffer))))
+          (when (local-variable-p
+                 'org-roam-todo-worktree-fetch-before-create)
+            (setq org-roam-todo-worktree-fetch-before-create
+                  (buffer-local-value
+                   'org-roam-todo-worktree-fetch-before-create
+                   (current-buffer)))))
+        (org-roam-todo--create-worktree
+         project-root branch-name worktree-path))
+      ;; Write .dir-locals.el for worktree agent confinement
+      (org-roam-todo--write-worktree-dir-locals worktree-path project-root)
+      ;; Store worktree info in the TODO file
+      (with-current-buffer (find-file-noselect file)
+        (org-roam-todo--set-property "WORKTREE_PATH" worktree-path)
+        (org-roam-todo--set-property "WORKTREE_BRANCH" branch-name)
+        (unless (member (org-roam-todo--get-property "STATUS")
+                        '("active" "review"))
+          (org-roam-todo--set-property "STATUS" "active"))
+        (save-buffer)))
+    worktree-path))
+
+(defun org-roam-todo--find-agent-buffer (worktree-path)
+  "Find an existing Claude agent buffer for WORKTREE-PATH.
+Returns the buffer or nil."
+  (let ((expanded-path (expand-file-name worktree-path)))
+    (cl-find-if
+     (lambda (buf)
+       (with-current-buffer buf
+         (and (boundp 'claude-agent--work-dir)
+              claude-agent--work-dir
+              (string= (expand-file-name claude-agent--work-dir)
+                       expanded-path))))
+     (buffer-list))))
+
 ;;;; TODO Query & Selection
 
 (defconst org-roam-todo-status-order
@@ -1391,6 +1458,46 @@ or `org-roam-todo-merge-workflow'."
         (user-error "This TODO has no worktree"))
       (org-roam-todo-merge-run todo))))
 
+(defun org-roam-todo-list-open-worktree ()
+  "Create a worktree for the TODO at point (if needed) and open magit-status.
+If the worktree already exists, opens magit-status directly."
+  (interactive)
+  (when-let ((todo (org-roam-todo-list--todo-at-point)))
+    (let ((worktree-path (org-roam-todo--ensure-worktree-from-plist todo)))
+      (magit-status worktree-path)
+      (org-roam-todo-list-refresh))))
+
+(defun org-roam-todo-list-spawn-agent ()
+  "Create a worktree for the TODO at point (if needed) and spawn an agent.
+If the worktree already exists, reuses it.  If an agent session already
+exists for the worktree, switches to it instead of spawning a new one."
+  (interactive)
+  (require 'claude-agent)
+  (when-let ((todo (org-roam-todo-list--todo-at-point)))
+    (let* ((worktree-path (org-roam-todo--ensure-worktree-from-plist todo))
+           (content (org-roam-todo--get-full-content (plist-get todo :file)))
+           (existing-buffer (org-roam-todo--find-agent-buffer worktree-path)))
+      (if existing-buffer
+          ;; Agent exists - switch to it
+          (progn
+            (pop-to-buffer existing-buffer)
+            (message "Switched to existing agent: %s"
+                     (buffer-name existing-buffer)))
+        ;; Spawn new agent
+        (org-roam-todo--pre-trust-worktree worktree-path)
+        (let* ((lock-pattern (format "mcp__emacs__lock(%s*)"
+                                     (expand-file-name worktree-path)))
+               (all-tools (append org-roam-todo-agent-allowed-tools
+                                  (list lock-pattern)))
+               (buf (claude-agent-run worktree-path nil nil nil nil
+                                      all-tools))
+               (buffer-name (buffer-name buf)))
+          ;; Queue task - will be sent when agent emits "ready"
+          (org-roam-todo--send-task-to-buffer
+           buffer-name content worktree-path)
+          (message "Spawned agent: %s" buffer-name)))
+      (org-roam-todo-list-refresh))))
+
 (defun org-roam-todo-list-help ()
   "Show available keybindings in a transient-style popup.
 The popup captures input: pressing a command key dismisses the popup
@@ -1400,6 +1507,8 @@ and executes the command in the TODO list buffer.  C-g just closes."
          (help-buf (get-buffer-create "*todo-list-help*"))
          ;; Commands that can be dispatched from the help popup
          (dispatch-keys '(("RET" . org-roam-todo-list-open-org-file)
+                          ("w" . org-roam-todo-list-open-worktree)
+                          ("c" . org-roam-todo-list-spawn-agent)
                           ("M" . org-roam-todo-list-magit-status)
                           ("m" . org-roam-todo-list-merge)
                           ("d" . org-roam-todo-list-mark-done)
@@ -1419,6 +1528,12 @@ and executes the command in the TODO list buffer.  C-g just closes."
          "  "
          (propertize "RET" 'face 'help-key-binding)
          "   Open TODO org file\n"
+         "  "
+         (propertize "w" 'face 'help-key-binding)
+         "     Create/open worktree (magit-status)\n"
+         "  "
+         (propertize "c" 'face 'help-key-binding)
+         "     Create/open worktree agent\n"
          "  "
          (propertize "M" 'face 'help-key-binding)
          "     Open magit-status for worktree\n"
@@ -1609,6 +1724,8 @@ and executes the command in the TODO list buffer.  C-g just closes."
 (defvar org-roam-todo-list-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "RET") #'org-roam-todo-list-open-org-file)
+    (define-key map (kbd "w") #'org-roam-todo-list-open-worktree)
+    (define-key map (kbd "c") #'org-roam-todo-list-spawn-agent)
     (define-key map (kbd "M") #'org-roam-todo-list-magit-status)
     (define-key map (kbd "m") #'org-roam-todo-list-merge)
     (define-key map (kbd "g") #'org-roam-todo-list-refresh)
@@ -1625,6 +1742,8 @@ and executes the command in the TODO list buffer.  C-g just closes."
 (with-eval-after-load 'evil
   (evil-define-key 'normal org-roam-todo-list-mode-map
     (kbd "RET") #'org-roam-todo-list-open-org-file
+    (kbd "w") #'org-roam-todo-list-open-worktree
+    (kbd "c") #'org-roam-todo-list-spawn-agent
     (kbd "M") #'org-roam-todo-list-magit-status
     (kbd "m") #'org-roam-todo-list-merge
     (kbd "gr") #'org-roam-todo-list-refresh
