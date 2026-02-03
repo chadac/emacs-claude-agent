@@ -383,11 +383,8 @@ Each section is a (NAME . DESCRIPTION) pair.")
 
 ;;;; Buffer Management (imported from claude-ai.el)
 
-;; Dynamic variable for session context (set by MCP server via let binding)
-(defvar claude-session-cwd nil
-  "The working directory for the current Claude session.
-Set by the MCP server via a let binding to provide session context.
-This must be defvar'd to be dynamically scoped in lexical-binding mode.")
+;; Forward declaration — defined in claude-mcp.el
+(defvar claude-session-cwd)
 
 (defun claude-mcp-notes--get-work-dir ()
   "Get the working directory for the notes file.

@@ -25,6 +25,7 @@
 
 ;; Declare function from claude-agent.el (can't require due to circular dependency)
 (declare-function claude--package-root "claude-agent")
+(declare-function claude-agent--get-agent-dir "claude-agent")
 
 ;;;; Customization
 
@@ -2398,12 +2399,6 @@ Restores text input mode and any saved input."
 
 ;;;; Process management
 
-(defun claude-agent--get-agent-dir ()
-  "Get the directory containing the Python agent.
-Returns the path to the claude_agent directory, or nil if not found.
-Uses `claude--package-root' to resolve the package root."
-  (when-let ((base-dir (claude--package-root)))
-    (expand-file-name "claude_agent" base-dir)))
 
 (defun claude-agent--generate-mcp-config (work-dir buffer-name)
   "Generate MCP config file for emacs_mcp server.
