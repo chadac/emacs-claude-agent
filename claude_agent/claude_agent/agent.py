@@ -791,9 +791,14 @@ class ClaudeAgent:
                             text = getattr(block, "text", "")
                             if text:
                                 if not in_assistant_block:
+                                    # Strip leading newlines from the first text block.
+                                    # The SDK often returns text starting with "\n\n"
+                                    # which creates unwanted blank lines above the message.
+                                    text = text.lstrip("\n")
                                     self._emit({"type": "assistant_start"})
                                     in_assistant_block = True
-                                self._emit({"type": "assistant_text", "text": text})
+                                if text:
+                                    self._emit({"type": "assistant_text", "text": text})
 
                         elif block_type == "ToolUseBlock":
                             if in_assistant_block:
