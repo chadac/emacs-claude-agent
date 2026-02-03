@@ -27,6 +27,9 @@
 (declare-function claude--package-root "claude-agent")
 (declare-function claude-agent--get-agent-dir "claude-agent")
 
+;; Forward declarations for todo integration
+(declare-function org-roam-todo--query-todos "todo")
+
 ;;;; Customization
 
 (defgroup claude-agent nil
@@ -107,10 +110,12 @@ Example:
   :group 'claude-agent)
 
 (defun claude-agent--todo-acceptance-reminder ()
-  "Generate a TODO acceptance criteria reminder message.
-Returns a formatted string with the current TODO's acceptance criteria,
-or nil if no TODO is active.  This is intended to be used as an :elisp-fn
-for a system message hook that reminds the agent of its task periodically."
+  "Generate a TODO status and acceptance criteria reminder message.
+Returns a formatted string based on the current TODO's status:
+- active: Shows acceptance criteria and encourages work on unchecked items
+- review: Tells the agent to wait for user feedback
+- other statuses: Returns nil (no reminder needed)
+This is intended to be used as an :elisp-fn for a system message hook."
   (when (and (fboundp 'org-roam-todo-mcp-get-current)
              (fboundp 'org-roam-todo-mcp-get-acceptance-criteria))
     (condition-case nil
@@ -118,21 +123,30 @@ for a system message hook that reminds the agent of its task periodically."
                (parsed (json-read-from-string current))
                (title (alist-get 'title parsed))
                (status (alist-get 'status parsed)))
-          (when (and title (equal status "active"))
-            (let* ((criteria-json (org-roam-todo-mcp-get-acceptance-criteria))
-                   (criteria (json-read-from-string criteria-json))
-                   (lines '()))
-              (seq-doseq (item criteria)
-                (let ((text (alist-get 'text item))
-                      (checked (alist-get 'checked item)))
-                  (push (format "- [%s] %s"
-                                (if (eq checked t) "X" " ")
-                                text)
-                        lines)))
-              (when lines
-                (format "TASK REMINDER: You are working on: %s\n\nAcceptance Criteria:\n%s\n\nStay focused on completing unchecked items."
-                        title
-                        (mapconcat #'identity (nreverse lines) "\n"))))))
+          (when title
+            (pcase status
+              ("active"
+               ;; Active: show criteria, encourage work
+               (let* ((criteria-json (org-roam-todo-mcp-get-acceptance-criteria))
+                      (criteria (json-read-from-string criteria-json))
+                      (lines '()))
+                 (seq-doseq (item criteria)
+                   (let ((text (alist-get 'text item))
+                         (checked (alist-get 'checked item)))
+                     (push (format "- [%s] %s"
+                                   (if (eq checked t) "X" " ")
+                                   text)
+                           lines)))
+                 (when lines
+                   (format "TASK REMINDER: You are working on: %s\nStatus: active\n\nAcceptance Criteria:\n%s\n\nStay focused on completing unchecked items."
+                           title
+                           (mapconcat #'identity (nreverse lines) "\n")))))
+              ("review"
+               ;; Review: tell agent to wait for feedback
+               (format "TASK STATUS: Your task \"%s\" is in REVIEW status.\nYou have completed your work and it is awaiting user review.\nDo NOT make additional changes unless the user provides feedback.\nWhen the user sends you a message, the status will automatically change back to 'active'."
+                       title))
+              ;; For draft/done/rejected, no reminder needed
+              (_ nil))))
       (error nil))))
 
 (defun claude-agent--hook-should-fire-p (hook message-count is-resumed)
@@ -212,11 +226,49 @@ Useful for testing the system message display pipeline."
   (interactive "sSystem message: ")
   (claude-agent--send-system-message text))
 
+(defun claude-agent--maybe-revert-review-status ()
+  "If current buffer's TODO is in review status, revert to active.
+When the user sends a message to an agent whose TODO is in review status,
+this automatically changes the status back to active (since feedback implies
+more work is needed) and sends a system message notifying the agent."
+  (when (and claude-agent--work-dir
+             (fboundp 'org-roam-todo--query-todos))
+    (condition-case nil
+        (let* ((expanded-dir (directory-file-name
+                              (expand-file-name claude-agent--work-dir)))
+               (todo (cl-find-if
+                      (lambda (td)
+                        (let ((wpath (plist-get td :worktree-path)))
+                          (and wpath
+                               (string= (directory-file-name
+                                         (expand-file-name wpath))
+                                        expanded-dir))))
+                      (org-roam-todo--query-todos))))
+          (when (and todo (string= (plist-get todo :status) "review"))
+            (let ((file (plist-get todo :file))
+                  (title (plist-get todo :title)))
+              ;; Update status directly in the file
+              (when file
+                (with-current-buffer (find-file-noselect file)
+                  (save-excursion
+                    (goto-char (point-min))
+                    (when (re-search-forward "^:STATUS:\\s-*.+$" nil t)
+                      (replace-match ":STATUS: active")))
+                  (save-buffer))
+                ;; Send system notification to agent
+                (claude-agent--send-system-message
+                 (format "STATUS CHANGE: Your task \"%s\" has been moved from 'review' back to 'active'. The user has provided feedback below. Please review their message and continue working on the task."
+                         (or title "current task")))))))
+      (error nil))))
+
 (defun claude-agent--dispatch-user-message (text)
   "Send user message TEXT with system hook injection.
 Increments the message count, evaluates hooks, sends any system messages
 to the agent process, then sends the user message.  Also displays
-system messages in the REPL buffer."
+system messages in the REPL buffer.
+If the associated TODO is in review status, auto-reverts to active."
+  ;; Check for review -> active transition before sending
+  (claude-agent--maybe-revert-review-status)
   (setq claude-agent--message-count (1+ claude-agent--message-count))
   ;; Evaluate and send system message hooks
   (let ((hook-messages (claude-agent--evaluate-hooks)))

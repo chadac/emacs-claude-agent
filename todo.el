@@ -39,7 +39,14 @@
 (declare-function projectile-known-projects "projectile")
 (declare-function claude-agent-run "claude-agent")
 (declare-function claude-mcp-deftool "claude-mcp")
-
+(declare-function claude-sessions--get-all-sessions "claude-sessions")
+(declare-function claude-sessions--get-session-status "claude-sessions")
+(declare-function claude-sessions--format-status "claude-sessions")
+(declare-function magit-status "magit-status")
+(declare-function magit-status-setup-buffer "magit-status")
+(declare-function magit-get-mode-buffer "magit-mode")
+(declare-function org-roam-todo-merge-run "todo-merge")
+(declare-function org-roam-todo-merge--detect-main-branch "todo-merge")
 ;;;; Customization
 
 (defgroup org-roam-todo nil
@@ -503,7 +510,12 @@ If you see paths pointing to the main repo, translate them to the worktree equiv
                                expanded-pr expanded-wt))))
          (new-settings
           `((nil . ((claude-agent-extra-system-prompt . ,system-prompt)
-                    (claude-agent-auto-reject-rules . ,reject-rules)))))
+                    (claude-agent-auto-reject-rules . ,reject-rules)
+                    (claude-agent-system-hooks
+                     . ((:name "todo-reminder"
+                         :trigger "every_n"
+                         :interval 10
+                         :elisp-fn "(claude-agent--todo-acceptance-reminder)")))))))
          ;; Load existing .dir-locals.el if present
          (existing-settings
           (when (file-exists-p dir-locals-file)
@@ -573,7 +585,7 @@ paths in .claude/settings.local.json."
 ;;;; TODO Query & Selection
 
 (defconst org-roam-todo-status-order
-  '("draft" "active" "done" "rejected")
+  '("draft" "active" "review" "done" "rejected")
   "Order of TODO statuses for sorting.")
 
 (defun org-roam-todo--query-todos (&optional project-filter)
@@ -594,7 +606,7 @@ Returns a list of plists with :id, :title, :project, :status, :file, :created."
         ;; Read properties from the file
         (when (file-exists-p file)
           (with-temp-buffer
-            (insert-file-contents file nil 0 2000) ; Just read header
+            (insert-file-contents file nil 0 3000) ; Read header + properties
             (let ((project (when (re-search-forward "^:PROJECT_NAME:\\s-*\\(.+\\)$" nil t)
                              (match-string 1)))
                   (project-root (progn
@@ -612,7 +624,12 @@ Returns a list of plists with :id, :title, :project, :status, :file, :created."
                   (worktree-path (progn
                                    (goto-char (point-min))
                                    (when (re-search-forward "^:WORKTREE_PATH:\\s-*\\(.+\\)$" nil t)
-                                     (match-string 1)))))
+                                     (match-string 1))))
+                  (worktree-branch (progn
+                                     (goto-char (point-min))
+                                     (when (re-search-forward "^:WORKTREE_BRANCH:\\s-*\\(.+\\)$" nil t)
+                                       (match-string 1))))
+                  )
               (when (and project
                          (or (null project-filter)
                              (string= project project-filter)
@@ -632,7 +649,8 @@ Returns a list of plists with :id, :title, :project, :status, :file, :created."
                             :status (or status "draft")
                             :file file
                             :created (or created "")
-                            :worktree-path worktree-path)
+                            :worktree-path worktree-path
+                            :worktree-branch worktree-branch)
                       todos)))))))
     ;; Sort by status order, then by created date (newest first)
     (sort todos
@@ -643,6 +661,19 @@ Returns a list of plists with :id, :title, :project, :status, :file, :created."
                   (string> (plist-get a :created) (plist-get b :created))
                 (< status-a status-b)))))))
 
+(defun org-roam-todo--read-commit-message (file)
+  "Read the commit message from TODO FILE's Commit Message section.
+Returns the content between #+begin_src and #+end_src, or nil if not found."
+  (when (file-exists-p file)
+    (with-temp-buffer
+      (insert-file-contents file)
+      (goto-char (point-min))
+      (when (re-search-forward "^\\*\\* Commit Message" nil t)
+        (when (re-search-forward "^#\\+begin_src" nil t)
+          (forward-line 1)
+          (let ((start (point)))
+            (when (re-search-forward "^#\\+end_src" nil t)
+              (string-trim (buffer-substring-no-properties start (line-beginning-position))))))))))
 (defun org-roam-todo--status-sort-key (status)
   "Return sort key for STATUS (lower = first)."
   (or (cl-position (or status "draft") org-roam-todo-status-order :test #'string=) 99))
@@ -982,6 +1013,8 @@ Also deletes the branch (prompting if unmerged) and marks TODO as done."
     ;; Clear worktree properties
     (org-roam-todo--set-property "WORKTREE_PATH" nil)
     (org-roam-todo--set-property "WORKTREE_BRANCH" nil)
+
+
     ;; Delete branch automatically (prompt only if unmerged)
     (when (and branch-name
                (org-roam-todo--branch-exists-p project-root branch-name))
@@ -1052,6 +1085,7 @@ With prefix arg SKIP-COMMIT, skip the auto-commit/push step."
         ;; Clear worktree properties
         (org-roam-todo--set-property "WORKTREE_PATH" nil)
         (org-roam-todo--set-property "WORKTREE_BRANCH" nil)
+
         ;; Optionally delete branch
         (when (and branch-name
                    (org-roam-todo--branch-exists-p project-root branch-name)
@@ -1231,6 +1265,10 @@ Works for both main session TODOs and worktree TODOs."
   "Face for rejected status."
   :group 'org-roam-todo)
 
+(defface org-roam-todo-status-review
+  '((t :foreground "#4488ff" :weight bold))
+  "Face for review status (agent completed, awaiting user review)."
+  :group 'org-roam-todo)
 (defface org-roam-todo-title
   '((t :foreground "#aaccff"))
   "Face for TODO title."
@@ -1246,6 +1284,7 @@ Works for both main session TODOs and worktree TODOs."
   (pcase status
     ("draft" 'org-roam-todo-status-draft)
     ("active" 'org-roam-todo-status-active)
+    ("review" 'org-roam-todo-status-review)
     ("done" 'org-roam-todo-status-done)
     ("rejected" 'org-roam-todo-status-rejected)
     (_ 'default)))
@@ -1257,12 +1296,33 @@ Works for both main session TODOs and worktree TODOs."
 (defvar-local org-roam-todo-list--project-filter nil
   "Current project filter for the TODO list buffer.")
 
+(defun org-roam-todo-list--claude-status (todo)
+  "Get the Claude agent status string for TODO.
+Returns a propertized string: ready, thinking, waiting, typing, dead, or empty."
+  (let ((worktree-path (plist-get todo :worktree-path)))
+    (cond
+     ;; Check for live agent session matching this worktree
+     (worktree-path
+      (let ((expanded-wt (expand-file-name worktree-path))
+            (status nil))
+        (when (fboundp 'claude-sessions--get-all-sessions)
+          (dolist (session (claude-sessions--get-all-sessions))
+            (when (string= (expand-file-name
+                            (plist-get session :real-directory))
+                           (directory-file-name expanded-wt))
+              (setq status (plist-get session :status)))))
+        (if status
+            (claude-sessions--format-status status)
+          "—")))
+     ;; No worktree
+     (t ""))))
+
 (defun org-roam-todo-list--get-entries ()
-  "Get tabulated list entries for TODOs."
+  "Get tabulated list entries for TODOs.
+Columns: Status, Title, Claude, Created, Project."
   (mapcar
    (lambda (todo)
-     (let ((id (plist-get todo :id))
-           (title (plist-get todo :title))
+     (let ((title (plist-get todo :title))
            (project (plist-get todo :project))
            (status (plist-get todo :status))
            (created (plist-get todo :created))
@@ -1271,8 +1331,9 @@ Works for both main session TODOs and worktree TODOs."
              (vector
               (org-roam-todo--format-status status)
               (propertize (or title "Untitled") 'face 'org-roam-todo-title)
-              (propertize (or project "") 'face 'org-roam-todo-project)
-              (or created "")))))
+              (org-roam-todo-list--claude-status todo)
+              (or created "")
+              (propertize (or project "") 'face 'org-roam-todo-project)))))
    (org-roam-todo--query-todos org-roam-todo-list--project-filter)))
 
 (defun org-roam-todo-list-refresh ()
@@ -1280,11 +1341,177 @@ Works for both main session TODOs and worktree TODOs."
   (interactive)
   (tabulated-list-revert))
 
+(defun org-roam-todo-list--todo-at-point ()
+  "Get the TODO plist for the entry at point in the TODO list.
+Returns nil if no entry at point."
+  (when-let ((file (tabulated-list-get-id)))
+    (cl-find-if (lambda (todo) (string= (plist-get todo :file) file))
+                (org-roam-todo--query-todos org-roam-todo-list--project-filter))))
+
 (defun org-roam-todo-list-open ()
-  "Open the TODO at point."
+  "Open the TODO at point.
+If the TODO has a worktree, open magit-status for it.
+Otherwise, open the TODO org file."
+  (interactive)
+  (when-let ((todo (org-roam-todo-list--todo-at-point)))
+    (let ((worktree-path (plist-get todo :worktree-path))
+          (file (plist-get todo :file)))
+      (if (and worktree-path
+               (org-roam-todo--worktree-exists-p worktree-path))
+          (magit-status worktree-path)
+        (find-file file)))))
+
+(defun org-roam-todo-list-open-org-file ()
+  "Open the TODO org file at point (always opens the file, not magit)."
   (interactive)
   (when-let ((file (tabulated-list-get-id)))
     (find-file file)))
+
+(defun org-roam-todo-list-magit-status ()
+  "Open magit-status for the TODO's worktree at point in other-window."
+  (interactive)
+  (when-let ((todo (org-roam-todo-list--todo-at-point)))
+    (let ((worktree-path (plist-get todo :worktree-path)))
+      (if (and worktree-path
+               (org-roam-todo--worktree-exists-p worktree-path))
+          (let ((default-directory worktree-path))
+            (magit-status-setup-buffer worktree-path)
+            (display-buffer (magit-get-mode-buffer 'magit-status-mode)))
+        (message "No worktree for this TODO")))))
+
+(defun org-roam-todo-list-merge ()
+  "Run the configured merge workflow for the TODO at point.
+Uses the per-project workflow from `org-roam-todo-merge-workflows'
+or `org-roam-todo-merge-workflow'."
+  (interactive)
+  (require 'todo-merge)
+  (when-let ((todo (org-roam-todo-list--todo-at-point)))
+    (let ((worktree-path (plist-get todo :worktree-path)))
+      (unless worktree-path
+        (user-error "This TODO has no worktree"))
+      (org-roam-todo-merge-run todo))))
+
+(defun org-roam-todo-list-help ()
+  "Show available keybindings in a transient-style popup.
+The popup captures input: pressing a command key dismisses the popup
+and executes the command in the TODO list buffer.  C-g just closes."
+  (interactive)
+  (let* ((todo-buf (current-buffer))
+         (help-buf (get-buffer-create "*todo-list-help*"))
+         ;; Commands that can be dispatched from the help popup
+         (dispatch-keys '(("RET" . org-roam-todo-list-open-org-file)
+                          ("M" . org-roam-todo-list-magit-status)
+                          ("m" . org-roam-todo-list-merge)
+                          ("d" . org-roam-todo-list-mark-done)
+                          ("a" . org-roam-todo-list-mark-active)
+                          ("r" . org-roam-todo-list-mark-rejected)
+                          ("u" . org-roam-todo-list-mark-draft)
+                          ("g" . org-roam-todo-list-refresh)
+                          ("q" . quit-window))))
+    (with-current-buffer help-buf
+      (let ((inhibit-read-only t)
+            (map (make-sparse-keymap)))
+        (erase-buffer)
+        (insert
+         (propertize "TODO List Commands\n" 'face 'bold)
+         (propertize "──────────────────\n\n" 'face 'shadow)
+         (propertize "Navigation & Actions\n" 'face '(:weight bold :underline t))
+         "  "
+         (propertize "RET" 'face 'help-key-binding)
+         "   Open TODO org file\n"
+         "  "
+         (propertize "M" 'face 'help-key-binding)
+         "     Open magit-status for worktree\n"
+         "  "
+         (propertize "m" 'face 'help-key-binding)
+         "     Run merge/approval workflow\n"
+         "\n"
+         (propertize "Status\n" 'face '(:weight bold :underline t))
+         "  "
+         (propertize "d" 'face 'help-key-binding)
+         "     Mark as done\n"
+         "  "
+         (propertize "a" 'face 'help-key-binding)
+         "     Mark as active\n"
+         "  "
+         (propertize "r" 'face 'help-key-binding)
+         "     Mark as rejected\n"
+         "  "
+         (propertize "u" 'face 'help-key-binding)
+         "     Mark as draft\n"
+         "\n"
+         (propertize "Other\n" 'face '(:weight bold :underline t))
+         "  "
+         (propertize "g" 'face 'help-key-binding)
+         "     Refresh list\n"
+         "  "
+         (propertize "?" 'face 'help-key-binding)
+         "     Show this help\n"
+         "  "
+         (propertize "q" 'face 'help-key-binding)
+         "     Quit\n")
+        (goto-char (point-min))
+        ;; Start with suppress-keymap to block all self-insert characters
+        (suppress-keymap map t)
+        ;; Create a close function for reuse
+        (let ((close-fn (lambda ()
+                          (interactive)
+                          (let ((win (get-buffer-window help-buf)))
+                            (when win (delete-window win)))
+                          (kill-buffer help-buf)
+                          (when (buffer-live-p todo-buf)
+                            (pop-to-buffer todo-buf)))))
+          ;; Build a keymap that dispatches commands back to the todo-list buffer
+          (dolist (binding dispatch-keys)
+            (let ((key (car binding))
+                  (cmd (cdr binding)))
+              (define-key map (kbd key)
+                (let ((command cmd)
+                      (source-buf todo-buf))
+                  (lambda ()
+                    (interactive)
+                    (let ((win (get-buffer-window help-buf)))
+                      (when win (delete-window win)))
+                    (kill-buffer help-buf)
+                    (when (buffer-live-p source-buf)
+                      (pop-to-buffer source-buf)
+                      (call-interactively command)))))))
+          ;; C-g, ?, and Escape all just close
+          (define-key map (kbd "C-g") close-fn)
+          (define-key map (kbd "?") close-fn)
+          (define-key map (kbd "<escape>") close-fn))
+        ;; Suppress navigation keys, arrow keys, scrolling, etc.
+        ;; This ensures ONLY our explicitly bound keys work.
+        (dolist (key '("<up>" "<down>" "<left>" "<right>"
+                       "C-n" "C-p" "C-f" "C-b" "C-a" "C-e"
+                       "C-v" "M-v" "C-l"
+                       "C-x" "C-c" "M-x"
+                       "<prior>" "<next>" "<home>" "<end>"
+                       "<C-up>" "<C-down>" "<C-left>" "<C-right>"
+                       "<M-up>" "<M-down>" "<M-left>" "<M-right>"
+                       "j" "k" "h" "l"  ; vim-style nav (not bound as commands)
+                       "n" "p"           ; common nav keys
+                       "C-x o" "C-x b" "C-x k"))
+          ;; Only suppress if not already bound to a dispatch command
+          (unless (lookup-key map (kbd key))
+            (define-key map (kbd key) 'ignore)))
+        ;; Catch-all for any remaining undefined keys
+        (define-key map [t] 'ignore)
+        (use-local-map map)
+        (setq-local mode-line-format
+                    (propertize " TODO List Help — press a key or C-g to close"
+                                'face 'mode-line-emphasis))
+        (setq buffer-read-only t
+              cursor-type nil)))
+    ;; Display and select the help window
+    (let ((win (display-buffer help-buf
+                               '((display-buffer-in-side-window)
+                                 (side . bottom)
+                                 (window-height . fit-window-to-buffer)
+                                 (dedicated . t)))))
+      (select-window win)
+      ;; Prevent switching away
+      (set-window-dedicated-p win t))))
 
 (defun org-roam-todo-list-set-status (new-status)
   "Set the status of the TODO at point to NEW-STATUS."
@@ -1337,16 +1564,59 @@ Works for both main session TODOs and worktree TODOs."
            (next-status (nth next-idx org-roam-todo-status-order)))
       (org-roam-todo-list-set-status next-status))))
 
+;;;; TODO List Auto-Refresh (for live Claude status)
+
+(defvar org-roam-todo-list--refresh-timer nil
+  "Timer for automatic refresh of the TODO list buffer.")
+
+(defcustom org-roam-todo-list-refresh-interval 3.0
+  "Interval in seconds between automatic refreshes of the TODO list buffer."
+  :type 'number
+  :group 'org-roam-todo)
+
+(defun org-roam-todo-list--start-auto-refresh ()
+  "Start the auto-refresh timer for the TODO list buffer."
+  (org-roam-todo-list--stop-auto-refresh)
+  (setq org-roam-todo-list--refresh-timer
+        (run-with-timer org-roam-todo-list-refresh-interval
+                        org-roam-todo-list-refresh-interval
+                        #'org-roam-todo-list--auto-refresh)))
+
+(defun org-roam-todo-list--stop-auto-refresh ()
+  "Stop the auto-refresh timer."
+  (when org-roam-todo-list--refresh-timer
+    (cancel-timer org-roam-todo-list--refresh-timer)
+    (setq org-roam-todo-list--refresh-timer nil)))
+
+(defun org-roam-todo-list--auto-refresh ()
+  "Auto-refresh callback that only refreshes if a TODO list buffer is visible."
+  (let ((found nil))
+    (dolist (buffer (buffer-list))
+      (when (and (buffer-live-p buffer)
+                 (with-current-buffer buffer
+                   (derived-mode-p 'org-roam-todo-list-mode))
+                 (get-buffer-window buffer 'visible))
+        (setq found t)
+        (with-current-buffer buffer
+          (let ((pos (point)))
+            (tabulated-list-revert)
+            (goto-char (min pos (point-max)))))))
+    (unless found
+      (org-roam-todo-list--stop-auto-refresh))))
+
+;;;; TODO List Keybindings
+
 (defvar org-roam-todo-list-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "RET") #'org-roam-todo-list-open)
-    (define-key map (kbd "o") #'org-roam-todo-list-open)
+    (define-key map (kbd "RET") #'org-roam-todo-list-open-org-file)
+    (define-key map (kbd "M") #'org-roam-todo-list-magit-status)
+    (define-key map (kbd "m") #'org-roam-todo-list-merge)
     (define-key map (kbd "g") #'org-roam-todo-list-refresh)
     (define-key map (kbd "d") #'org-roam-todo-list-mark-done)
     (define-key map (kbd "r") #'org-roam-todo-list-mark-rejected)
     (define-key map (kbd "a") #'org-roam-todo-list-mark-active)
     (define-key map (kbd "u") #'org-roam-todo-list-mark-draft)
-    (define-key map (kbd "TAB") #'org-roam-todo-list-cycle-status)
+    (define-key map (kbd "?") #'org-roam-todo-list-help)
     (define-key map (kbd "q") #'quit-window)
     map)
   "Keymap for `org-roam-todo-list-mode'.")
@@ -1354,31 +1624,40 @@ Works for both main session TODOs and worktree TODOs."
 ;; Evil mode support
 (with-eval-after-load 'evil
   (evil-define-key 'normal org-roam-todo-list-mode-map
-    (kbd "RET") #'org-roam-todo-list-open
-    (kbd "o") #'org-roam-todo-list-open
+    (kbd "RET") #'org-roam-todo-list-open-org-file
+    (kbd "M") #'org-roam-todo-list-magit-status
+    (kbd "m") #'org-roam-todo-list-merge
     (kbd "gr") #'org-roam-todo-list-refresh
     (kbd "d") #'org-roam-todo-list-mark-done
     (kbd "r") #'org-roam-todo-list-mark-rejected
     (kbd "a") #'org-roam-todo-list-mark-active
     (kbd "u") #'org-roam-todo-list-mark-draft
-    (kbd "TAB") #'org-roam-todo-list-cycle-status
+    (kbd "?") #'org-roam-todo-list-help
     (kbd "q") #'quit-window))
 
 (define-derived-mode org-roam-todo-list-mode tabulated-list-mode "Org-Roam-TODOs"
   "Major mode for viewing and managing org-roam project TODOs.
-
 \\{org-roam-todo-list-mode-map}"
   (setq tabulated-list-format
         [("Status" 12 (lambda (a b)
                         (< (org-roam-todo--status-sort-key (aref (cadr a) 0))
                            (org-roam-todo--status-sort-key (aref (cadr b) 0)))))
          ("Title" 50 t)
-         ("Project" 20 t)
-         ("Created" 12 t)])
+         ("Claude" 10 t)
+         ("Created" 12 t)
+         ("Project" 20 t)])
   (setq tabulated-list-padding 2)
   (setq tabulated-list-sort-key '("Status" . nil))
   (setq tabulated-list-entries #'org-roam-todo-list--get-entries)
-  (tabulated-list-init-header))
+  (tabulated-list-init-header)
+  ;; Auto-refresh for live Claude status updates
+  (add-hook 'kill-buffer-hook #'org-roam-todo-list--stop-auto-refresh nil t)
+  (add-hook 'window-configuration-change-hook
+            (lambda ()
+              (if (get-buffer-window (current-buffer) 'visible)
+                  (org-roam-todo-list--start-auto-refresh)
+                (org-roam-todo-list--stop-auto-refresh)))
+            nil t))
 
 ;;;###autoload
 (defun org-roam-todo-list ()
@@ -1483,14 +1762,15 @@ Otherwise searches by title."
                     (bound-and-true-p claude-session-cwd)
                     (bound-and-true-p claude--cwd)
                     default-directory))
-           (expanded-cwd (expand-file-name cwd))
+           (expanded-cwd (directory-file-name (expand-file-name cwd)))
            (todos (org-roam-todo--query-todos)))
       (plist-get
        (cl-find-if
         (lambda (todo)
           (let ((wpath (plist-get todo :worktree-path)))
             (and wpath
-                 (string= (expand-file-name wpath) expanded-cwd))))
+                 (string= (directory-file-name (expand-file-name wpath))
+                           expanded-cwd))))
         todos)
        :file)))
    ;; File path that exists
@@ -1592,7 +1872,7 @@ TODO-ID can be a file path or title (defaults to current TODO)."
 
 (defun org-roam-todo-mcp-update-status (status &optional todo-id)
   "Update the status of a TODO.
-STATUS should be one of: draft, active, done, rejected.
+STATUS should be one of: draft, active, review, done, rejected.
 TODO-ID can be a file path or title (defaults to current TODO)."
   (let ((file (org-roam-todo-mcp--resolve-todo todo-id)))
     (unless file
@@ -1731,48 +2011,131 @@ Returns JSON with the created TODO's file path and ID."
        (project . ,project-name)
        (status . "draft")))))
 
-(defun org-roam-todo-mcp-complete (&optional summary)
-  "Complete the current TODO - commit, push, and mark done.
-SUMMARY is an optional description of what was accomplished.
-Returns a status message."
+(defun org-roam-todo-mcp-complete (&optional summary commit-message unsafe-ignore-unstaged)
+  "Mark the current TODO as ready for review.
+SUMMARY is a description of what was accomplished.
+COMMIT-MESSAGE is the proposed commit message for the merge workflow.
+UNSAFE-IGNORE-UNSTAGED if non-nil, skips the unstaged changes check.
+This will:
+1. Verify there are staged changes (agent must stage files manually)
+2. Fail if there are unstaged changes (unless UNSAFE-IGNORE-UNSTAGED)
+3. Rebase onto the upstream branch (e.g. main)
+4. Run pre-commit hooks if they exist (fail if hooks fail)
+5. Propose a commit via magit for user approval
+6. Set TODO status to 'review'
+7. Store the COMMIT-MESSAGE on the TODO for the merge workflow
+The user will then review the commit and run the merge workflow."
   (let* ((cwd (or (bound-and-true-p claudemacs-session-cwd)
                   (bound-and-true-p claude-session-cwd)
                   (bound-and-true-p claude--cwd)
                   default-directory))
-         (expanded-cwd (expand-file-name cwd))
+         (expanded-cwd (directory-file-name (expand-file-name cwd)))
          (todos (org-roam-todo--query-todos))
          (todo (cl-find-if
-                (lambda (t)
-                  (let ((wpath (plist-get t :worktree-path)))
+                (lambda (td)
+                  (let ((wpath (plist-get td :worktree-path)))
                     (and wpath
-                         (string= (expand-file-name wpath) expanded-cwd))))
+                         (string= (directory-file-name (expand-file-name wpath))
+                                  expanded-cwd))))
                 todos))
          (file (plist-get todo :file))
          (title (plist-get todo :title))
-         (project-root (plist-get todo :project-root))
-         (branch-name (plist-get todo :worktree-path)))
+         (project-root (plist-get todo :project-root)))
     (unless todo
       (error "No TODO found for current worktree: %s" cwd))
-    ;; Commit changes if there are any
-    (let ((commit-msg (format "Complete TODO: %s\n\n%s\n\n🤖 Generated with Claude Code"
-                              (or title "task")
-                              (or summary "Task completed by Claude agent"))))
-      (when (org-roam-todo--git-has-changes-p cwd)
-        (if (org-roam-todo--git-commit-all cwd commit-msg)
-            (progn
-              (org-roam-todo-mcp-add-progress
-               (format "Committed changes: %s" (or summary "task completed")))
-              ;; Push if enabled
-              (when org-roam-todo-auto-push
-                (if (org-roam-todo--git-push cwd)
-                    (org-roam-todo-mcp-add-progress "Pushed changes to origin")
-                  (org-roam-todo-mcp-add-progress "Warning: Push failed"))))
-          (error "Failed to commit changes"))))
-    ;; Mark as done
-    (org-roam-todo-mcp-update-status "done")
-    ;; Notify user that cleanup can be done
-    (format "TODO completed! Changes committed%s. Use C-c C-d in the TODO buffer to close the worktree."
-            (if org-roam-todo-auto-push " and pushed" ""))))
+    (unless commit-message
+      (setq commit-message (format "Complete TODO: %s" (or title "task"))))
+    ;; Check for staged changes
+    (let ((default-directory cwd))
+      (message "[todo-complete] Step 1: Checking staged changes...")
+      (let ((staged (string-trim (shell-command-to-string "git diff --cached --name-only"))))
+        (message "[todo-complete] Staged files: %s" (if (string-empty-p staged) "(none)" staged))
+        (when (string-empty-p staged)
+          (error "No files staged for commit.  Stage your changes with magit_stage first")))
+      ;; Check for unstaged changes (unless explicitly ignored)
+      (message "[todo-complete] Step 2: Checking unstaged changes...")
+      (let ((unstaged-now (string-trim (shell-command-to-string "git diff --name-only"))))
+        (message "[todo-complete] Unstaged files: %s" (if (string-empty-p unstaged-now) "(none)" unstaged-now))
+        (unless (or unsafe-ignore-unstaged (string-empty-p unstaged-now))
+          (error "Unstaged changes detected in:\n%s\n\nEither stage these files with magit_stage, or discard them if unintended.\nIf you truly want to leave them unstaged, pass unsafe_ignore_unstaged: true"
+                 unstaged-now)))
+      ;; Rebase onto upstream branch
+      (message "[todo-complete] Step 3: Rebasing onto upstream...")
+      (let ((main-branch (org-roam-todo-merge--detect-main-branch
+                          (or project-root cwd))))
+        (message "[todo-complete] Rebasing onto %s..." main-branch)
+        (let ((result (call-process "git" nil "*org-roam-todo-rebase-output*" nil
+                                    "rebase" "--autostash" main-branch)))
+          (message "[todo-complete] Rebase result: %d" result)
+          (unless (= 0 result)
+            (call-process "git" nil nil nil "rebase" "--abort")
+            (error "Rebase onto %s failed (exit %d).  Resolve conflicts and try again"
+                   main-branch result)))
+        ;; Re-stage any files that autostash unstashed (it doesn't preserve staging)
+        (let ((unstashed (string-trim (shell-command-to-string "git diff --name-only"))))
+          (message "[todo-complete] Post-rebase unstaged (from autostash): %s"
+                   (if (string-empty-p unstashed) "(none)" unstashed))
+          (unless (string-empty-p unstashed)
+            (message "[todo-complete] Re-staging autostashed files...")
+            (apply #'call-process "git" nil nil nil "add" "--"
+                   (split-string unstashed "\n" t)))))
+      (message "[todo-complete] Post-rebase staged: %s"
+               (string-trim (shell-command-to-string "git diff --cached --name-only")))
+      ;; Run pre-commit hooks if they exist
+      (message "[todo-complete] Step 4: Running pre-commit hooks...")
+      (let ((hook-path (expand-file-name ".git/hooks/pre-commit" cwd)))
+        ;; Also check for worktree hooks via core.hooksPath
+        (unless (file-exists-p hook-path)
+          (let ((hooks-path (string-trim (shell-command-to-string "git config core.hooksPath 2>/dev/null"))))
+            (unless (string-empty-p hooks-path)
+              (setq hook-path (expand-file-name "pre-commit" hooks-path)))))
+        (message "[todo-complete] Hook path: %s (exists: %s)" hook-path (file-exists-p hook-path))
+        (when (file-exists-p hook-path)
+          (let ((result (call-process "git" nil "*org-roam-todo-hook-output*" nil
+                                      "hook" "run" "pre-commit")))
+            (message "[todo-complete] Pre-commit hook result: %d" result)
+            (unless (= 0 result)
+              (error "Pre-commit hook failed (exit %d).  Fix the issues and try again" result)))
+          ;; Check if the hooks modified any files (e.g. linter auto-formatting)
+          (let ((modified (string-trim (shell-command-to-string "git diff --name-only"))))
+            (message "[todo-complete] Post-hook unstaged: %s" (if (string-empty-p modified) "(none)" modified))
+            (unless (string-empty-p modified)
+              (error "Pre-commit hooks modified the following files:\n%s\n\nReview the changes, then stage them with magit_stage and run todo_complete again"
+                     modified)))))
+      ;; Propose commit via magit
+      (message "[todo-complete] Step 5: Proposing commit via magit...")
+      (when (fboundp 'claude-mcp-magit-commit-propose)
+        (claude-mcp-magit-commit-propose commit-message cwd))
+      (message "[todo-complete] Step 5 complete. Checking final git status...")
+      (message "[todo-complete] Final unstaged: %s"
+               (string-trim (shell-command-to-string "git diff --name-only")))
+      (message "[todo-complete] Final staged: %s"
+               (string-trim (shell-command-to-string "git diff --cached --name-only"))))
+    ;; Set status to "review" and store commit message as org section
+    (with-current-buffer (find-file-noselect file)
+      (org-roam-todo--set-property "STATUS" "review")
+      (save-excursion
+        (goto-char (point-min))
+        ;; Replace existing Commit Message section or create new one
+        (if (re-search-forward "^\\*\\* Commit Message" nil t)
+            (let ((section-start (point))
+                  (section-end (save-excursion
+                                 (if (re-search-forward "^\\*\\* " nil t)
+                                     (match-beginning 0)
+                                   (point-max)))))
+              (forward-line 1)
+              (delete-region (point) section-end)
+              (insert "#+begin_src\n" commit-message "\n#+end_src\n\n"))
+          ;; Insert before Progress Log if it exists, otherwise at end
+          (goto-char (point-min))
+          (if (re-search-forward "^\\*\\* Progress Log" nil t)
+              (progn (beginning-of-line) (insert "** Commit Message\n#+begin_src\n" commit-message "\n#+end_src\n\n"))
+            (goto-char (point-max))
+            (insert "\n** Commit Message\n#+begin_src\n" commit-message "\n#+end_src\n"))))
+      (save-buffer))
+    (org-roam-todo-mcp-add-progress
+     (format "Marked for review: %s" (or summary "task completed")))
+    (format "TODO marked for review. Commit proposed for user approval. The user will review and run the merge workflow from the TODO list (m key).")))
 
 (defun org-roam-todo-mcp-update-acceptance (criteria &optional todo-id)
   "Update or add acceptance criteria items.
@@ -1855,7 +2218,7 @@ TODO-ID can be a file path or title (defaults to current TODO)."
     :function #'org-roam-todo-mcp-update-status
     :safe t
     :needs-session-cwd t
-    :args ((status string :required "New status: draft, active, done, or rejected")
+    :args ((status string :required "New status: draft, active, review, done, or rejected")
            (todo-id string "TODO identifier (file path or title). Defaults to current TODO.")))
 
   (claude-mcp-deftool todo-check-acceptance
@@ -1886,17 +2249,26 @@ TODO-ID can be a file path or title (defaults to current TODO)."
            (acceptance-criteria array "Optional array of acceptance criteria strings")))
 
   (claude-mcp-deftool todo-complete
-    "Complete the current TODO task. This will:
-1. Commit all changes with a generated commit message
-2. Push to origin (if org-roam-todo-auto-push is enabled)
-3. Mark the TODO as done
-4. Optionally close the worktree (prompts user)
-Use this when you have finished all the work for a TODO."
+    "Signal that your work is done and ready for user review. This will:
+1. Verify files are staged (you must stage files yourself via magit_stage)
+2. Fail if there are unstaged changes (you must stage or discard them)
+3. Rebase onto the upstream branch (e.g. main) to ensure clean history
+4. Run pre-commit hooks if they exist (fails if hooks fail OR if hooks modify files)
+5. Propose a commit via magit for user approval
+6. Set the TODO status to 'review'
+7. Store your proposed commit message for the merge workflow
+Call this when you have finished all the work for a TODO.
+You MUST stage your changed files first, then provide a commit-message.
+Write it as you would a real git commit message: a short summary line,
+then a blank line, then bullet points describing what changed and why.
+NOTE: If pre-commit hooks auto-format files, this will fail and tell you which
+files were modified. Review the changes, re-stage them, and call todo_complete again."
     :function #'org-roam-todo-mcp-complete
-    :safe nil  ; Not safe - makes commits
+    :safe t  ; Safe - only proposes commit, user must approve
     :needs-session-cwd t
-    :args ((summary string "Optional summary of what was accomplished for the commit message"))))
-
+    :args ((summary string "Brief summary of what was accomplished")
+           (commit-message string :required "Proposed commit message for the merge. Write a proper git commit message: short summary line, blank line, then detailed bullet points.")
+           (unsafe-ignore-unstaged boolean "If true, skip the unstaged changes check. Only use this if you intentionally want to leave files unstaged."))))
 ;;;; Global Keybindings
 
 ;; Define prefix keymaps for notes commands
