@@ -1388,90 +1388,9 @@ Designed to be called via emacsclient by Claude AI."
 
 ;;;; Agent Spawning
 
-(defun claude-mcp--send-to-agent-when-ready (buffer-name prompt &optional attempt)
-  "Send PROMPT to BUFFER-NAME when eat-terminal is ready.
-ATTEMPT is the retry count (max 20 attempts, ~10 seconds total)."
-  (let ((attempt (or attempt 0)))
-    (if (>= attempt 20)
-        (message "Failed to send prompt to %s: terminal not ready after 10s" buffer-name)
-      (let ((buf (get-buffer buffer-name)))
-        (if (and buf (buffer-live-p buf))
-            (with-current-buffer buf
-              (if (and (boundp 'eat-terminal) eat-terminal)
-                  ;; Terminal ready - send the prompt
-                  (progn
-                    (eat-term-send-string eat-terminal prompt)
-                    (run-at-time 0.1 nil
-                                 (lambda (b)
-                                   (when (buffer-live-p b)
-                                     (with-current-buffer b
-                                       (when (and (boundp 'eat-terminal) eat-terminal)
-                                         (eat-term-input-event eat-terminal 1 'return)))))
-                                 buf)
-                    (message "Sent initial prompt to %s" buffer-name))
-                ;; Not ready yet - retry
-                (run-at-time 0.5 nil
-                             #'claude-mcp--send-to-agent-when-ready
-                             buffer-name prompt (1+ attempt))))
-          ;; Buffer doesn't exist yet - retry
-          (run-at-time 0.5 nil
-                       #'claude-mcp--send-to-agent-when-ready
-                       buffer-name prompt (1+ attempt)))))))
 
-(defun claude-mcp-spawn-agent (directory &optional agent-name)
-  "Spawn a new Claude agent in DIRECTORY.
-Optional AGENT-NAME provides a custom name suffix for the buffer.
-Returns the buffer name of the new agent.
-Designed to be called via MCP by Claude AI."
-  (require 'claude-agent)
-  (let* ((work-dir (expand-file-name directory))
-         (short-name (file-name-nondirectory (directory-file-name work-dir)))
-         (buf-name (if agent-name
-                       (format "*claude:%s:%s*" short-name agent-name)
-                     (format "*claude:%s*" short-name))))
-    ;; Check if session already exists
-    (if (get-buffer buf-name)
-        buf-name  ; Return existing buffer name
-      ;; Start new session using claude-agent-run
-      (let ((buf (claude-agent-run work-dir)))
-        ;; Rename if agent-name provided
-        (when agent-name
-          (with-current-buffer buf
-            (rename-buffer buf-name)))
-        buf-name))))
-
-(defun claude-mcp-list-agents ()
-  "List all running Claude agent sessions.
-Returns a list of (buffer-name directory) pairs.
-Designed to be called via emacsclient by Claude AI."
-  (let (agents)
-    (dolist (buf (buffer-list))
-      (let ((name (buffer-name buf)))
-        (when (string-match "^\\*claude:\\(.*\\)\\*$" name)
-          (push (list name (match-string 1 name)) agents))))
-    (or agents "No agents running")))
-
-(defun claude-mcp-message-agent (buffer-name message &optional from-buffer)
-  "Send MESSAGE to the agent in BUFFER-NAME.
-This sends the message as user input to the Claude session.
-Optional FROM-BUFFER identifies the sender for the message queue.
-Designed to be called via MCP by Claude AI."
-  (if (get-buffer buffer-name)
-      (with-current-buffer buffer-name
-        (if (and (boundp 'claude-agent--process)
-                 claude-agent--process
-                 (process-live-p claude-agent--process))
-            ;; New claude-agent buffer system
-            (let ((formatted-message (if from-buffer
-                                         (format "[From %s]: %s" from-buffer message)
-                                       message)))
-              ;; Insert message into input area and send
-              (goto-char (point-max))
-              (let ((inhibit-read-only t))
-                (insert formatted-message))
-              (claude-agent-send)
-              (format "Sent message to %s" buffer-name))))
-    (error "Buffer '%s' does not exist" buffer-name)))
+;; Agent messaging functions (spawn, list, message, check) are defined
+;; in claude-mcp-messaging.el -- do NOT duplicate them here.
 
 ;;;; Session Management
 
@@ -2883,9 +2802,10 @@ These tools can be pre-authorized via --allowedTools."
 
 (defconst claude-mcp-native-safe-tools
   '("watch_buffer" "watch_for_pattern" "watch_for_change"
-    "spawn_agent" "list_agents" "message_agent" "check_messages"
-    "message_board_summary" "whoami")
-  "Native Python MCP tools that are safe (defined in server.py).")
+    "whoami")
+  "Native Python MCP tools that are safe (defined in server.py).
+Agent messaging tools (spawn_agent, list_agents, etc.) are now
+registered via claude-mcp-deftool in claude-mcp-messaging.el.")
 
 (defun claude-mcp-get-safe-tools-for-cli ()
   "Return safe MCP tool names formatted for Claude CLI --allowedTools.

@@ -419,45 +419,9 @@ With prefix ARG, prompt for the project directory."
         (message "Claude MCP session killed"))
     (error "There is no Claude MCP session in this workspace or project")))
 
-;;;###autoload
-(defun claude-mcp-spawn-agent (directory &optional agent-name &rest extra-args)
-  "Spawn a new claude agent in DIRECTORY with optional AGENT-NAME.
-When called interactively, uses current directory and prompts for agent identifier.
-If AGENT-NAME is nil or empty, buffer will be named *claude:name*.
-If provided, buffer will be named *claude:name:agent-name*.
-EXTRA-ARGS are additional command-line arguments to pass to Claude.
-Returns the buffer name."
-  (interactive
-   (list (if (claude-mcp--is-mcp-buffer-p)
-            (or claude-mcp--cwd default-directory)
-          (or (vc-git-root default-directory) default-directory))
-         (let ((input (read-string "Agent identifier (leave empty for primary): " nil nil "")))
-           (if (string-empty-p input) nil input))))
-  (let* ((expanded-dir (expand-file-name directory))
-         (buffer-name (if agent-name
-                         (format "*claude:%s:%s*"
-                                 (file-name-nondirectory (directory-file-name expanded-dir))
-                                 agent-name)
-                       (format "*claude:%s*"
-                               (file-name-nondirectory (directory-file-name expanded-dir)))))
-         (work-dir-arg (if agent-name
-                          (list directory agent-name)
-                        directory)))
-    ;; Check if buffer already exists
-    (when (get-buffer buffer-name)
-      (error "Agent already exists with buffer name: %s" buffer-name))
 
-    ;; Check directory exists
-    (unless (file-directory-p expanded-dir)
-      (error "Directory does not exist: %s" expanded-dir))
-
-    ;; Spawn the agent with any extra args
-    (apply #'claude-mcp--start work-dir-arg extra-args)
-
-    (when (called-interactively-p 'interactive)
-      (message "Spawned agent: %s" buffer-name))
-
-    buffer-name))
+;; claude-mcp-spawn-agent is now defined in claude-mcp-messaging.el
+;; Do NOT duplicate it here.
 
 ;;;###autoload
 (defun claude-mcp-toggle-buffer ()

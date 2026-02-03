@@ -76,41 +76,9 @@ NATIVE_TOOLS: dict = {
             "file_paths": {"type": "array", "description": "Array of file paths to reload in order (use when loading multiple files)", "required": False},
         },
     },
-    "spawn_agent": {
-        "description": "Spawn a new Claude agent in a directory. Returns the buffer name for monitoring. Note: To send an initial message to the agent after spawning, use message_agent separately (TODO: MCP server will handle this automatically).",
-        "safe": True,
-        "args": {
-            "directory": {"type": "string", "description": "Directory path where the agent should work (will be expanded)", "required": True},
-            "agent_name": {"type": "string", "description": "Optional identifier for the agent (e.g., 'test', 'debug'). If not provided, buffer will be named *claudemacs:/path*. If provided, buffer will be *claudemacs:/path:agent-name*."},
-        },
-    },
-    "list_agents": {
-        "description": "List all running claudemacs agent sessions. Returns (buffer-name, directory) pairs.",
-        "safe": True,
-        "args": {},
-    },
-    "message_agent": {
-        "description": "Send a message to another running agent. Messages are queued and can be checked by the recipient using check_messages.",
-        "safe": True,
-        "args": {
-            "buffer_name": {"type": "string", "description": "Buffer name of the agent (from list_agents or spawn_agent)", "required": True},
-            "message": {"type": "string", "description": "Message to send as user input to the agent", "required": True},
-            "from_buffer": {"type": "string", "description": "Optional sender buffer name (auto-detected if not provided)"},
-        },
-    },
-    "check_messages": {
-        "description": "Check queued messages for an agent. Returns formatted messages with sender info and instructions on how to respond. Use this to check your inbox.",
-        "safe": True,
-        "args": {
-            "buffer_name": {"type": "string", "description": "Buffer name of the agent to check messages for", "required": True},
-            "clear": {"type": "boolean", "description": "Whether to clear messages after reading (default: false)"},
-        },
-    },
-    "message_board_summary": {
-        "description": "Get a summary of messages sent between agents. Shows message counts for each sender/recipient pair.",
-        "safe": True,
-        "args": {},
-    },
+    # Agent messaging tools (spawn_agent, list_agents, message_agent,
+    # check_messages, message_board_summary) are now registered via
+    # claude-mcp-deftool in claude-mcp-messaging.el
     "whoami": {
         "description": "Get the buffer name/identity of the current claudemacs session. Use this to identify yourself when sending messages or logging actions.",
         "safe": True,
@@ -569,33 +537,8 @@ async def handle_native_tool(name: str, arguments: dict) -> str:
         result = await lib.reload_elisp_file(file_paths)
         return result
 
-    elif name == "spawn_agent":
-        directory = arguments["directory"]
-        agent_name = arguments.get("agent_name")
-        result = await lib.spawn_agent_async(directory, agent_name)
-        return result
-
-    elif name == "list_agents":
-        agents_list = await lib.list_agents_async()
-        return json.dumps(agents_list)
-
-    elif name == "message_agent":
-        buffer_name = arguments["buffer_name"]
-        message = arguments["message"]
-        # Auto-detect sender from session state if not provided
-        from_buffer = arguments.get("from_buffer") or SESSION_BUFFER_NAME
-        result = await lib.message_agent_async(buffer_name, message, from_buffer)
-        return result
-
-    elif name == "check_messages":
-        buffer_name = arguments["buffer_name"]
-        clear = arguments.get("clear", False)
-        result = await lib.check_messages_async(buffer_name, clear)
-        return result
-
-    elif name == "message_board_summary":
-        result = await lib.message_board_summary_async()
-        return result
+    # spawn_agent, list_agents, message_agent, check_messages,
+    # message_board_summary are now handled via deftool (elisp side)
 
     elif name == "whoami":
         if not SESSION_BUFFER_NAME:
@@ -630,6 +573,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if name in ("lock", "lock_region") and "agent_name" not in arguments:
             if SESSION_BUFFER_NAME:
                 arguments["agent_name"] = SESSION_BUFFER_NAME
+
+        # Auto-inject from_buffer for message_agent if not provided
+        if name == "message_agent" and not arguments.get("from_buffer"):
+            if SESSION_BUFFER_NAME:
+                arguments["from_buffer"] = SESSION_BUFFER_NAME
 
         # Extract explicit context parameters first (these are special and not passed to elisp)
         context_buffer = arguments.pop("__buffer", None)
