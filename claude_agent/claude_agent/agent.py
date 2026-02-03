@@ -711,8 +711,12 @@ class ClaudeAgent:
         self._emit({"type": "user_text", "text": message})
         self._emit({"type": "user_end"})
 
+        # Slash commands (e.g. /compact, /clear) must be sent verbatim to the SDK
+        # without appending system reminders, which would break command parsing.
+        is_slash_command = message.startswith("/")
+
         # Consume any pending system messages (display already happened at receipt time)
-        if self._pending_system_messages:
+        if self._pending_system_messages and not is_slash_command:
             reminder_block = _build_system_reminder_block(self._pending_system_messages)
             full_message = f"{message}\n\n{reminder_block}"
             self._pending_system_messages.clear()
