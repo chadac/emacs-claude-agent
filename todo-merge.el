@@ -25,7 +25,7 @@
 ;;; Code:
 
 (require 'cl-lib)
-
+(require 'claude-mcp-magit)
 ;; Forward declarations
 
 (declare-function magit-status "magit")

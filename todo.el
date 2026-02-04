@@ -1708,13 +1708,24 @@ and executes the command in the TODO list buffer.  C-g just closes."
 
 (defun org-roam-todo-list-refresh-all ()
   "Refresh all TODO list buffers regardless of visibility.
-Call this after operations that change TODO state (e.g., merge, cleanup)."
+Call this after operations that change TODO state (e.g., merge, cleanup).
+Re-initializes the table format to handle stale buffers with outdated columns."
   (dolist (buffer (buffer-list))
     (when (and (buffer-live-p buffer)
                (with-current-buffer buffer
                  (derived-mode-p 'org-roam-todo-list-mode)))
       (with-current-buffer buffer
         (let ((pos (point)))
+          ;; Re-set the format in case columns changed since buffer was created
+          (setq tabulated-list-format
+                [("Status" 12 (lambda (a b)
+                                (< (org-roam-todo--status-sort-key (aref (cadr a) 0))
+                                   (org-roam-todo--status-sort-key (aref (cadr b) 0)))))
+                 ("Title" 50 t)
+                 ("Claude" 10 t)
+                 ("Created" 12 t)
+                 ("Project" 20 t)])
+          (tabulated-list-init-header)
           (tabulated-list-revert)
           (goto-char (min pos (point-max))))))))
 
