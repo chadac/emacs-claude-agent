@@ -37,6 +37,8 @@
 (declare-function org-roam-todo--set-property "todo")
 (declare-function org-roam-todo--kill-claude-session "todo")
 (declare-function org-roam-todo--kill-worktree-buffers "todo")
+(declare-function org-roam-todo--kill-magit-buffers "todo")
+(declare-function org-roam-todo--kill-todo-buffer "todo")
 (declare-function org-roam-todo--remove-worktree "todo")
 (declare-function org-roam-todo--delete-branch "todo")
 (declare-function org-roam-todo--branch-exists-p "todo")
@@ -241,10 +243,11 @@ clears properties, and marks TODO as done."
         (project-root (plist-get todo :project-root))
         (worktree-path (plist-get todo :worktree-path))
         (branch-name (plist-get todo :worktree-branch)))
-    ;; Kill Claude session
+    ;; Kill Claude session, file buffers, and magit buffers
     (when worktree-path
       (org-roam-todo--kill-claude-session worktree-path)
       (org-roam-todo--kill-worktree-buffers worktree-path)
+      (org-roam-todo--kill-magit-buffers worktree-path)
       ;; Remove worktree
       (when (org-roam-todo--worktree-exists-p worktree-path)
         (let ((result (org-roam-todo--remove-worktree project-root worktree-path t)))
@@ -259,8 +262,8 @@ clears properties, and marks TODO as done."
           (org-roam-todo--delete-branch project-root branch-name t))))
     ;; Update TODO properties and remove commit message section
     (with-current-buffer (find-file-noselect file)
-      (org-roam-todo--set-property "WORKTREE_PATH" nil)
-      (org-roam-todo--set-property "WORKTREE_BRANCH" nil)
+      (org-delete-property "WORKTREE_PATH")
+      (org-delete-property "WORKTREE_BRANCH")
       (org-roam-todo--set-property "STATUS" "done")
       ;; Remove Commit Message section if present
       (save-excursion
@@ -274,6 +277,8 @@ clears properties, and marks TODO as done."
                          (point-max)))))
             (delete-region start end))))
       (save-buffer))
+    ;; Close the org TODO buffer
+    (org-roam-todo--kill-todo-buffer file)
     (message "Cleaned up worktree and marked TODO as done")
     ;; Refresh TODO list buffers to reflect the status change
     (org-roam-todo-list-refresh-all)))

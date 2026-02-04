@@ -1012,6 +1012,35 @@ Only shows TODOs with status 'draft' since active/done/rejected don't need workt
           (cl-incf killed))))
     killed))
 
+(defun org-roam-todo--kill-magit-buffers (worktree-path)
+  "Kill all magit-related buffers for WORKTREE-PATH.
+Returns the number of buffers killed."
+  (let ((expanded-path (file-name-as-directory (expand-file-name worktree-path)))
+        (killed 0))
+    (dolist (buf (buffer-list))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf
+          (when (and (derived-mode-p 'magit-mode)
+                     default-directory
+                     (string-prefix-p expanded-path
+                                      (file-name-as-directory
+                                       (expand-file-name default-directory))))
+            (kill-buffer buf)
+            (cl-incf killed)))))
+    killed))
+
+(defun org-roam-todo--kill-todo-buffer (file)
+  "Kill the buffer visiting the org TODO FILE, if any.
+Returns non-nil if a buffer was killed."
+  (when file
+    (let ((buf (find-buffer-visiting file)))
+      (when buf
+        (with-current-buffer buf
+          ;; Save before killing to avoid losing changes
+          (when (buffer-modified-p) (save-buffer)))
+        (kill-buffer buf)
+        t))))
+
 (defun org-roam-todo--kill-claude-session (worktree-path)
   "Kill any Claude agent session associated with WORKTREE-PATH.
 Returns non-nil if a session was found and killed."
@@ -1099,6 +1128,12 @@ Continues through all steps even if individual steps fail."
           (when (> killed 0)
             (push (format "killed %d buffer(s)" killed) results)))
       (error (push (format "FAILED to kill buffers: %s" (error-message-string err)) results)))
+    ;; Kill magit buffers for the worktree
+    (condition-case err
+        (let ((killed (org-roam-todo--kill-magit-buffers worktree-path)))
+          (when (> killed 0)
+            (push (format "killed %d magit buffer(s)" killed) results)))
+      (error (push (format "FAILED to kill magit buffers: %s" (error-message-string err)) results)))
     ;; Remove worktree if it exists
     (condition-case err
         (if (org-roam-todo--worktree-exists-p worktree-path)
@@ -1151,6 +1186,11 @@ Continues through all steps even if individual steps fail."
                   (replace-match ":STATUS: done"))))
             (save-buffer)))
       (error (push (format "FAILED to update TODO file: %s" (error-message-string err)) results)))
+    ;; Close the org TODO buffer (save first, then kill)
+    (condition-case err
+        (when (org-roam-todo--kill-todo-buffer file)
+          (push "closed TODO buffer" results))
+      (error (push (format "FAILED to close TODO buffer: %s" (error-message-string err)) results)))
     (nreverse results)))
 
 ;;;###autoload
