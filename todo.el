@@ -2380,9 +2380,32 @@ The user will then review the commit and run the merge workflow."
      (format "Marked for review: %s" (or summary "task completed")))
     (format "TODO marked for review. Commit proposed for user approval. The user will review and run the merge workflow from the TODO list (m key).")))
 
+(defun org-roam-todo-mcp--alist-get (key alist)
+  "Get value for KEY from ALIST, trying both symbol and string keys.
+MCP sends alists with string keys (e.g. (\"text\" . \"value\")) but elisp
+code often uses symbol keys (e.g. (text . \"value\")).  This handles both."
+  (or (cdr (assoc key alist))
+      (cdr (assoc (if (symbolp key)
+                      (symbol-name key)
+                    (intern key))
+                  alist))))
+
+(defun org-roam-todo-mcp--insert-criteria (criteria)
+  "Insert acceptance CRITERIA as org checkbox items.
+Each item in CRITERIA should be an alist with `text' and `checked' keys.
+Items with nil or empty text are skipped to avoid writing nils."
+  (dolist (item criteria)
+    (let ((text (org-roam-todo-mcp--alist-get 'text item))
+          (checked (org-roam-todo-mcp--alist-get 'checked item)))
+      (when (and text (stringp text) (not (string-empty-p (string-trim text))))
+        (insert (format "- [%s] %s\n"
+                        (if (and checked (not (eq checked :json-false))) "X" " ")
+                        text))))))
+
 (defun org-roam-todo-mcp-update-acceptance (criteria &optional todo-id)
   "Update or add acceptance criteria items.
-CRITERIA is a list of (text . checked) pairs.
+CRITERIA is a list of alists with `text' and `checked' keys.
+Keys may be symbols or strings (both are handled).
 TODO-ID can be a file path or title (defaults to current TODO)."
   (let ((file (org-roam-todo-mcp--resolve-todo todo-id)))
     (unless file
@@ -2401,22 +2424,12 @@ TODO-ID can be a file path or title (defaults to current TODO)."
               (forward-line 1)
               (delete-region (point) section-end)
               ;; Insert new criteria
-              (dolist (item criteria)
-                (let ((text (cdr (assoc 'text item)))
-                      (checked (cdr (assoc 'checked item))))
-                  (insert (format "- [%s] %s\n"
-                                  (if (and checked (not (eq checked :json-false))) "X" " ")
-                                  text))))
+              (org-roam-todo-mcp--insert-criteria criteria)
               (insert "\n"))
           ;; Create section if it doesn't exist
           (goto-char (point-max))
           (insert "\n** Acceptance Criteria\n")
-          (dolist (item criteria)
-            (let ((text (cdr (assoc 'text item)))
-                  (checked (cdr (assoc 'checked item))))
-              (insert (format "- [%s] %s\n"
-                              (if (and checked (not (eq checked :json-false))) "X" " ")
-                              text))))
+          (org-roam-todo-mcp--insert-criteria criteria)
           (insert "\n"))
         (save-buffer)))
     "Updated acceptance criteria"))
