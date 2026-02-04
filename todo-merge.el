@@ -283,14 +283,16 @@ clears properties, and marks TODO as done."
 
 (defun org-roam-todo-merge--local-rebase (todo)
   "Run the local-rebase merge workflow for TODO.
-The agent has already rebased onto main via todo-complete.
 Opens the magit commit editor for the user to review, edit, and
-GPG-sign the commit.  Then fast-forward merges into main.
+GPG-sign the commit.  Then rebases onto latest main and
+fast-forward merges into main.
 
 Steps:
 1. Open magit commit editor for review/signing (with pre-filled message)
-2. Fast-forward merge into main
-3. Clean up worktree + branch, mark done."
+2. Rebase onto latest main (ensures ff-merge will succeed)
+3. Open magit-status for review
+4. Fast-forward merge into main
+5. Clean up worktree + branch, mark done."
   (let* ((project-root (plist-get todo :project-root))
          (worktree-path (plist-get todo :worktree-path))
          (branch-name (plist-get todo :worktree-branch))
@@ -322,13 +324,27 @@ Steps:
 
 (defun org-roam-todo-merge--local-rebase-finish
     (todo project-root worktree-path branch-name main-branch)
-  "Finish local-rebase workflow: review in magit, ff-merge, cleanup."
-  ;; Open magit-status for review
+  "Finish local-rebase workflow: rebase onto main, review in magit, ff-merge, cleanup.
+Rebases the worktree branch onto the latest main before attempting the
+fast-forward merge, ensuring the merge will succeed even if main has
+moved forward since the agent's initial rebase."
+  ;; Step 2: Rebase onto latest main before merge
+  (message "Rebasing %s onto %s..." branch-name main-branch)
+  (let ((rebase-result (org-roam-todo-merge--git-run
+                        worktree-path "rebase" main-branch)))
+    (unless (= 0 (car rebase-result))
+      ;; Abort the failed rebase
+      (org-roam-todo-merge--git-run worktree-path "rebase" "--abort")
+      (user-error "Rebase of %s onto %s failed (conflicts).\n%s\nPlease resolve manually or send the agent back to fix conflicts"
+                  branch-name main-branch (cdr rebase-result))))
+  (message "Rebase successful")
+
+  ;; Step 3: Open magit-status for review
   (message "Opening magit-status for review in worktree...")
   (let ((default-directory worktree-path))
     (magit-status worktree-path))
 
-  ;; Step 2: Ask user to confirm merge after review
+  ;; Step 4: Ask user to confirm merge after review
   (when (yes-or-no-p (format "Fast-forward merge '%s' into %s? " branch-name main-branch))
     ;; Perform ff-merge in the main repo
     (message "Performing fast-forward merge...")
@@ -336,7 +352,7 @@ Steps:
                                    "merge" "--ff-only" branch-name)
     (message "Successfully merged %s into %s" branch-name main-branch)
 
-    ;; Step 3: Cleanup
+    ;; Step 5: Cleanup
     (when org-roam-todo-merge-cleanup-after
       (when (yes-or-no-p "Clean up worktree and mark TODO as done? ")
         (org-roam-todo-merge--cleanup todo)))))

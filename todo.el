@@ -988,20 +988,23 @@ Only shows TODOs with status 'draft' since active/done/rejected don't need workt
     killed))
 
 (defun org-roam-todo--kill-claude-session (worktree-path)
-  "Kill any Claude agent session associated with WORKTREE-PATH."
-  (let ((expanded-path (expand-file-name worktree-path)))
-    (dolist (buf (buffer-list))
-      (with-current-buffer buf
-        (when (and (boundp 'claude-agent--work-dir)
-                   claude-agent--work-dir
-                   (string= (expand-file-name claude-agent--work-dir)
-                            expanded-path)
-                   (boundp 'claude-agent--process)
-                   claude-agent--process)
-          (when (process-live-p claude-agent--process)
-            (delete-process claude-agent--process))
-          (kill-buffer buf)
-          (cl-return t))))))
+  "Kill any Claude agent session associated with WORKTREE-PATH.
+Returns non-nil if a session was found and killed."
+  (let ((expanded-path (expand-file-name worktree-path))
+        (found nil))
+    (dolist (buf (buffer-list) found)
+      (when (and (buffer-live-p buf) (not found))
+        (with-current-buffer buf
+          (when (and (boundp 'claude-agent--work-dir)
+                     claude-agent--work-dir
+                     (string= (expand-file-name claude-agent--work-dir)
+                              expanded-path)
+                     (boundp 'claude-agent--process)
+                     claude-agent--process)
+            (when (process-live-p claude-agent--process)
+              (delete-process claude-agent--process))
+            (kill-buffer buf)
+            (setq found t)))))))
 
 (defun org-roam-todo--remove-worktree (project-root worktree-path &optional force)
   "Remove worktree at WORKTREE-PATH from PROJECT-ROOT.
