@@ -145,7 +145,8 @@ Can be set per-project via .dir-locals.el."
     "mcp__emacs__edit"
     "mcp__emacs__unlock"
     "mcp__emacs__request_attention")
-  "List of tools to pre-authorize for TODO worktree agents.
+  "Base list of tools to pre-authorize for TODO worktree agents.
+These are combined with `org-roam-todo-agent-allowed-tools-extra' at runtime.
 These tools will be allowed without permission prompts, enabling
 more autonomous operation.  Uses Claude Code permission pattern syntax:
 - ToolName(**) for recursive file access
@@ -156,6 +157,22 @@ dynamically with path-scoping at worktree dispatch time.
 Edit/Write are also excluded since agents must use lock/edit/unlock."
   :type '(repeat string)
   :group 'org-roam-todo)
+
+(defcustom org-roam-todo-agent-allowed-tools-extra '()
+  "Additional allowed tools, appended to `org-roam-todo-agent-allowed-tools'.
+Intended for use in .dir-locals.el so worktree-specific tools can be
+added without overwriting the base list.
+Same format as `org-roam-todo-agent-allowed-tools'."
+  :type '(repeat string)
+  :safe #'listp
+  :group 'org-roam-todo)
+
+(defun org-roam-todo--effective-agent-allowed-tools ()
+  "Return the effective allowed tools list (base + extra).
+Combines `org-roam-todo-agent-allowed-tools' and
+`org-roam-todo-agent-allowed-tools-extra'."
+  (append org-roam-todo-agent-allowed-tools
+          org-roam-todo-agent-allowed-tools-extra))
 
 (defcustom org-roam-todo-worktree-copy-patterns
   '(".claude/settings.local.json" ".dir-locals.el" ".envrc")
@@ -510,7 +527,7 @@ If you see paths pointing to the main repo, translate them to the worktree equiv
                                expanded-pr expanded-wt))))
          (new-settings
           `((nil . ((claude-agent-extra-system-prompt . ,system-prompt)
-                    (claude-agent-auto-reject-rules . ,reject-rules)
+                    (claude-agent-auto-reject-rules-extra . ,reject-rules)
                     (claude-agent-system-hooks
                      . ((:name "todo-reminder"
                          :trigger "every_n"
@@ -944,7 +961,7 @@ If the worktree and session already exist, sends the task to the existing sessio
       ;; Add path-scoped mcp__emacs__lock for worktree directory
       (org-roam-todo--pre-trust-worktree worktree-path)
       (let* ((lock-pattern (format "mcp__emacs__lock(%s*)" (expand-file-name worktree-path)))
-             (all-tools (append org-roam-todo-agent-allowed-tools (list lock-pattern)))
+             (all-tools (append (org-roam-todo--effective-agent-allowed-tools) (list lock-pattern)))
              (buf (claude-agent-run worktree-path nil nil nil nil all-tools))
              (buffer-name (buffer-name buf)))
         ;; Queue task - will be sent when agent emits "ready"
@@ -1549,7 +1566,7 @@ exists for the worktree, switches to it instead of spawning a new one."
         (org-roam-todo--pre-trust-worktree worktree-path)
         (let* ((lock-pattern (format "mcp__emacs__lock(%s*)"
                                      (expand-file-name worktree-path)))
-               (all-tools (append org-roam-todo-agent-allowed-tools
+               (all-tools (append (org-roam-todo--effective-agent-allowed-tools)
                                   (list lock-pattern)))
                (buf (claude-agent-run worktree-path nil nil nil nil
                                       all-tools))

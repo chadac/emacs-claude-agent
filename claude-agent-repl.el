@@ -49,21 +49,55 @@ Requires the Emacs server to be running (`server-start')."
   :group 'claude-agent)
 
 (defcustom claude-agent-disallowed-tools '()
-  "List of tools that should be disallowed for the Claude agent.
+  "Base list of tools that should be disallowed for the Claude agent.
+These are combined with `claude-agent-disallowed-tools-extra' at runtime.
 Example: Setting to \\='(\"WebSearch\") would disable web search."
   :type '(repeat string)
   :group 'claude-agent)
 
+(defcustom claude-agent-disallowed-tools-extra '()
+  "Additional disallowed tools, appended to `claude-agent-disallowed-tools'.
+Intended for use in .dir-locals.el so worktree-specific restrictions
+can be added without overwriting the base list."
+  :type '(repeat string)
+  :safe #'listp
+  :group 'claude-agent)
+
 (defcustom claude-agent-auto-reject-rules nil
-  "List of auto-reject rules for tool permissions.
+  "Base list of auto-reject rules for tool permissions.
+These are combined with `claude-agent-auto-reject-rules-extra' at runtime.
 Each element is a plist with keys:
   :path-prefix PATH   - reject tools operating on files under PATH
   :pattern PATTERN     - tool permission pattern (e.g. \"Edit(/path/*)\")
   :message MESSAGE     - rejection reason shown to the agent
-Can be set via .dir-locals.el for worktree-specific configuration."
+Set base rules here; use `claude-agent-auto-reject-rules-extra' in
+.dir-locals.el to add worktree-specific rules on top."
   :type '(repeat (plist :key-type symbol :value-type string))
   :safe #'listp
   :group 'claude-agent)
+
+(defcustom claude-agent-auto-reject-rules-extra nil
+  "Additional auto-reject rules, appended to `claude-agent-auto-reject-rules'.
+Intended for use in .dir-locals.el so worktree-specific confinement
+rules can be added without overwriting base rules.
+Same format as `claude-agent-auto-reject-rules'."
+  :type '(repeat (plist :key-type symbol :value-type string))
+  :safe #'listp
+  :group 'claude-agent)
+
+(defun claude-agent--effective-auto-reject-rules ()
+  "Return the effective auto-reject rules (base + extra).
+Combines `claude-agent-auto-reject-rules' and
+`claude-agent-auto-reject-rules-extra'."
+  (append claude-agent-auto-reject-rules
+          claude-agent-auto-reject-rules-extra))
+
+(defun claude-agent--effective-disallowed-tools ()
+  "Return the effective disallowed tools list (base + extra).
+Combines `claude-agent-disallowed-tools' and
+`claude-agent-disallowed-tools-extra'."
+  (append claude-agent-disallowed-tools
+          claude-agent-disallowed-tools-extra))
 
 (defcustom claude-agent-extra-system-prompt nil
   "Extra text appended to the system prompt.
@@ -2564,22 +2598,23 @@ Optional ADDITIONAL-ALLOWED-TOOLS is a list of extra tools to pre-authorize."
       (when all-allowed-tools
         (setq args (append args (list "--allowed-tools"
                                       (mapconcat #'identity all-allowed-tools ","))))))
-    ;; Write auto-reject config if rules exist (e.g., from .dir-locals.el)
-    (when claude-agent-auto-reject-rules
-      (let ((reject-file (make-temp-file "claude-auto-reject-" nil ".json"))
-            (rules (mapcar (lambda (rule)
-                             (let (alist)
-                               (when (plist-get rule :path-prefix)
-                                 (push (cons "path_prefix" (plist-get rule :path-prefix)) alist))
-                               (when (plist-get rule :pattern)
-                                 (push (cons "pattern" (plist-get rule :pattern)) alist))
-                               (when (plist-get rule :message)
-                                 (push (cons "message" (plist-get rule :message)) alist))
-                               alist))
-                           claude-agent-auto-reject-rules)))
-        (with-temp-file reject-file
-          (insert (json-encode rules)))
-        (setq args (append args (list "--auto-reject-config" reject-file)))))
+    ;; Write auto-reject config if rules exist (base + extra from .dir-locals.el)
+    (let ((effective-reject-rules (claude-agent--effective-auto-reject-rules)))
+      (when effective-reject-rules
+        (let ((reject-file (make-temp-file "claude-auto-reject-" nil ".json"))
+              (rules (mapcar (lambda (rule)
+                               (let (alist)
+                                 (when (plist-get rule :path-prefix)
+                                   (push (cons "path_prefix" (plist-get rule :path-prefix)) alist))
+                                 (when (plist-get rule :pattern)
+                                   (push (cons "pattern" (plist-get rule :pattern)) alist))
+                                 (when (plist-get rule :message)
+                                   (push (cons "message" (plist-get rule :message)) alist))
+                                 alist))
+                             effective-reject-rules)))
+          (with-temp-file reject-file
+            (insert (json-encode rules)))
+          (setq args (append args (list "--auto-reject-config" reject-file))))))
     ;; System message hooks are now evaluated on the Emacs side
     ;; (see claude-agent--dispatch-user-message)
     ;; Use pipe (nil) instead of PTY to avoid focus-related buffering issues
