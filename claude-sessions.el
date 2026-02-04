@@ -111,10 +111,6 @@ Returns one of: `ready', `thinking', `waiting', or `dead'."
          ;; Ready: Not thinking, process alive
          (t 'ready))))
 
-
-     ;; No recognized architecture - dead
-     (t 'dead))))
-
      ;; No recognized architecture - dead
      (t 'dead))))
 
