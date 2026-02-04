@@ -1053,6 +1053,283 @@ If the buffer was unmodified before locking, it will be auto-saved after writing
          (file-path string "Path to file - used to find buffer if buffer-name doesn't match")
          (lock-id string "Lock ID to edit (from lock response). Optional if only one lock exists.")))
 
+;;;; Batch Lock/Edit/Unlock Operations
+;;
+;; These functions perform multiple lock/edit/unlock operations in a single call,
+;; dramatically reducing round-trips for common refactoring operations like renames.
+;; All batch operations validate all inputs before applying any changes (atomic).
+
+(defun claude-mcp--alist-get (key alist)
+  "Get value for KEY (a string) from ALIST.
+Handles both (KEY . VALUE) and (KEY VALUE) forms."
+  (let ((pair (assoc key alist)))
+    (when pair
+      (if (consp (cdr pair))
+          (cadr pair)
+        (cdr pair)))))
+
+(defun claude-mcp-lock-regions (regions &optional agent-name file-path buffer-name)
+  "Lock multiple REGIONS in a single buffer in one call.
+REGIONS is a list of alists, each with \"start_line\" and \"end_line\" keys.
+AGENT-NAME optionally identifies which agent owns the locks.
+FILE-PATH or BUFFER-NAME identifies the target buffer.
+Returns a summary of all locks created.
+
+All regions are validated before any locks are created (atomic).
+Regions must not overlap with each other or with existing locks."
+  (let ((buf (claude-mcp--get-buffer buffer-name file-path t)))
+    (unless buf
+      (error "Buffer does not exist (and no file_path provided to open it)"))
+    (with-current-buffer buf
+      (claude-mcp--ensure-locked-regions)
+      ;; Handle empty buffer
+      (when (= (buffer-size) 0)
+        (insert "\n")
+        (goto-char (point-min)))
+      (let ((total-lines (count-lines (point-min) (point-max)))
+            (validated nil))
+        ;; Phase 1: Validate ALL regions before locking any
+        (dolist (region regions)
+          (let ((start-line (claude-mcp--alist-get "start_line" region))
+                (end-line (claude-mcp--alist-get "end_line" region)))
+            (unless (and start-line end-line)
+              (error "Each region must have start_line and end_line, got: %S" region))
+            (setq start-line (if (stringp start-line) (string-to-number start-line) start-line))
+            (setq end-line (if (stringp end-line) (string-to-number end-line) end-line))
+            (when (< start-line 1)
+              (error "start_line must be >= 1, got %d" start-line))
+            (when (> end-line total-lines)
+              (error "end_line %d exceeds buffer line count %d" end-line total-lines))
+            (when (> start-line end-line)
+              (error "start_line %d must be <= end_line %d" start-line end-line))
+            (let* ((start-pos (claude-mcp--line-to-pos start-line))
+                   (end-pos (claude-mcp--line-end-pos end-line))
+                   ;; Check overlap with existing locks
+                   (overlap (claude-mcp--check-region-overlap start-pos end-pos)))
+              (when overlap
+                (error "Region lines %d-%d overlaps with existing lock %s"
+                       start-line end-line overlap))
+              ;; Check overlap with other regions in this batch
+              (dolist (prev validated)
+                (let ((prev-start (plist-get prev :start-pos))
+                      (prev-end (plist-get prev :end-pos)))
+                  (when (and (< start-pos prev-end) (> end-pos prev-start))
+                    (error "Region lines %d-%d overlaps with region lines %d-%d in this batch"
+                           start-line end-line
+                           (plist-get prev :start-line) (plist-get prev :end-line)))))
+              (push (list :start-line start-line :end-line end-line
+                          :start-pos start-pos :end-pos end-pos)
+                    validated))))
+        ;; Phase 2: All validated, now create all locks
+        (let ((results nil))
+          (dolist (v (nreverse validated))
+            (let* ((start-line (plist-get v :start-line))
+                   (end-line (plist-get v :end-line))
+                   (start-pos (plist-get v :start-pos))
+                   (end-pos (plist-get v :end-pos))
+                   (was-modified (buffer-modified-p))
+                   (lock-id (claude-mcp--generate-lock-id start-line end-line))
+                   (agent-buffer (or agent-name "Claude"))
+                   (max-name-len (max 20 (- (window-body-width) 18)))
+                   (agent-display (if (> (length agent-buffer) max-name-len)
+                                      (concat (substring agent-buffer 0 (- max-name-len 4)) "...*")
+                                    agent-buffer))
+                   (ov (make-overlay start-pos end-pos))
+                   (label (propertize (format " 🔒 Locked by %s " agent-display)
+                                      'face '(:background "#61afef"
+                                              :foreground "#282c34"
+                                              :weight bold
+                                              :height 0.85))))
+              ;; Configure overlay
+              (overlay-put ov 'face 'claude-mcp-locked-region-face)
+              (overlay-put ov 'claude-mcp-lock lock-id)
+              (overlay-put ov 'before-string (concat label "\n"))
+              (overlay-put ov 'help-echo (format "Locked by %s (ID: %s)" agent-buffer lock-id))
+              (overlay-put ov 'modification-hooks
+                           (list (lambda (ov after-p beg end &optional len)
+                                   (unless after-p
+                                     (let* ((lock-id (overlay-get ov 'claude-mcp-lock))
+                                            (lock-info (and claude-mcp--locked-regions
+                                                            (gethash lock-id claude-mcp--locked-regions))))
+                                       (when (and lock-info
+                                                  (not (plist-get lock-info :claude-is-writing)))
+                                         (error "This region is locked by Claude (ID: %s)" lock-id)))))))
+              ;; Store lock info
+              (puthash lock-id
+                       (list :start-line start-line
+                             :end-line end-line
+                             :start-pos start-pos
+                             :end-pos end-pos
+                             :overlay ov
+                             :was-modified was-modified
+                             :claude-is-writing nil
+                             :agent-buffer agent-buffer)
+                       claude-mcp--locked-regions)
+              (let ((content (buffer-substring-no-properties start-pos end-pos)))
+                (push (format "  %s: lines %d-%d\n%s" lock-id start-line end-line content)
+                      results))))
+          (format "Locked %d regions in %s:\n\n%s"
+                  (length results)
+                  (buffer-name buf)
+                  (mapconcat #'identity (nreverse results) "\n")))))))
+
+(claude-mcp-deftool locks
+  "Lock multiple regions in a single buffer in one call.
+Each region is specified by start_line and end_line (1-indexed, inclusive).
+All regions are validated before any locks are created (atomic).
+Regions must not overlap with each other or with existing locks.
+Returns lock IDs and content for all locked regions."
+  :function #'claude-mcp-lock-regions
+  :args ((regions array :required "Array of {start_line, end_line} objects to lock")
+         (agent-name string "Name of the agent owning the locks (auto-set by MCP server)")
+         (file-path string "Path to file - if provided and buffer doesn't exist, opens the file")
+         (buffer-name string "Name of the buffer (optional if file_path provided)")))
+
+(defun claude-mcp-edit-regions (edits &optional file-path buffer-name)
+  "Apply multiple EDITS to locked regions in a single buffer in one call.
+EDITS is a list of alists, each with \"lock_id\" and \"content\" keys.
+FILE-PATH or BUFFER-NAME identifies the target buffer.
+Returns a summary of all edits applied.
+
+All edits are validated before any changes are made (atomic).
+Edits are applied in reverse buffer order (bottom-up) to preserve positions."
+  (let ((buf (claude-mcp--get-buffer buffer-name file-path)))
+    (unless buf
+      (error "Buffer does not exist"))
+    (with-current-buffer buf
+      (claude-mcp--ensure-locked-regions)
+      ;; Phase 1: Validate ALL edits before applying any
+      (let ((validated nil))
+        (dolist (edit edits)
+          (let ((lock-id (claude-mcp--alist-get "lock_id" edit))
+                (content (claude-mcp--alist-get "content" edit)))
+            (unless lock-id
+              (error "Each edit must have a lock_id, got: %S" edit))
+            (unless content
+              (error "Each edit must have content, got: %S" edit))
+            (unless (gethash lock-id claude-mcp--locked-regions)
+              (error "Lock ID '%s' not found in buffer" lock-id))
+            ;; Check for duplicate lock_ids in this batch
+            (dolist (prev validated)
+              (when (string= lock-id (plist-get prev :lock-id))
+                (error "Duplicate lock_id '%s' in edits batch" lock-id)))
+            (let* ((lock-info (gethash lock-id claude-mcp--locked-regions))
+                   (start-pos (plist-get lock-info :start-pos)))
+              (push (list :lock-id lock-id :content content :start-pos start-pos)
+                    validated))))
+        ;; Phase 2: Sort edits by buffer position (bottom-up) to preserve positions
+        (setq validated (sort validated
+                              (lambda (a b)
+                                (> (plist-get a :start-pos) (plist-get b :start-pos)))))
+        ;; Phase 3: Apply all edits bottom-up
+        (let ((results nil)
+              (any-was-unmodified nil))
+          (dolist (v validated)
+            (let* ((lock-id (plist-get v :lock-id))
+                   (content (plist-get v :content))
+                   (lock-info (gethash lock-id claude-mcp--locked-regions))
+                   (start-line (plist-get lock-info :start-line))
+                   (end-line (plist-get lock-info :end-line))
+                   (start-pos (plist-get lock-info :start-pos))
+                   (end-pos (plist-get lock-info :end-pos))
+                   (ov (plist-get lock-info :overlay))
+                   (was-modified (plist-get lock-info :was-modified))
+                   (old-content (buffer-substring-no-properties start-pos end-pos))
+                   (inhibit-read-only t))
+              (when (not was-modified)
+                (setq any-was-unmodified t))
+              ;; Mark that Claude is writing
+              (plist-put lock-info :claude-is-writing t)
+              (puthash lock-id lock-info claude-mcp--locked-regions)
+              ;; Delete overlay
+              (when (overlayp ov)
+                (delete-overlay ov))
+              ;; Replace the region content
+              (goto-char start-pos)
+              (delete-region start-pos end-pos)
+              (let* ((normalized-content (if (string-suffix-p "\n" content)
+                                             content
+                                           (concat content "\n")))
+                     (new-start start-pos))
+                (insert normalized-content)
+                (let ((new-end (point)))
+                  (claude-mcp--flash-region new-start new-end)))
+              ;; Remove lock from hash
+              (remhash lock-id claude-mcp--locked-regions)
+              ;; Build diff for this edit
+              (let* ((old-lines (split-string old-content "\n"))
+                     (new-lines (split-string content "\n"))
+                     (diff-output (concat
+                                   (mapconcat (lambda (l) (concat "- " l)) old-lines "\n")
+                                   "\n"
+                                   (mapconcat (lambda (l) (concat "+ " l)) new-lines "\n"))))
+                (push (format "  %s (lines %d-%d):\n%s" lock-id start-line end-line diff-output)
+                      results))))
+          ;; Refresh positions of any remaining locks
+          (claude-mcp--refresh-lock-positions)
+          ;; Auto-save if buffer was originally unmodified
+          (when (and any-was-unmodified (buffer-file-name))
+            (save-buffer))
+          (format "Edited %d regions in %s%s:\n\n%s"
+                  (length results)
+                  (buffer-name buf)
+                  (if (and any-was-unmodified (buffer-file-name))
+                      " (auto-saved)"
+                    "")
+                  (mapconcat #'identity results "\n\n")))))))
+
+(claude-mcp-deftool edits
+  "Replace content in multiple locked regions in one call.
+Each edit specifies a lock_id and the new content.
+All edits are validated before any changes are made (atomic).
+Edits are applied bottom-up to preserve buffer positions."
+  :function #'claude-mcp-edit-regions
+  :safe t
+  :args ((edits array :required "Array of {lock_id, content} objects")
+         (file-path string "Path to file - used to find buffer if buffer-name doesn't match")
+         (buffer-name string "Name of the buffer (optional if file_path provided)")))
+
+(defun claude-mcp-unlock-regions (lock-ids &optional file-path buffer-name)
+  "Unlock multiple locked regions in a single buffer in one call.
+LOCK-IDS is a list of lock ID strings to unlock.
+FILE-PATH or BUFFER-NAME identifies the target buffer.
+Returns a summary of all unlocks performed.
+
+All lock IDs are validated before any unlocks are performed (atomic)."
+  (let ((buf (claude-mcp--get-buffer buffer-name file-path)))
+    (unless buf
+      (error "Buffer does not exist"))
+    (with-current-buffer buf
+      (claude-mcp--ensure-locked-regions)
+      ;; Phase 1: Validate ALL lock IDs exist
+      (dolist (lock-id lock-ids)
+        (unless (gethash lock-id claude-mcp--locked-regions)
+          (error "Lock ID '%s' not found in buffer" lock-id)))
+      ;; Phase 2: All validated, now unlock all
+      (let ((results nil))
+        (dolist (lock-id lock-ids)
+          (let* ((lock-info (gethash lock-id claude-mcp--locked-regions))
+                 (start-line (plist-get lock-info :start-line))
+                 (end-line (plist-get lock-info :end-line))
+                 (ov (plist-get lock-info :overlay)))
+            (when (overlayp ov)
+              (delete-overlay ov))
+            (remhash lock-id claude-mcp--locked-regions)
+            (push (format "  %s: lines %d-%d" lock-id start-line end-line) results)))
+        (format "Unlocked %d regions in %s (no changes made):\n%s"
+                (length results)
+                (buffer-name buf)
+                (mapconcat #'identity (nreverse results) "\n"))))))
+
+(claude-mcp-deftool unlocks
+  "Unlock multiple locked regions in one call without making changes.
+All lock IDs are validated before any unlocks are performed (atomic)."
+  :function #'claude-mcp-unlock-regions
+  :safe t
+  :args ((lock-ids array :required "Array of lock ID strings to unlock")
+         (file-path string "Path to file - used to find buffer if buffer-name doesn't match")
+         (buffer-name string "Name of the buffer (optional if file_path provided)")))
+
 ;;;; Watch Mode - Follow Claude's Edits
 ;;
 ;; Watch mode lets users follow along as Claude makes edits.
