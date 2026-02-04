@@ -153,9 +153,10 @@ more autonomous operation.  Uses Claude Code permission pattern syntax:
 - ToolName(**) for recursive file access
 - Bash(pattern*) for specific bash commands
 - mcp__server__tool for MCP tools
-Note: mcp__emacs__lock is NOT in this list because it is added
-dynamically with path-scoping at worktree dispatch time.
-Edit/Write are also excluded since agents must use lock/edit/unlock."
+Note: mcp__emacs__lock and mcp__emacs__locks are NOT in this list
+because they are added dynamically with path-scoping at worktree
+dispatch time.  Edit/Write are also excluded since agents must use
+lock/edit/unlock."
   :type '(repeat string)
   :group 'org-roam-todo)
 
@@ -965,10 +966,13 @@ If the worktree and session already exist, sends the task to the existing sessio
           (pop-to-buffer existing-buffer)
           (message "Sent task to existing session: %s" buffer-name))
       ;; New session - pre-trust and spawn with TODO-specific allowed tools
-      ;; Add path-scoped mcp__emacs__lock for worktree directory
+      ;; Add path-scoped mcp__emacs__lock and mcp__emacs__locks for worktree directory
       (org-roam-todo--pre-trust-worktree worktree-path)
-      (let* ((lock-pattern (format "mcp__emacs__lock(%s*)" (expand-file-name worktree-path)))
-             (all-tools (append (org-roam-todo--effective-agent-allowed-tools) (list lock-pattern)))
+      (let* ((expanded-wt (expand-file-name worktree-path))
+             (lock-pattern (format "mcp__emacs__lock(%s*)" expanded-wt))
+             (locks-pattern (format "mcp__emacs__locks(%s*)" expanded-wt))
+             (all-tools (append (org-roam-todo--effective-agent-allowed-tools)
+                                (list lock-pattern locks-pattern)))
              (worktree-model (org-roam-todo--get-property "WORKTREE_MODEL"))
              (buf (claude-agent-run worktree-path nil nil nil worktree-model all-tools))
              (buffer-name (buffer-name buf)))
@@ -1634,10 +1638,11 @@ exists for the worktree, switches to it instead of spawning a new one."
                      (buffer-name existing-buffer)))
         ;; Spawn new agent
         (org-roam-todo--pre-trust-worktree worktree-path)
-        (let* ((lock-pattern (format "mcp__emacs__lock(%s*)"
-                                     (expand-file-name worktree-path)))
+        (let* ((expanded-wt (expand-file-name worktree-path))
+               (lock-pattern (format "mcp__emacs__lock(%s*)" expanded-wt))
+               (locks-pattern (format "mcp__emacs__locks(%s*)" expanded-wt))
                (all-tools (append (org-roam-todo--effective-agent-allowed-tools)
-                                  (list lock-pattern)))
+                                  (list lock-pattern locks-pattern)))
                (worktree-model (plist-get todo :worktree-model))
                (buf (claude-agent-run worktree-path nil nil nil worktree-model
                                       all-tools))
