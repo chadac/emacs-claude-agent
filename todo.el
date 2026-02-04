@@ -24,6 +24,7 @@
 ;;   :PROJECT_NAME: short project name
 ;;   :PROJECT_ROOT: full path to project
 ;;   :STATUS: draft | active | done | rejected
+;;   :WORKTREE_MODEL: opus | sonnet | haiku (model for worktree agent)
 ;;   :WORKTREE_PATH: (set when worktree is created)
 ;;   :WORKTREE_BRANCH: (set when worktree is created)
 
@@ -389,6 +390,7 @@ If PROJECT-ROOT is nil, prompts for project selection."
 :PROJECT_NAME: %s
 :PROJECT_ROOT: %s
 :STATUS: draft
+:WORKTREE_MODEL: opus
 :CREATED: %s
 :END:
 #+title: ${title}
@@ -713,6 +715,10 @@ Returns a list of plists with :id, :title, :project, :status, :file, :created."
                                      (goto-char (point-min))
                                      (when (re-search-forward "^:WORKTREE_BRANCH:\\s-*\\(.+\\)$" nil t)
                                        (match-string 1))))
+                  (worktree-model (progn
+                                    (goto-char (point-min))
+                                    (when (re-search-forward "^:WORKTREE_MODEL:\\s-*\\(.+\\)$" nil t)
+                                      (match-string 1))))
                   )
               (when (and project
                          (or (null project-filter)
@@ -734,7 +740,8 @@ Returns a list of plists with :id, :title, :project, :status, :file, :created."
                             :file file
                             :created (or created "")
                             :worktree-path worktree-path
-                            :worktree-branch worktree-branch)
+                            :worktree-branch worktree-branch
+                            :worktree-model worktree-model)
                       todos)))))))
     ;; Sort by status order, then by created date (newest first)
     (sort todos
@@ -962,7 +969,8 @@ If the worktree and session already exist, sends the task to the existing sessio
       (org-roam-todo--pre-trust-worktree worktree-path)
       (let* ((lock-pattern (format "mcp__emacs__lock(%s*)" (expand-file-name worktree-path)))
              (all-tools (append (org-roam-todo--effective-agent-allowed-tools) (list lock-pattern)))
-             (buf (claude-agent-run worktree-path nil nil nil nil all-tools))
+             (worktree-model (org-roam-todo--get-property "WORKTREE_MODEL"))
+             (buf (claude-agent-run worktree-path nil nil nil worktree-model all-tools))
              (buffer-name (buffer-name buf)))
         ;; Queue task - will be sent when agent emits "ready"
         (org-roam-todo--send-task-to-buffer buffer-name content worktree-path)
@@ -1568,7 +1576,8 @@ exists for the worktree, switches to it instead of spawning a new one."
                                      (expand-file-name worktree-path)))
                (all-tools (append (org-roam-todo--effective-agent-allowed-tools)
                                   (list lock-pattern)))
-               (buf (claude-agent-run worktree-path nil nil nil nil
+               (worktree-model (plist-get todo :worktree-model))
+               (buf (claude-agent-run worktree-path nil nil nil worktree-model
                                       all-tools))
                (buffer-name (buffer-name buf)))
           ;; Queue task - will be sent when agent emits "ready"
@@ -2185,12 +2194,13 @@ TODO-ID can be a file path or title (defaults to current TODO)."
           (save-buffer))))
     (format "%s: %s" (if should-check "Checked" "Unchecked") item-text)))
 
-(defun org-roam-todo-mcp-create (project-root title &optional description acceptance-criteria)
+(defun org-roam-todo-mcp-create (project-root title &optional description acceptance-criteria model)
   "Create a new TODO programmatically.
 PROJECT-ROOT is the path to the project.
 TITLE is the TODO title.
 DESCRIPTION is optional task description text.
 ACCEPTANCE-CRITERIA is an optional list of criteria strings.
+MODEL is the worktree model to use (defaults to \"sonnet\").
 Returns JSON with the created TODO's file path and ID."
   (unless project-root
     (error "project_root is required"))
@@ -2204,6 +2214,7 @@ Returns JSON with the created TODO's file path and ID."
          (id-timestamp (format "%s%04x" (format-time-string "%Y%m%dT%H%M%S") (random 65536)))
          (date-stamp (format-time-string "%Y-%m-%d"))
          (file-path (expand-file-name (format "todo-%s.org" slug) project-dir))
+         (worktree-model (or model "sonnet"))
          ;; Format acceptance criteria as org checkboxes
          (criteria-text (if acceptance-criteria
                             (mapconcat (lambda (c) (format "- [ ] %s" c))
@@ -2222,6 +2233,7 @@ Returns JSON with the created TODO's file path and ID."
 :PROJECT_NAME: %s
 :PROJECT_ROOT: %s
 :STATUS: draft
+:WORKTREE_MODEL: %s
 :CREATED: %s
 :END:
 #+title: %s
@@ -2239,6 +2251,7 @@ Returns JSON with the created TODO's file path and ID."
                       id-timestamp
                       project-name
                       (expand-file-name project-root)
+                      worktree-model
                       date-stamp
                       title
                       project-name
@@ -2495,14 +2508,19 @@ TODO-ID can be a file path or title (defaults to current TODO)."
            (todo-id string "TODO identifier (file path or title). Defaults to current TODO.")))
 
   (claude-mcp-deftool todo-create
-    "Create a new TODO for a project. Returns the created TODO's file path and metadata."
+    "Create a new TODO for a project. Returns the created TODO's file path and metadata.
+IMPORTANT: When creating TODOs, include as much detail as possible in the
+description - full context, requirements, constraints, examples, and acceptance
+criteria. The more detail you provide, the better the worktree agent can
+autonomously implement the task without needing clarification."
     :function #'org-roam-todo-mcp-create
     :safe t
     :needs-session-cwd t
     :args ((project-root string :required "Path to the project root directory")
            (title string :required "Title of the TODO")
-           (description string "Optional task description")
-           (acceptance-criteria array "Optional array of acceptance criteria strings")))
+           (description string "Task description - be as detailed as possible with full context, requirements, and constraints")
+           (acceptance-criteria array "Array of acceptance criteria strings - be specific and testable")
+           (model string "Worktree model override: 'opus', 'sonnet', or 'haiku'. Defaults to 'sonnet'. Use 'opus' for complex architectural tasks.")))
 
   (claude-mcp-deftool todo-complete
     "Signal that your work is done and ready for user review. This will:
