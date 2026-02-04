@@ -932,6 +932,22 @@ class ClaudeAgent:
                         self._emit({"type": "tool_end", "tool_use_id": tool_id})
                     pending_tools.clear()
 
+                    # Check for error results from the CLI
+                    subtype = getattr(msg, "subtype", "success")
+                    is_error = getattr(msg, "is_error", False)
+                    result_text = getattr(msg, "result", None)
+
+                    if is_error or subtype == "error_during_execution":
+                        error_detail = result_text or subtype
+                        self._log_json("RESULT_ERROR", {
+                            "subtype": subtype,
+                            "is_error": is_error,
+                            "result": result_text,
+                        })
+                        self._emit_error(
+                            f"Claude encountered an error: {error_detail}",
+                        )
+
                     # Get cost and session info
                     cost = getattr(msg, "total_cost_usd", None) or getattr(msg, "cost_usd", 0) or 0
                     session_id = getattr(msg, "session_id", None)
