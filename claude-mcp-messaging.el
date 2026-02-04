@@ -21,7 +21,7 @@
 ;;; Code:
 
 (require 'cl-lib)
-(require 'claude-mcp)  ; for claude-mcp-deftool macro
+(require 'claude-mcp-registry)  ; for claude-mcp-deftool macro and claude-mcp-tools
 
 ;; Forward declarations for claude-agent-repl.el functions/variables
 (declare-function claude-agent--is-busy-p "claude-agent-repl")
