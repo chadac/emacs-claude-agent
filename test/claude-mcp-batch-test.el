@@ -14,9 +14,10 @@
 (require 'ert)
 (require 'cl-lib)
 
-;; Add parent directory to load path
+;; Load test helper (handles circular dependency between claude-mcp and sub-modules)
+(add-to-list 'load-path (file-name-directory load-file-name))
 (add-to-list 'load-path (file-name-directory (directory-file-name (file-name-directory load-file-name))))
-(require 'claude-mcp)
+(require 'test-helper)
 
 ;;; Test Utilities
 

@@ -1,0 +1,253 @@
+#+title: MCP Tool Integration Test Specs
+#+author: Claude Code
+#+description: Plain-english specs for agent-driven integration testing of MCP tools.
+
+* About This File
+
+These are integration test specifications for MCP tools that involve complex
+interaction patterns (prompts, progress bars, proposals, file pickers, etc.)
+that cannot be effectively unit-tested.
+
+Each test spec is a self-contained description of what to do and what to verify.
+A test runner agent will:
+1. Read each heading
+2. Execute the described steps
+3. Report PASS or FAIL with a one-line reason
+
+* Buffer Operations
+
+** read_file: reads existing file with offset and limit
+- Create a temp file with 20 lines of numbered content (line01, line02, ...)
+- Call read_file with file_path=<temp_file>, offset=5, limit=10
+- Verify: result contains lines 5-14 of the file
+- Verify: line numbers are shown in the output
+- Verify: lines 1-4 are NOT in the result
+- Clean up temp file
+
+** read_buffer: reads buffer with offset
+- Create a buffer with 10 lines
+- Call read_buffer with buffer_name=<name>, offset=3
+- Verify: result starts from line 3
+- Verify: lines 1-2 are NOT in the result
+- Clean up buffer
+
+** search_buffer: finds regex matches with context
+- Create a buffer with known content including "TODO" on lines 3, 7, 12
+- Call search_buffer with pattern="TODO", context_before=1, context_after=1
+- Verify: result contains all 3 matches
+- Verify: each match has 1 line of context before and after
+- Clean up buffer
+
+** get_buffer_content: head and tail
+- Create a buffer with 50 lines
+- Call get_buffer_content with head_lines=5
+- Verify: result contains only first 5 lines
+- Call get_buffer_content with tail_lines=5
+- Verify: result contains only last 5 lines
+- Clean up buffer
+
+** buffer_info: returns metadata
+- Create a buffer, insert some content, enable a major mode
+- Call buffer_info
+- Verify: result includes name, size, major-mode, point
+- Clean up buffer
+
+* Lock/Edit/Unlock Operations
+
+** lock: single region locking
+- Create a buffer with 10 lines
+- Call lock with start_line=3, end_line=5
+- Verify: result contains lock ID
+- Verify: result shows locked content
+- Call unlock with the lock ID
+- Verify: buffer content unchanged
+- Clean up buffer
+
+** edit: replace locked region
+- Create a buffer with "function old_name()"
+- Call lock on the line
+- Call edit with new content "function new_name()"
+- Verify: buffer now contains "new_name"
+- Clean up buffer
+
+** locks/edits/unlocks: batch operations
+- Create a buffer with multiple function definitions
+- Call locks with 3 regions
+- Call edits to rename all 3 functions
+- Verify: all 3 functions renamed correctly
+- Clean up buffer
+
+* Interactive UI Tools
+
+** prompt_choice: present options and select
+- Call prompt_choice with prompt="Pick a color" options=["Red", "Green", "Blue"]
+- User selects option 2 (Green)
+- Verify: result is "Green"
+- Note: This test requires user interaction
+
+** confirm: yes/no dialog
+- Call confirm with prompt="Do you want to continue?"
+- User presses 'y'
+- Verify: result is "yes"
+- Note: This test requires user interaction
+
+** show_proposal: review and accept
+- Call show_proposal with title="Test Proposal" content="Some proposed text"
+- User reviews and presses C-c C-c to accept
+- Verify: result starts with "ACCEPTED"
+- Note: This test requires user interaction
+
+** multiselect: multiple selection
+- Call multiselect with prompt="Select items" options="Item A\nItem B\nItem C"
+- User selects Item A and Item C
+- Verify: result contains both selected items
+- Note: This test requires user interaction
+
+** pick_file: file selection
+- Call pick_file
+- User selects a file
+- Verify: result is a valid file path
+- Note: This test requires user interaction
+
+** progress_start/update/stop: progress indicator
+- Call progress_start with message="Processing..."
+- Wait 1 second
+- Call progress_update with message="50% done" percent=50
+- Wait 1 second
+- Call progress_stop with final_message="Complete!"
+- Verify: no errors at each step
+- Verify: final_message shows checkmark prefix
+
+* Messaging Tools
+
+** message_agent: send message between agents
+- Note: Requires two running agent sessions
+- Agent A calls message_agent targeting Agent B with "Hello from A"
+- Agent B calls check_messages
+- Verify: Agent B receives the message from Agent A
+- Verify: message contains sender identity
+
+** check_messages: returns formatted messages
+- Queue a message manually for the current agent
+- Call check_messages
+- Verify: result contains the queued message
+- Call check_messages with clear=true
+- Call check_messages again
+- Verify: queue is now empty
+
+** message_board_summary: shows overview
+- Log several messages between different agents
+- Call message_board_summary
+- Verify: result contains sender/recipient pairs
+- Verify: result shows message counts
+
+* TODO Management
+
+** todo_create: creates new TODO file
+- Call todo_create with project_root and title
+- Verify: a .org file was created
+- Verify: file contains the title
+- Verify: file has PROPERTIES drawer with STATUS, PROJECT_ROOT, etc.
+- Clean up created file
+
+** todo_acceptance_criteria: parse checkboxes
+- Create a TODO file with 3 acceptance criteria (2 unchecked, 1 checked)
+- Call todo_acceptance_criteria
+- Verify: returns JSON with 3 items
+- Verify: checked states match the file
+
+** todo_check_acceptance: toggle checkbox
+- Create a TODO with unchecked criteria
+- Call todo_check_acceptance with item_text of first criterion
+- Verify: file now shows [X] for that criterion
+- Call todo_check_acceptance with checked=false
+- Verify: file shows [ ] again
+
+** todo_add_progress: append progress entry
+- Create a TODO with a Progress Log section
+- Call todo_add_progress with message="Completed step 1"
+- Verify: file contains the progress message
+- Verify: progress entry has a timestamp
+
+** todo_update_status: change status
+- Create a TODO with STATUS: draft
+- Call todo_update_status with status="active"
+- Verify: file now shows STATUS: active
+- Call todo_update_status with status="invalid"
+- Verify: error is returned
+
+* Knowledge Base
+
+** kb_create: create KB entry
+- Call kb_create with title, kb_type="gotcha", summary
+- Verify: returns JSON with id and file path
+- Verify: file exists and contains the summary
+- Clean up created file
+
+** kb_search: find entries
+- Create 3 KB entries with different topics
+- Call kb_search with a query matching one entry
+- Verify: result contains the matching entry
+- Verify: result does NOT contain unrelated entries
+
+** kb_get: retrieve full entry
+- Create a KB entry with summary, details, and related entries
+- Call kb_get with the entry ID
+- Verify: result contains full content (summary + details)
+
+** kb_update: append to entry
+- Create a KB entry
+- Call kb_update with append_details="New information"
+- Call kb_get to verify
+- Verify: details now contain both original and new information
+
+* Git/Magit Tools
+
+** magit_status: show git status
+- Verify we are in a git repository
+- Call magit_status
+- Verify: result contains branch name
+- Verify: result includes file status sections
+
+** magit_log: show recent commits
+- Call magit_log with count=3
+- Verify: result contains commit hashes
+- Verify: result has at most 3 entries
+
+** magit_diff: show changes
+- Create a file change in the worktree
+- Call magit_diff
+- Verify: result shows the diff for the changed file
+- Revert the change
+
+* Oneshot Agent Tools
+
+** done: signal completion
+- Start a oneshot agent (or simulate oneshot context)
+- Call done with message="Task completed successfully"
+- Verify: the oneshot agent is terminated
+- Verify: a tooltip appears in the source buffer with the message
+
+** update_target: move target region
+- Start a oneshot agent targeting lines 1-5
+- Call update_target with start_line=3, end_line=8
+- Verify: the visual highlight moves to the new region
+
+* Session Management
+
+** eval: evaluate elisp
+- Call eval with expression="(+ 1 2 3)"
+- Verify: result is "6"
+- Call eval with expression="(format \"hello %s\" \"world\")"
+- Verify: result is "\"hello world\""
+
+** restart_session: restart Claude
+- Note: This test is destructive - only run manually
+- Call restart_session
+- Verify: the Claude process is restarted
+- Verify: session continues with previous context
+
+** request_attention: notify user
+- Call request_attention with message="Need input" urgency="normal"
+- Verify: user sees a notification
+- Note: This test requires user observation

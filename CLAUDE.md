@@ -132,7 +132,6 @@ claude-mcp-process.el (standalone, loaded separately)
 ├── requires: claude-mcp.el
 └── requires: claude-sessions.el
 ```
-
 Note: `claude-agent.el` defines `claude--package-root` and the defcustom. Files loaded before it (`claude-mcp.el`, `todo.el`) use `fboundp` guards to safely call `claude--package-root` when available.
 
 ## Visual Style Guide
@@ -144,3 +143,69 @@ All user-visible UI — faces, colors, overlays, dialogs — must follow
 - **Faces**: Always use `defface` with both dark and light theme variants; never inline hex colors in `propertize`
 - **Height scaling**: Use only the four standardized tiers (0.85, 1.0, 1.1, 1.2)
 - **Overlays**: Follow the locked-region label pattern for all overlay indicators
+
+## Testing
+
+### Test Structure
+
+Test files live in `test/` and follow the convention `test/<module>-test.el`:
+
+```
+test/
+├── claude-mcp-test.el              # Core MCP tools (lock/edit/read/buffer/eval)
+├── claude-mcp-batch-test.el        # Batch lock/edit/unlock operations
+├── claude-mcp-messaging-test.el    # Inter-agent messaging
+├── claude-mcp-coverage.el          # Coverage check (tests + reporting)
+├── claude-integration-runner.el    # Agent-driven integration test runner
+├── integration-specs.org           # Plain-english integration test specs
+├── todo-test.el                    # TODO management tools
+├── claude-kb-test.el               # Knowledge base tools
+├── claude-oneshot-test.el          # Oneshot agent tools
+├── claude-test.el                  # Core claude-agent tests
+├── claude-comment-test.el          # Comment detection tests
+├── claude-actions-test.el          # Actions tests
+└── claude-projectile-integration-test.el
+```
+
+### Running Tests
+
+```bash
+# Run all unit tests
+make test
+
+# Run a specific test file
+emacs -batch -l ert -l test/claude-mcp-test.el -f ert-run-tests-batch
+
+# Run coverage check
+emacs -batch -l ert -l test/claude-mcp-coverage.el -f ert-run-tests-batch
+
+# Run integration tests (interactive, requires running Emacs)
+M-x claude-integration-test-run-all
+```
+
+### Adding New `claude-mcp-deftool` Tools
+
+When adding a new `claude-mcp-deftool`, you **MUST** add ERT tests in the corresponding `test/<module>-test.el` file. At minimum:
+
+1. **One happy-path test** with required args only
+2. **One happy-path test** with all args
+3. **One error-case test** (missing args, invalid input, etc.)
+
+Each test should be tagged with `:unit` and `:mcp`:
+
+```elisp
+(ert-deftest claude-mcp-test-my-new-tool-happy-path ()
+  "Test my-new-tool with required args."
+  :tags '(:unit :mcp :my-new-tool)
+  ...)
+```
+
+Also add a **tool registration test** in the same file that asserts the tool is present in `claude-mcp-tools`:
+
+```elisp
+(should (gethash "my_new_tool" claude-mcp-tools))
+```
+
+The coverage check (`test/claude-mcp-coverage.el`) will report any registered tools that lack test coverage, and this runs as part of the ERT test suite.
+
+Run `emacs -batch -l ert -l test/<file> -f ert-run-tests-batch` to verify your tests pass before committing.
