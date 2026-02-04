@@ -543,6 +543,12 @@ Keys are tool_use_id strings, values are plists with:
   :name - tool name string
   :status-overlay - overlay for the status icon (○/✓/✗)")
 
+(defvar-local claude-agent--denied-tools nil
+  "Hash table tracking tool_use_ids that were permission-denied.
+When a permission_denied event arrives, the tool_use_id is added here.
+When the subsequent tool_result arrives, we check this set to show
+a distinct 🚫 indicator instead of the normal ✗ error icon.")
+
 (defvar-local claude-agent--placeholder-overlay nil
   "Overlay for the placeholder text in empty input area.")
 
@@ -722,7 +728,7 @@ This eliminates empty space below the input area."
 
 (defun claude-agent--update-tool-status (overlay status)
   "Update the tool status OVERLAY to show STATUS.
-STATUS should be `success' or `error'."
+STATUS should be `success', `error', or `denied'."
   (when (and overlay (overlay-buffer overlay))
     (let ((inhibit-read-only t)
           (start (overlay-start overlay))
@@ -735,6 +741,10 @@ STATUS should be `success' or `error'."
            (insert "✓ ")
            (move-overlay overlay start (point))
            (overlay-put overlay 'face 'claude-agent-tool-status-success-face))
+          ('denied
+           (insert "🚫 ")
+           (move-overlay overlay start (point))
+           (overlay-put overlay 'face 'claude-agent-tool-status-denied-face))
           ('error
            (insert "✗ ")
            (move-overlay overlay start (point))
@@ -1476,22 +1486,24 @@ Inserts directly at point with proper faces and clickable link."
 
 (defun claude-agent--insert-edit-summary (file-path old-string new-string)
   "Insert a compact edit summary for FILE-PATH with line counts.
-Shows format: ✓ edit› filename.el (+N/-M)
-The full diff is stored in tool-results for popup display."
+Shows format: ○ edit› filename.el (+N/-M)
+The full diff is stored in tool-results for popup display.
+Returns the status overlay for later updates (e.g., permission denied)."
   (let* ((inhibit-read-only t)
          (counts (claude-agent--count-diff-lines old-string new-string))
          (removed (car counts))
          (added (cdr counts))
          (filename (file-name-nondirectory file-path))
-         (summary (format "%s (+%d/-%d)" filename added removed)))
-    ;; Status icon (edits are considered successful when rendered)
+         (summary (format "%s (+%d/-%d)" filename added removed))
+         (status-ov nil))
+    ;; Status icon (pending until tool result confirms success or denial)
     (let ((icon-start (point)))
-      (insert "✓ ")
-      (let ((ov (make-overlay icon-start (point))))
-        (overlay-put ov 'face 'claude-agent-tool-status-success-face)
-        (overlay-put ov 'priority 100)
-        (overlay-put ov 'claude-tool-status t)
-        (overlay-put ov 'evaporate t)))
+      (insert "○ ")
+      (setq status-ov (make-overlay icon-start (point)))
+      (overlay-put status-ov 'face 'claude-agent-tool-status-pending-face)
+      (overlay-put status-ov 'priority 100)
+      (overlay-put status-ov 'claude-tool-status t)
+      (overlay-put status-ov 'evaporate t))
     ;; Tool header
     (let ((start (point)))
       (insert "edit")
@@ -1508,7 +1520,9 @@ The full diff is stored in tool-results for popup display."
                         'face 'claude-agent-tool-file-face
                         'help-echo "Click to open file, hover for diff preview"
                         'follow-link t)
-    (insert "\n")))
+    (insert "\n")
+    ;; Return the status overlay for callers to store
+    status-ov))
 
 (defface claude-agent-tool-name-face
   '((t :foreground "#e5c07b" :weight bold))
@@ -1553,6 +1567,11 @@ The full diff is stored in tool-results for popup display."
 (defface claude-agent-tool-status-error-face
   '((t :foreground "#e06c75"))
   "Face for error tool status icon (red X)."
+  :group 'claude-agent)
+
+(defface claude-agent-tool-status-denied-face
+  '((t :foreground "#e06c75"))
+  "Face for permission-denied tool status icon (🚫)."
   :group 'claude-agent)
 
 (defun claude-agent--format-bash-multiline (command)
@@ -1918,6 +1937,14 @@ If VIRTUAL-INDENT is non-nil, apply it as line-prefix/wrap-prefix."
     ("permission_granted"
      nil)  ; Could show notification if desired
 
+    ;; Permission denied - track tool_use_id for visual indicator on tool_result
+    ("permission_denied"
+     (let ((tool-use-id (cdr (assq 'tool_use_id msg))))
+       (when tool-use-id
+         (unless claude-agent--denied-tools
+           (setq claude-agent--denied-tools (make-hash-table :test 'equal)))
+         (puthash tool-use-id t claude-agent--denied-tools))))
+
     ;; User message start
     ("user_start"
      (setq claude-agent--parse-state 'user)
@@ -1979,15 +2006,23 @@ If VIRTUAL-INDENT is non-nil, apply it as line-prefix/wrap-prefix."
                             (gethash tool-use-id claude-agent--pending-tools)))
             (tool-marker (plist-get tool-info :marker))
             (tool-name (plist-get tool-info :name))
-            (status-overlay (plist-get tool-info :status-overlay)))
+            (status-overlay (plist-get tool-info :status-overlay))
+            (is-denied (and tool-use-id claude-agent--denied-tools
+                            (gethash tool-use-id claude-agent--denied-tools))))
        (when (and tool-marker content)
          (push (list tool-marker tool-name content)
                claude-agent--tool-results)
-         ;; Update status icon based on whether result indicates error
+         ;; Update status icon: 🚫 for permission denied, ✗ for error, ✓ for success
          (when status-overlay
            (claude-agent--update-tool-status
             status-overlay
-            (if (claude-agent--tool-result-is-error-p content) 'error 'success)))
+            (cond
+             (is-denied 'denied)
+             ((claude-agent--tool-result-is-error-p content) 'error)
+             (t 'success))))
+         ;; Clean up denied tracking
+         (when is-denied
+           (remhash tool-use-id claude-agent--denied-tools))
          ;; Add tooltip to the tool call line
          (claude-agent--add-tool-tooltip tool-marker content))))
 
@@ -2005,7 +2040,8 @@ If VIRTUAL-INDENT is non-nil, apply it as line-prefix/wrap-prefix."
             (old-string (cdr (assq 'old_string msg)))
             (new-string (cdr (assq 'new_string msg)))
             (tool-use-id (cdr (assq 'tool_use_id msg)))
-            (tool-marker nil))
+            (tool-marker nil)
+            (edit-status-overlay nil))
        (setq claude-agent--parse-state 'tool)
        (claude-agent--set-thinking (format "Editing: %s" (file-name-nondirectory file-path)))
        ;; Format diff content for storage in tool-results
@@ -2021,7 +2057,8 @@ If VIRTUAL-INDENT is non-nil, apply it as line-prefix/wrap-prefix."
            (goto-char claude-agent--static-end-marker)
            ;; Track marker position before inserting
            (setq tool-marker (copy-marker (point)))
-           (claude-agent--insert-edit-summary file-path old-string new-string)
+           (setq edit-status-overlay
+                 (claude-agent--insert-edit-summary file-path old-string new-string))
            (set-marker claude-agent--static-end-marker (point))
            ;; Store in tool-results for popup viewing
            (push (list tool-marker "Edit" diff-content)
@@ -2033,7 +2070,7 @@ If VIRTUAL-INDENT is non-nil, apply it as line-prefix/wrap-prefix."
              (puthash tool-use-id
                       (list :marker tool-marker
                             :name "Edit"
-                            :status-overlay nil)  ; edit_tool uses different display
+                            :status-overlay edit-status-overlay)
                       claude-agent--pending-tools))
            ;; Add tooltip to the summary line
            (claude-agent--add-tool-tooltip tool-marker diff-content)

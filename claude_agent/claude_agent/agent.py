@@ -532,11 +532,17 @@ class ClaudeAgent:
         # These bypass Emacs and break pair programming - must use MCP tools instead
         if self._block_direct_edit and tool_name in self.BLOCKED_TOOLS:
             self._log_json("PERMISSION_BLOCKED", {"tool": tool_name, "reason": "use_emacs_mcp"})
-            return PermissionResultDeny(
-                message=f"Tool '{tool_name}' is blocked in Emacs integration. "
-                        f"Use mcp__emacs__lock_region + mcp__emacs__write_region instead for pair programming support. "
-                        f"See claude-agent-prompt.md for details."
-            )
+            reason = (f"Tool '{tool_name}' is blocked in Emacs integration. "
+                      f"Use mcp__emacs__lock_region + mcp__emacs__write_region instead for pair programming support. "
+                      f"See claude-agent-prompt.md for details.")
+            self._emit({
+                "type": "permission_denied",
+                "tool_use_id": tool_use_id,
+                "tool_name": tool_name,
+                "reason": reason,
+                "denial_type": "blocked",
+            })
+            return PermissionResultDeny(message=reason)
 
         # Check auto-reject rules (worktree confinement, etc.)
         for rule in self._auto_reject_rules:
@@ -546,6 +552,13 @@ class ClaudeAgent:
                     "tool": tool_name, "reason": reason,
                     "pattern": rule.get("pattern", ""),
                     "path_prefix": rule.get("path_prefix", ""),
+                })
+                self._emit({
+                    "type": "permission_denied",
+                    "tool_use_id": tool_use_id,
+                    "tool_name": tool_name,
+                    "reason": reason,
+                    "denial_type": "auto_reject",
                 })
                 return PermissionResultDeny(message=reason)
 

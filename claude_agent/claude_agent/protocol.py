@@ -180,6 +180,14 @@ class PermissionGrantedMessage(TypedDict):
     scope: Literal["once", "session", "always"]
 
 
+class PermissionDeniedMessage(TypedDict):
+    """Permission was denied for a tool use (blocked or auto-rejected)."""
+    type: Literal["permission_denied"]
+    tool_use_id: str  # ID of the tool invocation that was denied
+    tool_name: str
+    reason: str
+    denial_type: Literal["blocked", "auto_reject"]
+
 # Error messages
 
 class ErrorMessage(TypedDict):
@@ -233,6 +241,7 @@ AgentMessage = (
     | MCPStatusMessage
     | PermissionRequestMessage
     | PermissionGrantedMessage
+    | PermissionDeniedMessage
     | ErrorMessage
     | SessionMessageStartMessage
     | SessionMessageTextMessage
