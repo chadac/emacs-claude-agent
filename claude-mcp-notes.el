@@ -203,11 +203,10 @@ Called from org-capture-after-finalize-hook."
       (when (and claude-buffer title)
         (let ((message-text (format "[TODO] %s\n\n%s" title (or body ""))))
           (with-current-buffer claude-buffer
-            (when (and (boundp 'eat-terminal) eat-terminal)
-              (eat-term-send-string eat-terminal "\C-u")
-              (eat-term-send-string eat-terminal message-text)
-              (sit-for 0.1)
-              (eat-term-send-string eat-terminal "\r")))
+            (when (and (boundp 'claude-agent--process) claude-agent--process
+                       (process-live-p claude-agent--process))
+              (process-send-string claude-agent--process
+                                   (format "[INPUT]\n%s\n[/INPUT]\n" message-text))))
           (message "Sent TODO to claude: %s" title)))
       ;; Clear state
       (setq claude-notes--todo-target-project nil
@@ -1339,12 +1338,10 @@ This helps Claude identify messages sent via the notes integration.")
           (if buf
               (progn
                 (with-current-buffer buf
-                  (eat-term-send-string eat-terminal "\C-u")
-                  (eat-term-send-string eat-terminal prefixed-text)
-                  ;; Need sit-for to let the terminal process before sending return
-                  ;; (this is what claude--send-message-when-ready does)
-                  (sit-for 0.1)
-                  (eat-term-send-string eat-terminal "\r"))
+                  (when (and (boundp 'claude-agent--process) claude-agent--process
+                             (process-live-p claude-agent--process))
+                    (process-send-string claude-agent--process
+                                         (format "[INPUT]\n%s\n[/INPUT]\n" prefixed-text))))
                 (message "Sent to claude: %s..." (truncate-string-to-width text 50)))
             (user-error "Claudemacs buffer not found for %s" work-dir)))
       (user-error "Not in a Claude notes buffer"))))

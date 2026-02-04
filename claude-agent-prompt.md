@@ -58,7 +58,7 @@ If you need to cancel an edit, use =mcp__emacs__unlock_region= to release the lo
 ## Bash Execution
 
 **Prefer `mcp__emacs__bash` over the standard Bash tool** for running shell commands. Benefits:
-- Output is visible in Emacs (in an eat terminal buffer)
+- Output is visible in Emacs
 - User can see command execution in real-time
 - Better integration with Emacs workflow
 

@@ -179,7 +179,7 @@ Non-blocking tools that poll for changes:
 
 ### Bash Integration
 
-- `bash`: Execute commands in eat terminal (visible in Emacs)
+- `bash`: Execute commands (visible in Emacs)
 - Output appears in Emacs buffers
 - Better than standard Bash tool for user visibility
 

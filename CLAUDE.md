@@ -2,17 +2,14 @@
 
 ## Project Overview
 
-Claude-agent is an Emacs package that integrates Claude Code with Emacs via MCP (Model Context Protocol). It has two architectures:
+Claude-agent is an Emacs package that integrates Claude Code with Emacs via MCP (Model Context Protocol). It runs a Python wrapper (`claude_agent/`) that manages the Claude SDK directly, with a structured buffer UI (`claude-agent-repl.el` + `claude-mcp-process.el`).
 
-1. **eat-mode backend** (`claude-agent.el`): Runs `claude` CLI in an eat terminal inside Emacs
-2. **REPL/agent backend** (`claude-agent-repl.el` + `claude-mcp-process.el`): Runs a Python wrapper (`claude_agent/`) that manages the Claude SDK directly, with a structured buffer UI
-
-Both backends use the same MCP server (`emacs_mcp/`) to give Claude access to Emacs buffers.
+The MCP server (`emacs_mcp/`) gives Claude access to Emacs buffers.
 
 ## Repository Structure
 
 ```
-├── claude-agent.el          # Main entry point: eat-mode backend, session management, keybindings
+├── claude-agent.el          # Main entry point: session management, keybindings
 ├── claude-agent-repl.el     # REPL backend: structured buffer UI, input/output parsing
 ├── claude-mcp-process.el    # REPL backend: process spawning, lifecycle management
 ├── claude-mcp.el            # MCP tool definitions (buffer ops, locking, eval, etc.)
@@ -66,10 +63,9 @@ Key env vars passed to the MCP server:
 - `CLAUDE_AGENT_BUFFER_NAME` - Buffer name for routing
 - `CLAUDE_AGENT_SOCKET` - Emacs server socket path
 
-### Two Buffer Naming Schemes
+### Buffer Naming
 
-- eat backend: `*claude:/full/path*` or `*claude:/full/path:agent-name*`
-- REPL backend: `*claude:dirname*` or `*claude:dirname:agent-name*`
+Buffers are named `*claude:dirname*` or `*claude:dirname:agent-name*`.
 
 ## Development Workflow
 

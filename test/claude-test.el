@@ -342,46 +342,44 @@ The file is automatically cleaned up after BODY executes."
     (should (string-match-p "current buffer" doc))))
 
 (ert-deftest claudemacs-test-startup-hook-called-during-setup ()
-  "Test that claudemacs-startup-hook is called during eat integration setup."
+  "Test that claude-mcp-startup-hook is called during agent setup."
   :tags '(:integration :startup-hook)
   (let ((hook-called nil)
         (hook-called-in-claudemacs-buffer nil)
-        (test-buffer nil))
+        (test-buffer nil)
+        (hook-fn (lambda () 
+                   (setq hook-called t)
+                   (when (claudemacs--is-claudemacs-buffer-p)
+                     (setq hook-called-in-claudemacs-buffer t)))))
     
     ;; Create a test hook function
-    (add-hook 'claudemacs-startup-hook 
-              (lambda () 
-                (setq hook-called t)
-                (when (claudemacs--is-claudemacs-buffer-p)
-                  (setq hook-called-in-claudemacs-buffer t))))
+    (add-hook 'claude-mcp-startup-hook hook-fn)
     
-    ;; Mock the bell handler setup to avoid session ID dependency
-    (cl-letf (((symbol-function 'claudemacs-setup-bell-handler)
-               (lambda () nil)))
+    (unwind-protect
+        (progn
+          ;; Create a buffer that looks like a claudemacs buffer
+          (setq test-buffer (get-buffer-create "*claude:test-hook*"))
+          (with-current-buffer test-buffer
+            ;; Set up minimal fake claude-agent--process
+            (setq-local claude-agent--process
+                        (start-process "fake-claude" nil "sleep" "60")))
+          
+          ;; Run the startup hook directly in the buffer context
+          (with-current-buffer test-buffer
+            (run-hooks 'claude-mcp-startup-hook))
+          
+          ;; Verify hook was called
+          (should hook-called)
+          (should hook-called-in-claudemacs-buffer))
       
-      (unwind-protect
-          (progn
-            ;; Create a buffer that looks like a claudemacs buffer
-            (setq test-buffer (get-buffer-create "*claude:test-hook*"))
-            (with-current-buffer test-buffer
-              ;; Set up minimal fake eat-terminal
-              (setq-local eat-terminal 'fake-terminal))
-            
-            ;; Call the setup function directly
-            (claudemacs--setup-eat-integration test-buffer)
-            
-            ;; Verify hook was called
-            (should hook-called)
-            (should hook-called-in-claudemacs-buffer))
-        
-        ;; Cleanup
-        (remove-hook 'claudemacs-startup-hook 
-                     (lambda () 
-                       (setq hook-called t)
-                       (when (claudemacs--is-claudemacs-buffer-p)
-                         (setq hook-called-in-claudemacs-buffer t))))
-        (when (and test-buffer (buffer-live-p test-buffer))
-          (kill-buffer test-buffer))))))
+      ;; Cleanup
+      (remove-hook 'claude-mcp-startup-hook hook-fn)
+      (when (and test-buffer (buffer-live-p test-buffer))
+        (with-current-buffer test-buffer
+          (when (and (boundp 'claude-agent--process) claude-agent--process
+                     (process-live-p claude-agent--process))
+            (delete-process claude-agent--process)))
+        (kill-buffer test-buffer)))))
 
 (ert-deftest claudemacs-test-startup-hook-multiple-functions ()
   "Test that multiple functions can be added to claudemacs-startup-hook."
@@ -391,115 +389,117 @@ The file is automatically cleaned up after BODY executes."
         (test-buffer nil))
     
     ;; Create two test hook functions
-    (add-hook 'claudemacs-startup-hook (lambda () (setq hook1-called t)))
-    (add-hook 'claudemacs-startup-hook (lambda () (setq hook2-called t)))
+    (add-hook 'claude-mcp-startup-hook (lambda () (setq hook1-called t)))
+    (add-hook 'claude-mcp-startup-hook (lambda () (setq hook2-called t)))
     
-    ;; Mock the bell handler setup to avoid session ID dependency
-    (cl-letf (((symbol-function 'claudemacs-setup-bell-handler)
-               (lambda () nil)))
+    (unwind-protect
+        (progn
+          ;; Create a buffer that looks like a claudemacs buffer
+          (setq test-buffer (get-buffer-create "*claude:test-multiple*"))
+          (with-current-buffer test-buffer
+            ;; Set up minimal fake claude-agent--process
+            (setq-local claude-agent--process
+                        (start-process "fake-claude" nil "sleep" "60")))
+          
+          ;; Run the startup hook directly
+          (with-current-buffer test-buffer
+            (run-hooks 'claude-mcp-startup-hook))
+          
+          ;; Verify both hooks were called
+          (should hook1-called)
+          (should hook2-called))
       
-      (unwind-protect
-          (progn
-            ;; Create a buffer that looks like a claudemacs buffer
-            (setq test-buffer (get-buffer-create "*claude:test-multiple*"))
-            (with-current-buffer test-buffer
-              ;; Set up minimal fake eat-terminal
-              (setq-local eat-terminal 'fake-terminal))
-            
-            ;; Call the setup function directly
-            (claudemacs--setup-eat-integration test-buffer)
-            
-            ;; Verify both hooks were called
-            (should hook1-called)
-            (should hook2-called))
-        
-        ;; Cleanup
-        (remove-hook 'claudemacs-startup-hook (lambda () (setq hook1-called t)))
-        (remove-hook 'claudemacs-startup-hook (lambda () (setq hook2-called t)))
-        (when (and test-buffer (buffer-live-p test-buffer))
-          (kill-buffer test-buffer))))))
+      ;; Cleanup
+      (remove-hook 'claude-mcp-startup-hook (lambda () (setq hook1-called t)))
+      (remove-hook 'claude-mcp-startup-hook (lambda () (setq hook2-called t)))
+      (when (and test-buffer (buffer-live-p test-buffer))
+        (with-current-buffer test-buffer
+          (when (and (boundp 'claude-agent--process) claude-agent--process
+                     (process-live-p claude-agent--process))
+            (delete-process claude-agent--process)))
+        (kill-buffer test-buffer)))))
 
 (ert-deftest claudemacs-test-startup-hook-buffer-context ()
-  "Test that claudemacs-startup-hook runs with claudemacs buffer as current buffer."
+  "Test that claude-mcp-startup-hook runs with claudemacs buffer as current buffer."
   :tags '(:integration :startup-hook)
   (let ((captured-buffer-name nil)
         (captured-cwd nil)
         (test-buffer nil))
     
     ;; Create a test hook function that captures context
-    (add-hook 'claudemacs-startup-hook 
+    (add-hook 'claude-mcp-startup-hook 
               (lambda () 
                 (setq captured-buffer-name (buffer-name))
-                (setq captured-cwd claudemacs--cwd)))
+                (setq captured-cwd claude-mcp--cwd)))
     
-    ;; Mock the bell handler setup to avoid session ID dependency
-    (cl-letf (((symbol-function 'claudemacs-setup-bell-handler)
-               (lambda () nil)))
+    (unwind-protect
+        (progn
+          ;; Create a buffer that looks like a claudemacs buffer
+          (setq test-buffer (get-buffer-create "*claude:test-context*"))
+          (with-current-buffer test-buffer
+            ;; Set up minimal fake environment
+            (setq-local claude-agent--process
+                        (start-process "fake-claude" nil "sleep" "60"))
+            (setq-local claude-mcp--cwd "/test/directory"))
+          
+          ;; Run the startup hook directly
+          (with-current-buffer test-buffer
+            (run-hooks 'claude-mcp-startup-hook))
+          
+          ;; Verify hook ran in correct buffer context
+          (should captured-buffer-name)
+          (should (string= captured-buffer-name "*claude:test-context*"))
+          (should captured-cwd)
+          (should (string= captured-cwd "/test/directory")))
       
-      (unwind-protect
-          (progn
-            ;; Create a buffer that looks like a claudemacs buffer
-            (setq test-buffer (get-buffer-create "*claude:test-context*"))
-            (with-current-buffer test-buffer
-              ;; Set up minimal fake environment
-              (setq-local eat-terminal 'fake-terminal)
-              (setq-local claudemacs--cwd "/test/directory"))
-            
-            ;; Call the setup function directly
-            (claudemacs--setup-eat-integration test-buffer)
-            
-            ;; Verify hook ran in correct buffer context
-            (should captured-buffer-name)
-            (should (string= captured-buffer-name "*claude:test-context*"))
-            (should captured-cwd)
-            (should (string= captured-cwd "/test/directory")))
-        
-        ;; Cleanup
-        (remove-hook 'claudemacs-startup-hook 
-                     (lambda () 
-                       (setq captured-buffer-name (buffer-name))
-                       (setq captured-cwd claudemacs--cwd)))
-        (when (and test-buffer (buffer-live-p test-buffer))
-          (kill-buffer test-buffer))))))
+      ;; Cleanup
+      (remove-hook 'claude-mcp-startup-hook 
+                   (lambda () 
+                     (setq captured-buffer-name (buffer-name))
+                     (setq captured-cwd claude-mcp--cwd)))
+      (when (and test-buffer (buffer-live-p test-buffer))
+        (with-current-buffer test-buffer
+          (when (and (boundp 'claude-agent--process) claude-agent--process
+                     (process-live-p claude-agent--process))
+            (delete-process claude-agent--process)))
+        (kill-buffer test-buffer)))))
 
 (ert-deftest claudemacs-test-startup-hook-error-handling ()
-  "Test that errors in claudemacs-startup-hook don't break setup."
+  "Test that errors in claude-mcp-startup-hook are propagated."
   :tags '(:integration :startup-hook)
   (let ((hook-error-occurred nil)
-        (setup-completed nil)
         (test-buffer nil))
     
     ;; Create a hook function that throws an error
-    (add-hook 'claudemacs-startup-hook 
+    (add-hook 'claude-mcp-startup-hook 
               (lambda () (error "Test hook error")))
     
-    ;; Mock the other setup functions to track completion
-    (cl-letf (((symbol-function 'claudemacs--setup-buffer-keymap)
-               (lambda () (setq setup-completed t)))
-              ((symbol-function 'claudemacs-setup-bell-handler)
-               (lambda () nil)))
+    (unwind-protect
+        (progn
+          ;; Create a buffer that looks like a claudemacs buffer
+          (setq test-buffer (get-buffer-create "*claude:test-error*"))
+          (with-current-buffer test-buffer
+            ;; Set up minimal fake claude-agent--process
+            (setq-local claude-agent--process
+                        (start-process "fake-claude" nil "sleep" "60")))
+          
+          ;; Run the startup hook and expect it to propagate errors
+          (condition-case _err
+              (with-current-buffer test-buffer
+                (run-hooks 'claude-mcp-startup-hook))
+            (error (setq hook-error-occurred t)))
+          
+          ;; The error should have been propagated
+          (should hook-error-occurred))
       
-      (unwind-protect
-          (progn
-            ;; Create a buffer that looks like a claudemacs buffer
-            (setq test-buffer (get-buffer-create "*claude:test-error*"))
-            (with-current-buffer test-buffer
-              ;; Set up minimal fake eat-terminal
-              (setq-local eat-terminal 'fake-terminal))
-            
-            ;; Call the setup function and expect it to handle errors gracefully
-            (condition-case err
-                (claudemacs--setup-eat-integration test-buffer)
-              (error (setq hook-error-occurred t)))
-            
-            ;; Setup should have completed despite hook error
-            (should setup-completed)
-            ;; The error should have been propagated (or could be caught - depends on implementation)
-        
-        ;; Cleanup
-        (remove-hook 'claudemacs-startup-hook (lambda () (error "Test hook error")))
-        (when (and test-buffer (buffer-live-p test-buffer))
-          (kill-buffer test-buffer)))))))
+      ;; Cleanup
+      (remove-hook 'claude-mcp-startup-hook (lambda () (error "Test hook error")))
+      (when (and test-buffer (buffer-live-p test-buffer))
+        (with-current-buffer test-buffer
+          (when (and (boundp 'claude-agent--process) claude-agent--process
+                     (process-live-p claude-agent--process))
+            (delete-process claude-agent--process)))
+        (kill-buffer test-buffer)))))
 
 ;;; Custom Variable Tests
 

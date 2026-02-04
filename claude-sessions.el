@@ -83,9 +83,7 @@
 
 (defun claude-sessions--get-session-status (buffer)
   "Get the status of a Claude session BUFFER.
-Returns one of: `ready', `thinking', `waiting', or `dead'.
-Supports both the new agent architecture (claude-agent--process)
-and the old eat-based architecture."
+Returns one of: `ready', `thinking', `waiting', or `dead'."
   (unless (buffer-live-p buffer)
     (cl-return-from claude-sessions--get-session-status 'dead))
 
@@ -113,27 +111,9 @@ and the old eat-based architecture."
          ;; Ready: Not thinking, process alive
          (t 'ready))))
 
-     ;; Old eat-based architecture
-     ((and (boundp 'eat-terminal) eat-terminal)
-      (let* ((process (eat-term-parameter eat-terminal 'eat--process)))
-        (if (not (and process (memq (process-status process) '(run open listen connect))))
-            'dead
-          ;; Process is running, check status
-          ;; Look at the last ~1000 chars which should contain the prompt area
-          (let* ((tail-start (max (point-min) (- (point-max) 1000)))
-                 (tail-content (buffer-substring-no-properties tail-start (point-max))))
-            (cond
-             ;; Thinking: Claude is actively processing
-             ((string-match-p "esc to interrupt" tail-content)
-              'thinking)
-             ;; Typing: Has "> " prompt with text after it (user is composing)
-             ((string-match-p "─\n>..+.\n─" tail-content)
-              'typing)
-             ;; Ready: Has empty "> " prompt between horizontal lines
-             ((string-match-p "─\n>..\n─" tail-content)
-              'ready)
-             ;; Otherwise waiting for user input (edit approval, multi-select, etc.)
-             (t 'waiting))))))
+
+     ;; No recognized architecture - dead
+     (t 'dead))))
 
      ;; No recognized architecture - dead
      (t 'dead))))
@@ -294,19 +274,11 @@ Columns: Project, Label, Status, Worktree, Directory."
       (message "Buffer %s no longer exists" buffer-name))))
 
 (defun claude-sessions--kill-session-process (buffer)
-  "Kill the process associated with session BUFFER.
-Handles both new agent and old eat-based architectures."
+  "Kill the process associated with session BUFFER."
   (with-current-buffer buffer
-    (cond
-     ;; New agent architecture
-     ((and (boundp 'claude-agent--process) claude-agent--process)
+    (when (and (boundp 'claude-agent--process) claude-agent--process)
       (when (process-live-p claude-agent--process)
-        (delete-process claude-agent--process)))
-     ;; Old eat-based architecture
-     ((and (boundp 'eat-terminal) eat-terminal)
-      (let ((process (eat-term-parameter eat-terminal 'eat--process)))
-        (when (and process (process-live-p process))
-          (kill-process process)))))))
+        (delete-process claude-agent--process)))))
 
 (defun claude-sessions-kill-session ()
   "Kill the session at point."

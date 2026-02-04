@@ -10,7 +10,7 @@
 ;;; Commentary:
 
 ;; This package integrates with Claude Code (https://docs.anthropic.com/en/docs/claude-code/overview)
-;; for AI-assisted programming in Emacs using the eat terminal emulator.
+;; for AI-assisted programming in Emacs.
 ;;
 ;; Inspired by Aidermacs: https://github.com/MatthewZMD/aidermacs and
 ;; claude-code.el: https://github.com/stevemolitor/claude-code.el
@@ -59,7 +59,7 @@ cannot be determined."
 (require 'transient)
 (require 'project)
 (require 'vc-git)
-(require 'eat nil 'noerror)
+
 (require 'claude-pair)
 (require 'claude-mcp)
 (require 'claude-sessions)
@@ -85,7 +85,6 @@ cannot be determined."
 
 (defcustom claude-program-switches nil
   "List of command line switches to pass to the Claude program.
-These are passed as SWITCHES parameters to `eat-make`.
 E.g, `\'(\"--verbose\" \"--dangerously-skip-permissions\")'"
   :type '(repeat string)
   :group 'claude-agent)
@@ -149,10 +148,7 @@ If nil, show the buffer but don't switch focus to it."
 (defcustom claude-m-return-is-submit nil
   "Swap the behavior of RET and M-RET in Claude buffers.
 If nil (default): RET submits input, M-RET creates new line (standard behavior).
-If non-nil: M-RET submits input, RET creates new line (swapped behavior).
-
-This setting only affects Claude buffers and does not impact other
-eat buffers."
+If non-nil: M-RET submits input, RET creates new line (swapped behavior)."
   :type 'boolean
   :group 'claude-agent)
 
@@ -231,9 +227,9 @@ When empty string, no sound is played."
 
 (defcustom claude-startup-hook nil
   "Hook run after a Claude session has finished starting up.
-This hook is called after the eat terminal is initialized, keymaps
-are set up, and bell handlers are configured. The hook functions
-are executed with the Claude buffer as the current buffer."
+This hook is called after the agent buffer is initialized and the
+process is spawned. The hook functions are executed with the
+Claude buffer as the current buffer."
   :type 'hook
   :group 'claude-agent)
 
@@ -327,12 +323,9 @@ Returns t if switched successfully, nil if no buffer exists."
   (if-let* ((buffer (claude--get-buffer)))
       (progn
         (with-current-buffer buffer
-          (if (not eat-terminal)
-              (error "Claude session exists but no eat-terminal found. Please kill *claude:...* buffer and re-start")
-            (let ((process (eat-term-parameter eat-terminal 'eat--process)))
-              (if (not (and process (process-live-p process)))
-                (error "Claude session exists but process is not running. Please kill *claude:...* buffer and re-start")))))
-        ;; we have a running eat-terminal
+          (unless (and (boundp 'claude-agent--process) claude-agent--process
+                       (process-live-p claude-agent--process))
+            (error "Claude session exists but process is not running. Please kill *claude:...* buffer and re-start")))
         (display-buffer buffer)
         (select-window (get-buffer-window buffer))
         t)
@@ -363,23 +356,7 @@ Returns t if switched successfully, nil if no buffer exists."
             (mapconcat (lambda (err) (flycheck-error-message err))
                       (seq-take errors 2) "; ")))))
 
-;;;; Terminal Integration
-;; Eat terminal emulator functions
-(declare-function eat-make "eat")
-(declare-function eat-term-send-string "eat")
-(declare-function eat-term-input-event "eat")
-(declare-function eat-kill-process "eat")
-(declare-function eat-term-parameter "eat")
-(declare-function setf "cl-lib")
-
-;;;; Bell Handling
-(defun claude--bell-handler (terminal)
-  "Handle bell events from Claude Code in TERMINAL.
-This function is called when Claude Code sends a bell character."
-  (ignore terminal)
-  (when claude-notify-on-await
-    (claude--system-notification "Claude Code finished and is awaiting your input")))
-
+;;;; Notification
 
 (defun claude--system-notification (message &optional title)
   "Show a system notification with MESSAGE and optional TITLE.
@@ -411,143 +388,29 @@ This works across macOS, Linux, and Windows platforms."
      ;; Windows with PowerShell
      ((eq system-type 'windows-nt)
       (call-process "powershell" nil nil nil
-                    "-Command" 
+                    "-Command"
                     (format "[System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms'); [System.Windows.Forms.MessageBox]::Show('%s', '%s')"
                             message title)))
      ;; Fallback: show in Emacs message area
      (t (message "%s: %s" title message)))))
 
-(defun claude--setup-eat-integration (buffer &optional retry-count)
-  "Set up eat integration (keymap and bell handler) for BUFFER.
-Retries using RETRY-COUNT up to 10 times if eat is not ready yet."
-  (let ((retry-count (or retry-count 0)))
-    (if (and (buffer-live-p buffer)
-             (with-current-buffer buffer
-               (and (boundp 'eat-terminal) eat-terminal)))
-        ;; Eat is ready, set up integration
-        (progn
-          (message "Eat is ready, setting up integrations")
-          (with-current-buffer buffer
-            (claude--setup-buffer-keymap)
-            (claude-setup-bell-handler buffer)
-            ;; Run startup hook after setup is complete
-            (run-hooks 'claude-startup-hook)))
-      ;; Eat not ready yet, retry if we haven't exceeded max attempts
-      (when (< retry-count 10)
-        (message "Eat not ready yet, retrying in 0.5s (attempt %d/10)" (1+ retry-count))
-        (run-with-timer 0.5 nil
-                        (lambda ()
-                          (claude--setup-eat-integration buffer (1+ retry-count))))))))
-
-;;;###autoload
-(defun claude-setup-bell-handler (&optional buffer)
-  "Set up or re-setup the completion notification handler for BUFFER.
-If BUFFER is not specified, uses the current buffer if it's a Claude buffer,
-otherwise finds the buffer using `claude--get-buffer'.
-Use this if system notifications aren't working after starting a session."
-  (interactive)
-  (let ((target-buffer (or buffer
-                           (when (claude--is-claude-buffer-p)
-                             (current-buffer))
-                           (claude--get-buffer))))
-    (when target-buffer
-      (with-current-buffer target-buffer
-        (when (boundp 'eat-terminal)
-          (setf (eat-term-parameter eat-terminal 'ring-bell-function)
-                #'claude--bell-handler)
-          (message "Bell handler configured for Claude session"))))))
-
-(defun claude--setup-repl-faces ()
-  "Setup faces for the Claude REPL buffer.
-Applies consistent styling to all eat-mode terminal faces."
-  
-  ;; Helper function to remap a face to inherit from claude-repl-face
-  (cl-flet ((remap-face (face &rest props)
-              (apply #'face-remap-add-relative face :inherit 'claude-repl-face props)))
-    
-    ;; Set buffer default face
-    (buffer-face-set :inherit 'claude-repl-face)
-    
-    ;; Remap all eat terminal faces to inherit from claude-repl-face
-    (mapc #'remap-face
-          '(eat-shell-prompt-annotation-running
-            eat-shell-prompt-annotation-success
-            eat-shell-prompt-annotation-failure
-            eat-term-bold eat-term-faint eat-term-italic
-            eat-term-slow-blink eat-term-fast-blink))
-    
-    ;; Remap font faces (eat-term-font-0 through eat-term-font-9)
-    (dotimes (i 10)
-      (remap-face (intern (format "eat-term-font-%d" i))))
-    
-    ;; Specific overrides
-    (face-remap-add-relative 'nobreak-space :underline nil)
-    (remap-face 'eat-term-faint :foreground "#999999" :weight 'light)))
-
-(defun claude--ret-key ()
-  "Send return key event to eat terminal."
-  (interactive)
-  (eat-term-input-event eat-terminal 1 'return))
-
-(defun claude--meta-ret-key ()
-  "Send meta + return to eat terminal."
-  (interactive)
-  (eat-term-send-string eat-terminal "\e\C-m"))
-
-(defun claude--send-escape ()
-  "Send ESC to eat terminal."
-  (interactive)
-  (eat-term-send-string eat-terminal "\e"))
-
 ;;;###autoload
 (defun claude-send-yes ()
-  "Send yes (RET) to the active Claude session."
+  "Send yes (accept) to the active Claude session."
   (interactive)
   (claude--validate-process)
   (let ((buffer (claude--get-buffer)))
     (with-current-buffer buffer
-      (eat-term-send-string eat-terminal (kbd "RET")))))
+      (claude-agent--send-accept))))
 
 ;;;###autoload
 (defun claude-send-no ()
-  "Send no (ESC) to the active Claude session."
+  "Send no (reject) to the active Claude session."
   (interactive)
   (claude--validate-process)
   (let ((buffer (claude--get-buffer)))
     (with-current-buffer buffer
-      (eat-term-send-string eat-terminal (kbd "ESC")))))
-
-(defun claude--setup-buffer-keymap ()
-  "Set up truly buffer-local keymap for Claude buffers with custom key bindings."
-  (when (claude--is-claude-buffer-p)
-    (message "Setting up buffer-local keymap for Claude buffer: %s" (buffer-name))
-    
-    ;; Create a new keymap that inherits from the current local map (eat-mode)
-    (let ((map (make-sparse-keymap)))
-      ;; Inherit all eat functionality by setting parent keymap
-      (set-keymap-parent map (current-local-map))
-      
-      ;; Override specific keys for claudemacs functionality
-      (define-key map (kbd "C-g") #'claude--send-escape)
-      (message "Defined C-g -> claude--send-escape")
-
-      ;; Handle return key swapping if enabled
-      (when claude-m-return-is-submit
-        (define-key map (kbd "<return>") #'claude--meta-ret-key)
-        (define-key map (kbd "<M-return>") #'claude--ret-key)
-        (message "Swapped RET and M-RET"))
-      
-      ;; Handle shift-return newline if enabled
-      (when claude-shift-return-newline
-        (define-key map (kbd "<S-return>") #'claude--meta-ret-key)
-        ;; alternative key representations that eat might use:
-        ;(define-key map (kbd "S-RET") #'claude--meta-ret-key)
-        ;(define-key map (kbd "<shift-return>") #'claude--meta-ret-key)
-        (message "Defined S-RET -> newline"))
-
-      ;; Apply the keymap as truly buffer-local
-      (use-local-map map)
-      (message "Applied buffer-local keymap successfully"))))
+      (claude-agent--send-reject))))
 
 (defun claude-agent--get-agent-dir ()
   "Get the directory containing the Python agent.
@@ -651,135 +514,13 @@ Returns nil if `claude-use-mcp' is nil."
       (when (and mcp-dir (file-directory-p mcp-dir))
         (list "--mcp-config" (claude--generate-mcp-config work-dir buffer-name))))))
 
-(defun claude--start (work-dir &rest args)
-  "Start Claude Code in WORK-DIR with ARGS.
-WORK-DIR can be either:
-  - A string: \"/path\" creates buffer *claude:/path*
-  - A list: '(\"/path\" \"agent-name\") creates *claude:/path:agent-name*"
-  (require 'eat)
-  ;; Set up environment variables BEFORE spawning the Claude process
-  (claude-mcp-setup-claude-environment)
-
-  ;; Parse work-dir - it can be a string or (dir agent-name) list
-  (let* ((dir-string (if (listp work-dir) (car work-dir) work-dir))
-         (agent-name (when (listp work-dir) (cadr work-dir)))
-         (expanded-dir (expand-file-name dir-string))
-         (buffer-name (if agent-name
-                         (format "*claude:%s:%s*" expanded-dir agent-name)
-                       (format "*claude:%s*" expanded-dir)))
-         (default-directory dir-string)
-         (buffer (get-buffer-create buffer-name))
-         (cli-dir (file-name-directory (claude-mcp-get-cli-path)))
-         (claude-socket (when (and (boundp 'server-socket-dir)
-                                        server-socket-dir
-                                        (boundp 'server-name)
-                                        server-name
-                                        (server-running-p))
-                              (expand-file-name server-name server-socket-dir)))
-         (process-environment
-          (append (list (format "PATH=%s:%s" cli-dir (getenv "PATH"))
-                        "TERM=xterm-256color"
-                        "CLAUDE_AGENT_SESSION=1")
-                  (when claude-socket
-                    (list (format "CLAUDE_AGENT_SOCKET=%s" claude-socket)))
-                  process-environment)))
-    (with-current-buffer buffer
-      (cd dir-string)
-      (setq-local eat-term-name "xterm-256color")
-      (let ((process-adaptive-read-buffering nil)
-            (switches (remove nil (append args
-                                         claude-program-switches
-                                         (claude--get-auto-allow-permissions)
-                                         (claude--get-custom-prompt)
-                                         (claude--get-mcp-config dir-string buffer-name)))))
-        (if claude-use-shell-env
-            ;; New behavior: Run through shell to source profile (e.g., .zprofile, .bash_profile)
-            ;; Explicitly set environment variables in the shell command to survive shell config sourcing
-            (let* ((shell (claude--get-shell-name))
-                   (env-vars (format "PATH=%s:$PATH CLAUDE_AGENT_SESSION=1%s"
-                                   cli-dir
-                                   (if claude-socket
-                                       (format " CLAUDE_AGENT_SOCKET=%s" claude-socket)
-                                     "")))
-                   (claude-cmd (format "%s %s %s"
-                                      env-vars
-                                      claude-program
-                                      (mapconcat 'shell-quote-argument switches " "))))
-              (eat-make (substring buffer-name 1 -1) shell nil "-c" claude-cmd))
-          ;; Original behavior: Run Claude directly without shell environment
-          (apply #'eat-make (substring buffer-name 1 -1) claude-program nil switches)))
-      
-      ;; Set buffer-local variables after eat-make to ensure they persist
-      (setq-local claude--cwd dir-string)
-
-      ;; Store session ID for this buffer
-      ;; For multi-agent setups, try to read from cache file first, otherwise use most recent
-      (let* ((session-cache-dir (expand-file-name ".claude/" dir-string))
-             (session-cache-file (expand-file-name
-                                  (format "session-%s" (md5 buffer-name))
-                                  session-cache-dir)))
-        (run-at-time 2 nil
-                     (lambda (buf dir cache-file)
-                       (when (buffer-live-p buf)
-                         (let ((session-id (claude--get-most-recent-session-id dir)))
-                           (when session-id
-                             (with-current-buffer buf
-                               (setq-local claude--session-id session-id))
-                             ;; Cache it to a file for future restarts
-                             (make-directory (file-name-directory cache-file) t)
-                             (with-temp-file cache-file
-                               (insert session-id))))))
-                     (current-buffer) dir-string session-cache-file))
-
-      (claude--setup-repl-faces)
-      ;; Optimize scrolling for terminal input - allows text to go to bottom
-      (setq-local scroll-conservatively 10000)  ; Never recenter
-      (setq-local scroll-margin 0)              ; No margin so text goes to edge
-      (setq-local maximum-scroll-margin 0)      ; No maximum margin
-      (setq-local scroll-preserve-screen-position t)  ; Preserve position during scrolling
-      
-      ;; Additional stabilization for blinking character height changes
-      (setq-local auto-window-vscroll nil)      ; Disable automatic scrolling adjustments
-      (setq-local scroll-step 1)                ; Scroll one line at a time
-      (setq-local hscroll-step 1)               ; Horizontal scroll one column at a time
-      (setq-local hscroll-margin 0)             ; No horizontal scroll margin
-      
-      ;; Force consistent line spacing to prevent height fluctuations
-      (setq-local line-spacing 0)               ; No extra line spacing
-      
-      ;; Disable eat's text blinking to reduce display changes
-      (when (bound-and-true-p eat-enable-blinking-text)
-        (setq-local eat-enable-blinking-text nil))
-      
-      ;; Force consistent character metrics for blinking symbols
-      ;;(setq-local char-width-table nil)         ; causes emacs to crash!
-      (setq-local vertical-scroll-bar nil)      ; Disable scroll bar
-      (setq-local fringe-mode 0)                ; Disable fringes that can cause reflow
-      
-      ;; Replace problematic blinking character with consistent asterisk
-      (let ((display-table (make-display-table)))
-        (aset display-table #x23fa [?✽])  ; Replace ⏺ (U+23FA) with ✽
-        (setq-local buffer-display-table display-table))
-      
-      ;; Enable claude-mode for keybindings
-      (claude-mode 1)
-
-      ;; Set up custom key mappings & completion notifications after eat initialization
-      (run-with-timer 0.1 nil
-                      (lambda ()
-                        (claude--setup-eat-integration buffer))))
-    
-    (let ((window (display-buffer buffer)))
-      (when claude-switch-to-buffer-on-create
-        (select-window window)))))
-
 (defun claude--run-with-args (&optional arg &rest args)
   "Start Claude Code with ARGS or switch to existing session.
 With prefix ARG, prompt for the project directory."
   (let* ((explicit-dir (when arg (read-directory-name "Project directory: ")))
          (work-dir (or explicit-dir (claude--project-root))))
     (unless (claude--switch-to-buffer)
-      (apply #'claude--start work-dir args))))
+      (apply #'claude-mcp--start work-dir args))))
 
 ;;;; Interactive Commands
 ;;;###autoload
@@ -821,14 +562,9 @@ With prefix ARG, prompt for the project directory."
   (if-let* ((claude-buffer (claude--get-buffer)))
       (progn
         (with-current-buffer claude-buffer
-          ;; Check if using new agent architecture
-          (if (and (boundp 'claude-agent--process) claude-agent--process)
-              ;; New agent architecture
-              (when (process-live-p claude-agent--process)
-                (delete-process claude-agent--process))
-            ;; Old eat-based architecture
-            (when (and (boundp 'eat-terminal) eat-terminal)
-              (eat-kill-process)))
+          (when (and (boundp 'claude-agent--process) claude-agent--process
+                     (process-live-p claude-agent--process))
+            (delete-process claude-agent--process))
           (kill-buffer claude-buffer))
         (message "Claude session killed"))
     (error "There is no Claude session in this workspace or project")))
@@ -873,7 +609,7 @@ Returns the buffer name."
       (error "Directory does not exist: %s" expanded-dir))
 
     ;; Spawn the agent with any extra args
-    (apply #'claude--start work-dir-arg extra-args)
+    (apply #'claude-mcp--start work-dir-arg extra-args)
 
     (when (called-interactively-p 'interactive)
       (message "Spawned agent: %s" buffer-name))
@@ -916,12 +652,12 @@ TARGET-BUFFER-NAME is the exact buffer name to use (optional)."
          (if (and buffer
                   (buffer-live-p buffer)
                   (with-current-buffer buffer
-                    (and (boundp 'eat-terminal) eat-terminal)))
-             ;; Send the message
+                    (and (boundp 'claude-agent--process) claude-agent--process
+                         (process-live-p claude-agent--process))))
+             ;; Send the message via the REPL backend
              (with-current-buffer buffer
-               (eat-term-send-string eat-terminal msg)
-               (sit-for 0.1)
-               (eat-term-send-string eat-terminal "\r")
+               (process-send-string claude-agent--process
+                                    (format "[INPUT]\n%s\n[/INPUT]\n" msg))
                (message "Continuation message sent to Claude"))
            (message "Warning: Buffer %s not ready to receive message" buf-name))))
      buffer-name message)))
@@ -976,7 +712,9 @@ Otherwise, restart the session for the current project."
     ;; Kill the target session
     (message "Killing Claude session for %s..." work-dir)
     (with-current-buffer claude-buffer
-      (eat-kill-process)
+      (when (and (boundp 'claude-agent--process) claude-agent--process
+                 (process-live-p claude-agent--process))
+        (delete-process claude-agent--process))
       (kill-buffer claude-buffer))
 
     ;; Reload elisp files
@@ -999,7 +737,7 @@ Otherwise, restart the session for the current project."
                                 (format "*claude:%s:%s*" work-dir agent-name)
                               (format "*claude:%s*" work-dir))))
         ;; FIX: Pass work-dir-arg instead of just work-dir
-        (apply #'claude--start work-dir-arg session-args)
+        (apply #'claude-mcp--start work-dir-arg session-args)
 
         ;; If buffer wasn't visible before, hide it now
         (unless buffer-was-visible
@@ -1023,11 +761,10 @@ Otherwise, restart the session for the current project."
     (unless buffer
       (error "No Claude session is active"))
     (with-current-buffer buffer
-      (unless (and (boundp 'eat-terminal) eat-terminal)
-        (error "Claude session exists but terminal is not initialized. Please kill buffer and restart"))
-      (let ((process (eat-term-parameter eat-terminal 'eat--process)))
-        (unless (and process (process-live-p process))
-          (error "Claude session exists but process is not running. Please  kill buffer and restart")))))
+      (unless (and (boundp 'claude-agent--process) claude-agent--process)
+        (error "Claude session exists but process is not initialized. Please kill buffer and restart"))
+      (unless (process-live-p claude-agent--process)
+        (error "Claude session exists but process is not running. Please kill buffer and restart"))))
   t)
 
 (defun claude--validate-file-and-session ()
@@ -1058,18 +795,26 @@ Returns a plist with :file-path, :project-cwd, and :relative-path."
 
 (defun claude--send-message-to-claude (message &optional no-return no-switch clear-first)
   "Send MESSAGE to the active Claude session.
-If NO-RETURN is non-nil, don't send a return/newline.
+If NO-RETURN is non-nil, insert into the input area without sending.
 If NO-SWITCH is non-nil, don't switch to the Claude buffer.
-If CLEAR-FIRST is non-nil, send C-u to clear any partial input first."
+If CLEAR-FIRST is non-nil, clear any partial input first."
   (claude--validate-process)
   (let ((claude-buffer (claude--get-buffer)))
     (with-current-buffer claude-buffer
       (when clear-first
-        (eat-term-send-string eat-terminal "\C-u"))
-      (eat-term-send-string eat-terminal message)
-      (unless no-return
-        ;; Use eat-term-input-event for proper terminal input handling
-        (eat-term-input-event eat-terminal 1 'return)))
+        ;; Clear input area
+        (let ((inhibit-read-only t))
+          (when (boundp 'claude-agent--input-start-marker)
+            (delete-region claude-agent--input-start-marker (point-max)))))
+      (if no-return
+          ;; Insert without sending (add to input area)
+          (progn
+            (goto-char (point-max))
+            (let ((inhibit-read-only t))
+              (insert message)))
+        ;; Send message with [INPUT] framing
+        (process-send-string claude-agent--process
+                             (format "[INPUT]\n%s\n[/INPUT]\n" message))))
     (unless no-switch
       (claude--switch-to-buffer))))
 
@@ -1470,10 +1215,8 @@ Hide if current, focus if visible elsewhere, show if hidden."
     ("a" "Add Context" claude-add-context)
     ("p" "Paste Context to Shell" claude-paste-context-to-shell)]
    ["Quick Responses"
-     ("y" "Send Yes (RET)" claude-send-yes)
-     ("n" "Send No (ESC)" claude-send-no)]]
-   ["Maintenance"
-     ("u" "Unstick Claude buffer" claude-unstick-terminal)])
+     ("y" "Send Yes" claude-send-yes)
+     ("n" "Send No" claude-send-no)]])
 
 ;;;###autoload
 (defvar claude-mode-map
@@ -1491,85 +1234,6 @@ Hide if current, focus if visible elsewhere, show if hidden."
   :lighter " Claude"
   :keymap claude-mode-map
   :group 'claude-agent)
-
-(defun claude--show-cursor (&rest _args)
-  "Show cursor in Claude buffers when in Emacs mode."
-  (when (claude--is-claude-buffer-p)
-    (setq-local cursor-type 'box)))
-
-(defun claude--hide-cursor (&rest _args)
-  "Hide cursor in Claude buffers when in semi-char mode."
-  (when (claude--is-claude-buffer-p)
-    (setq-local cursor-type nil)))
-
-(defun claude--check-and-disable-window-adjust (&rest _)
-  "Check if buffer is longer than one screen and disable window adjustment if so."
-  (when (and (not (eq window-adjust-process-window-size-function 'ignore))
-             (claude--is-claude-buffer-p))
-    (let* ((claude-buffer (current-buffer))
-           (claude-window (get-buffer-window claude-buffer))
-           (window-ht (when claude-window (window-height claude-window)))
-           (buffer-lines (count-lines (point-min) (point-max))))
-      ;; If buffer has more lines than window height, switch to 'ignore mode
-      (when (and window-ht (> buffer-lines window-ht))
-        (goto-char (point-min))
-        (redisplay)
-        (goto-char (point-max))
-        (redisplay)
-        ;; CRITICAL: Disable window-adjust-process-window-size-function to prevent
-        ;; terminal redraw/scroll reset on buffer switching (same issue as vterm #149)
-        (setq-local window-adjust-process-window-size-function 'ignore)))))
-
-(defun claude--eat-force-redraw ()
-  "Forces the eat terminal and the underlying program to redraw.
-
-This is useful if the display becomes corrupted after Emacs window
-resizes or other external changes that might not have been fully
-propagated. It attempts to resynchronize the PTY size, the
-eat emulator's internal dimensions, and trigger a redisplay."
-  (interactive)
-  (with-current-buffer (claude--get-buffer)
-    (when (and (boundp 'eat-terminal) eat-terminal)
-        (let* ((process (eat-term-parameter eat-terminal 'eat--process))
-               (claude-window (get-buffer-window (claude--get-buffer))))
-          (if (and process (process-live-p process) claude-window)
-              (eat--adjust-process-window-size process (list claude-window)))))))
-
-;; You might want to bind this to a key, for example:
-;; (define-key eat-mode-map (kbd "C-c C-r") #'eat-force-redraw) ;; 'r' for redraw
-
-(defun claude-unstick-terminal ()
-  "Reset the Claude buffer's vertical rest point.
-Sometimes the input box gets stuck mid or top of the buffer because of
-the idiosyncracies of eat-mode. This will reset the input box to the
-bottom of the buffer."
-  (interactive)
-  (claude--validate-process)
-  (when (claude--is-claude-buffer-p)
-    (error "Reset buffer cannot be used while visiting the Claude buffer itself"))
-  (claude--eat-force-redraw)
-  (with-current-buffer (claude--get-buffer)
-    (setq-local window-adjust-process-window-size-function
-                'window-adjust-process-window-size-smallest))
-  (claude--scroll-to-top)
-  (redisplay)
-  (claude--scroll-to-bottom)
-  (redisplay)
-  (with-current-buffer (claude--get-buffer)
-    ;; CRITICAL: Disable window-adjust-process-window-size-function to prevent
-    ;; terminal redraw/scroll reset on buffer switching (same issue as vterm #149)
-    (setq-local window-adjust-process-window-size-function 'ignore)))
-
-;; Set up hooks when package is loaded
-(unless (memq 'claude--check-and-disable-window-adjust window-buffer-change-functions)
-  (add-hook 'window-buffer-change-functions #'claude--check-and-disable-window-adjust))
-
-;; Set up advice when package is loaded
-(unless (advice-member-p #'claude--show-cursor 'eat-emacs-mode)
-  (advice-add 'eat-emacs-mode :after #'claude--show-cursor))
-
-(unless (advice-member-p #'claude--hide-cursor 'eat-semi-char-mode)
-  (advice-add 'eat-semi-char-mode :after #'claude--hide-cursor))
 
 (provide 'claude-agent)
 ;;; claude-agent.el ends here

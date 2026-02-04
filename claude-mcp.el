@@ -1185,34 +1185,19 @@ Any keypress exits watch mode."
 
 ;;;; REPL Integration
 
-(defun claude-mcp-send-to-eat-terminal (buffer-name text)
-  "Send TEXT to eat terminal in BUFFER-NAME and submit with return.
-Designed for eat-mode terminals like Claude buffers.
-Designed to be called via emacsclient by Claude AI."
-  (if (get-buffer buffer-name)
-      (with-current-buffer buffer-name
-        (if (and (boundp 'eat-terminal) eat-terminal)
-            (progn
-              (eat-term-send-string eat-terminal text)
-              (eat-term-input-event eat-terminal 1 'return)
-              (format "Sent input to eat terminal '%s'" buffer-name))
-          (error "Buffer '%s' is not an eat terminal" buffer-name)))
-    (error "Buffer '%s' does not exist" buffer-name)))
-
 (defun claude-mcp-send-input (buffer-name text)
   "Insert TEXT into BUFFER-NAME and send input (useful for REPL buffers).
-Tries eat-terminal, comint-send-input, eshell-send-input, or just inserts with newline.
+Tries claude-agent process, comint-send-input, eshell-send-input, or just inserts with newline.
 Designed to be called via emacsclient by Claude AI."
   (if (get-buffer buffer-name)
       (with-current-buffer buffer-name
         (cond
-         ;; eat-mode terminals (like claudemacs)
-         ((and (boundp 'eat-terminal) eat-terminal)
-          ;; Clear any partial input first with Ctrl+U
-          (eat-term-send-string eat-terminal "\C-u")
-          (eat-term-send-string eat-terminal text)
-          (eat-term-input-event eat-terminal 1 'return)
-          (format "Sent input to eat terminal '%s'" buffer-name))
+         ;; Claude agent REPL buffer
+         ((and (boundp 'claude-agent--process) claude-agent--process
+               (process-live-p claude-agent--process))
+          (process-send-string claude-agent--process
+                               (format "[INPUT]\n%s\n[/INPUT]\n" text))
+          (format "Sent input to claude agent '%s'" buffer-name))
          ;; comint-mode buffers
          ((and (boundp 'comint-mode) (derived-mode-p 'comint-mode))
           (goto-char (point-max))
@@ -1233,75 +1218,7 @@ Designed to be called via emacsclient by Claude AI."
           (format "Inserted text with newline to buffer '%s'" buffer-name))))
     (error "Buffer '%s' does not exist" buffer-name)))
 
-(defun claude-mcp-exec-in-eat-terminal (buffer-name command &optional timeout)
-  "Execute COMMAND in eat terminal BUFFER-NAME and wait for completion.
-Returns the output of the command. TIMEOUT defaults to 30 seconds.
-Designed to be called via emacsclient by Claude AI.
 
-This function uses eat's shell integration if available (via
-eat--shell-prompt-begin text property) for reliable prompt detection.
-Falls back to heuristic-based detection if shell integration is not enabled.
-
-Note: This function blocks but uses non-blocking waits to avoid freezing Emacs."
-  (if (get-buffer buffer-name)
-      (with-current-buffer buffer-name
-        (if (and (boundp 'eat-terminal) eat-terminal)
-            (let* ((timeout-secs (or timeout 30))
-                   (start-pos (point-max))
-                   (start-time (current-time))
-                   (has-shell-integration (and (boundp 'eat--shell-prompt-begin)
-                                               eat--shell-prompt-begin))
-                   (initial-prompt-pos (when has-shell-integration
-                                        (save-excursion
-                                          (goto-char (point-max))
-                                          (when (get-text-property (point) 'eat--shell-prompt-end)
-                                            (point)))))
-                   (last-size 0)
-                   (stable-count 0))
-              ;; Send the command
-              (eat-term-send-string eat-terminal command)
-              (eat-term-input-event eat-terminal 1 'return)
-
-              ;; Wait for command to complete
-              (catch 'done
-                (while (< (float-time (time-subtract (current-time) start-time))
-                         timeout-secs)
-                  ;; Process any pending output without blocking UI
-                  (accept-process-output nil 0.05 nil t)
-
-                  ;; Check completion based on shell integration or heuristics
-                  (if has-shell-integration
-                      ;; Use shell integration: look for new prompt
-                      (save-excursion
-                        (goto-char (point-max))
-                        (when (and (get-text-property (point) 'eat--shell-prompt-end)
-                                  (or (null initial-prompt-pos)
-                                      (> (point) initial-prompt-pos)))
-                          (throw 'done t)))
-                    ;; Fall back to heuristic detection
-                    (let ((current-size (buffer-size)))
-                      (if (= current-size last-size)
-                          (setq stable-count (1+ stable-count))
-                        (setq stable-count 0
-                              last-size current-size))
-                      ;; If stable, check for prompt patterns
-                      (when (>= stable-count 3)
-                        (let ((recent-text (buffer-substring-no-properties
-                                           (max (point-min) (- (point-max) 300))
-                                           (point-max))))
-                          (when (string-match-p "[$#%>❯λ][ \t]*\\(?:\n\\|$\\|\\[\\)" recent-text)
-                            (throw 'done t))))))))
-
-              ;; Capture output
-              (let* ((output (buffer-substring-no-properties start-pos (point-max)))
-                     (lines (split-string output "\n" t)))
-                ;; Remove first line (command echo) if it matches the command
-                (when (and lines (string-match-p (regexp-quote command) (car lines)))
-                  (setq lines (cdr lines)))
-                ;; Join and return
-                (string-trim (string-join lines "\n"))))
-          (error "Buffer '%s' is not an eat terminal" buffer-name)))
-    (error "Buffer '%s' does not exist" buffer-name)))
 
 ;;;; Notes - See claude-mcp-notes.el for all notes functionality
 ;; All notes functions have been moved to claude-mcp-notes.el
@@ -1367,9 +1284,10 @@ Designed to be called via emacsclient by Claude AI."
         ;; Send input
         (with-current-buffer buffer-name
           (cond
-           ((and (boundp 'eat-terminal) eat-terminal)
-            (eat-term-send-string eat-terminal input)
-            (eat-term-input-event eat-terminal 1 'return))
+           ((and (boundp 'claude-agent--process) claude-agent--process
+                 (process-live-p claude-agent--process))
+            (process-send-string claude-agent--process
+                                 (format "[INPUT]\n%s\n[/INPUT]\n" input)))
            ((derived-mode-p 'comint-mode)
             (goto-char (point-max))
             (insert input)
@@ -1469,77 +1387,6 @@ elif [ -n \"$ZSH_VERSION\" ]; then
 fi
 ")
 
-(defun claude-mcp-inject-bash-hooks (buffer-name)
-  "Inject bash/zsh completion hooks into shell BUFFER-NAME.
-This sets up PROMPT_COMMAND/precmd_functions to call back to MCP server."
-  (when-let ((buf (get-buffer buffer-name)))
-    (with-current-buffer buf
-      (when (and (boundp 'eat-terminal) eat-terminal)
-        ;; Write hook script to a temp file and source it
-        (let* ((temp-file (make-temp-file "claude-hooks-" nil ".sh"))
-               (hook-script (claude-mcp-bash-hook-script)))
-          (with-temp-file temp-file
-            (insert hook-script))
-          ;; Source the file in the shell
-          (eat-term-send-string eat-terminal (format "source %s && rm %s" temp-file temp-file))
-          (eat-term-input-event eat-terminal 1 'return)
-          (message "Injected bash hooks into %s via %s" buffer-name temp-file))))))
-
-(defun claude-mcp-get-project-shell (directory &optional mcp-port)
-  "Get or create an eat shell for DIRECTORY with optional MCP-PORT.
-Returns the buffer name. Creates the shell if it doesn't exist.
-If MCP-PORT is provided, sets up bash/zsh hooks for event-driven command completion.
-Designed to be called via emacsclient by Claude AI."
-  (require 'eat)
-  (let* ((work-dir (expand-file-name directory))
-         ;; eat-make wraps name with *...*, so we use name without asterisks
-         (shell-name (format "eat-shell:%s" (file-name-nondirectory
-                                              (directory-file-name work-dir))))
-         (buffer-name (format "*%s*" shell-name)))
-    (if (get-buffer buffer-name)
-        ;; Buffer exists - return it (hooks were already injected when created)
-        buffer-name
-      ;; Create new shell with environment variables for HTTP callback
-      (let* ((default-directory work-dir)
-             ;; Set environment variables for the shell process
-             ;; Use buffer-name as shell_id so Python and shell agree on the identifier
-             (process-environment
-              (if mcp-port
-                  (append process-environment
-                         (list (format "CLAUDE_MCP_PORT=%d" mcp-port)
-                               (format "CLAUDE_MCP_SHELL_ID=%s" buffer-name)))
-                process-environment)))
-        (with-current-buffer (eat-make shell-name
-                                       (or (getenv "SHELL") "/bin/bash")
-                                       nil)
-          (setq-local default-directory work-dir))
-
-        ;; Inject hooks asynchronously after shell is ready
-        (when mcp-port
-          (run-at-time 2.0 nil #'claude-mcp-inject-bash-hooks buffer-name))
-
-        buffer-name))))
-
-(defun claude-mcp-project-shell-ready-p (buffer-name)
-  "Check if project shell BUFFER-NAME has an active eat terminal.
-Returns t if ready, nil otherwise."
-  (when-let ((buf (get-buffer buffer-name)))
-    (with-current-buffer buf
-      (and (boundp 'eat-terminal) eat-terminal t))))
-
-(defun claude-mcp-interrupt-shell (buffer-name)
-  "Send interrupt signal (Ctrl+C) to shell BUFFER-NAME.
-This kills the currently running command and returns to the prompt.
-Designed to be called via emacsclient by Claude AI."
-  (if (get-buffer buffer-name)
-      (with-current-buffer buffer-name
-        (if (and (boundp 'eat-terminal) eat-terminal)
-            (progn
-              ;; Send Ctrl+C (interrupt signal)
-              (eat-term-send-string-as-yank eat-terminal "\C-c")
-              (format "Sent interrupt signal (Ctrl+C) to %s" buffer-name))
-          (error "Buffer '%s' is not an eat terminal" buffer-name)))
-    (error "Buffer '%s' does not exist" buffer-name)))
 
 ;;;; Elisp Debugging and Formatting
 
@@ -1684,22 +1531,21 @@ Designed to be called via MCP by Claude AI."
   (let ((original-size 0)
         (new-size 0))
     (with-current-buffer buffer-name
-      (unless (and (boundp 'eat-terminal) eat-terminal)
-        (error "Buffer '%s' is not a Claude buffer (no eat-terminal)" buffer-name))
+      (unless (and (boundp 'claude-agent--process) claude-agent--process)
+        (error "Buffer '%s' is not a Claude buffer (no claude-agent--process)" buffer-name))
 
-      (let ((process (eat-term-parameter eat-terminal 'eat--process)))
-        (unless (and process (process-live-p process))
-          (error "Claude agent in '%s' is not running" buffer-name))
+      (unless (process-live-p claude-agent--process)
+        (error "Claude agent in '%s' is not running" buffer-name))
 
-        ;; Capture original size
-        (setq original-size (buffer-size))
+      ;; Capture original size
+      (setq original-size (buffer-size))
 
-        ;; Truncate buffer if too large
-        (when (> original-size 50000)
-          (let ((inhibit-read-only t))
-            ;; Keep only last 10000 chars
-            (delete-region (point-min) (max (point-min) (- (point-max) 10000)))
-            (setq new-size (buffer-size))))))
+      ;; Truncate buffer if too large
+      (when (> original-size 50000)
+        (let ((inhibit-read-only t))
+          ;; Keep only last 10000 chars
+          (delete-region (point-min) (max (point-min) (- (point-max) 10000)))
+          (setq new-size (buffer-size)))))
 
     (if (> original-size 50000)
         (format "Truncated buffer %s: %d → %d chars (removed %d)"

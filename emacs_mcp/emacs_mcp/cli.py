@@ -86,15 +86,6 @@ def cmd_send_input(args):
         sys.exit(1)
 
 
-def cmd_exec_in_terminal(args):
-    """Execute command in eat terminal and wait for completion."""
-    try:
-        timeout = args.timeout if args.timeout else 30
-        result = lib.exec_in_terminal(args.buffer, args.command, timeout, args.socket)
-        print(result)
-    except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
 
 
 def cmd_eval(args):
@@ -169,12 +160,7 @@ def main():
     p.add_argument('text', help='Text to send')
     p.set_defaults(func=cmd_send_input)
 
-    # exec-in-terminal
-    p = subparsers.add_parser('exec-in-terminal', help='Execute command in eat terminal and wait for completion')
-    p.add_argument('buffer', help='Buffer name (eat terminal)')
-    p.add_argument('command', help='Command to execute')
-    p.add_argument('--timeout', type=int, help='Timeout in seconds (default: 30)')
-    p.set_defaults(func=cmd_exec_in_terminal)
+
 
     # eval
     p = subparsers.add_parser('eval', help='Evaluate elisp expression')

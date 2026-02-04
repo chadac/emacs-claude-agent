@@ -408,14 +408,15 @@ async def send_input_async(buffer_name: str, text: str) -> str:
     """Send input to a buffer asynchronously."""
     escaped_name = escape_elisp_string(buffer_name)
     escaped_text = escape_elisp_string(text)
-    # Send input directly to eat terminal
+    # Send input via claude-agent--process using [INPUT] framing
     elisp = f'''(with-current-buffer "{escaped_name}"
-      (if (and (boundp 'eat-terminal) eat-terminal)
+      (if (and (boundp 'claude-agent--process) claude-agent--process
+               (process-live-p claude-agent--process))
           (progn
-            (eat-term-send-string eat-terminal "{escaped_text}")
-            (eat-term-input-event eat-terminal 1 'return)
+            (process-send-string claude-agent--process
+                                 (format "[INPUT]\\n%s\\n[/INPUT]\\n" "{escaped_text}"))
             "Input sent")
-        (error "Buffer does not have an eat terminal")))'''
+        (error "Buffer does not have a running claude-agent process")))'''
     result = await call_emacs_async(elisp)
     if result.startswith('"') and result.endswith('"'):
         return unescape_elisp_string(result)

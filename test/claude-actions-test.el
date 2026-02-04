@@ -36,23 +36,10 @@ Returns the created buffer. Caller responsible for cleanup."
          (fake-process (start-process "fake-claude" nil "sleep" "60")))
     
     (with-current-buffer session-buffer
-      ;; Create fake eat-terminal - must be non-nil to pass validation
-      (setq-local eat-terminal 'fake-terminal))
+      ;; Set claude-agent--process to pass validation
+      (setq-local claude-agent--process fake-process))
     
-    ;; Define eat-term-parameter if it doesn't exist, or override if it does
     (setq claudemacs-test--fake-process fake-process)
-    (unless (fboundp 'eat-term-parameter)
-      (defun eat-term-parameter (terminal property)
-        "Fake eat-term-parameter for testing."
-        (when (eq property 'eat--process)
-          claudemacs-test--fake-process)))
-    
-    ;; If it already exists, use advice to override
-    (when (fboundp 'eat-term-parameter)
-      (advice-add 'eat-term-parameter :override 
-                  (lambda (terminal property)
-                    (when (eq property 'eat--process)
-                      claudemacs-test--fake-process))))
     
     session-buffer))
 
@@ -239,14 +226,13 @@ This is the critical missing test that verifies our function actually works!"
       
       ;; Cleanup
       (when session-buffer
+        (with-current-buffer session-buffer
+          (when (and (boundp 'claude-agent--process) claude-agent--process
+                     (process-live-p claude-agent--process))
+            (delete-process claude-agent--process)))
         (kill-buffer session-buffer))
       (when (file-exists-p temp-dir)
-        (delete-directory temp-dir t))
-      ;; Clean up the advice
-      (advice-remove 'eat-term-parameter 
-                     (lambda (terminal property)
-                       (when (eq property 'eat--process)
-                         claudemacs-test--fake-process))))))
+        (delete-directory temp-dir t)))))
 
 ;;; Unit Tests for claudemacs-execute-request ("x" action)
 

@@ -40,8 +40,6 @@ https://github.com/user-attachments/assets/a7a8348d-471c-4eec-85aa-946c3ef9d364
     - [System Notifications](#system-notifications)
 - [Buffer Naming](#buffer-naming)
 - [Tips and Tricks](#tips-and-tricks)
-  - [Using eat-mode effectively](#using-eat-mode-effectively)
-  - [Scroll-popping, input box sticking, input box border draw issues](#scroll-popping-input-box-sticking-input-box-border-draw-issues)
   - [Buffer Toggle Edge Case](#buffer-toggle-edge-case)
 - [Requirements](#requirements)
 - [Credits](#credits)
@@ -106,7 +104,7 @@ Clone this repository and add to your Emacs configuration:
 
 ## Setup
 
-Use your preferred keybinding (I use `C-c C-e`). I'd recommend adding it to the relevant mode-maps, instead of using a `global-set-key`, since that will override the very useful `C-c C-e` keybind in the `eat-semi-char-mode-map` (see [Using Eat Mode](#using-eat-mode-effectively) section below).
+Use your preferred keybinding (I use `C-c C-e`). I'd recommend adding it to the relevant mode-maps instead of using a `global-set-key`.
 
 ```elisp
 (require 'claudemacs)
@@ -114,10 +112,6 @@ Use your preferred keybinding (I use `C-c C-e`). I'd recommend adding it to the 
 (define-key emacs-lisp-mode-map (kbd "C-c C-e") #'claudemacs-transient-menu)
 (define-key text-mode-map (kbd "C-c C-e") #'claudemacs-transient-menu)
 (define-key python-base-mode-map (kbd "C-c C-e") #'claudemacs-transient-menu)
-
-;; Set a big buffer so we can search our history.
-(with-eval-after-load 'eat
-  (setq eat-term-scrollback-size 400000))
 ```
 
 Other useful tweaks:
@@ -475,23 +469,6 @@ Currently supports Doom Emacs workspaces and Perspective mode. If you use anothe
 
 ## Tips and Tricks
 
-### Using eat-mode effectively
-
-When interacting with the eat-mode buffer, you are limited in what you can do in the default semi-char mode.
-
-Press `C-c C-e` to enter emacs mode. A box cursor will appear, which you can use to move around and select and kill text.
-Press `C-c C-j` to re-enter semi-char mode and continue typing to Claude.
-
-Press `C-v` to paste an image from the clipboard.
-
-### Scroll-popping, input box sticking, input box border draw issues
-
-There is a tricky interaction between Eat-mode and Claude Code, probably because Claude Code uses some input libraries that eat has trouble with. It was causing the eat-mode buffer to "scroll-pop" to the top whenever you change the other window's buffer. This is mostly fixed now, but a side effect is sometimes the Claude Clode input box gets stuck halfway up the buffer and won't move.
-
-There are also issues with drawing the input box border after the window resizes, which is expected of terminal programs. 
-
-If you see these issues, press `u` in the Claudemacs transient menu to "unstick" the buffer, and everything should get reset.
-
 ### Buffer Toggle Edge Case
 
 Normally, toggling the Claudemacs buffer will close its window, if the window was created for the Claudemacs session. Toggling it again will recreate the window.
@@ -501,7 +478,6 @@ But there's an edge case to be aware of: if a window was originally created for 
 ## Requirements
 
 - Emacs 28.1+
-- [eat](https://github.com/kephale/emacs-eat) package
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code/overview)
 
 ## Credits
