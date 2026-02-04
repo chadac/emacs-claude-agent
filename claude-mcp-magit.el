@@ -181,7 +181,7 @@ Returns nil if not in a git repository."
   (let ((default-directory (or directory default-directory)))
     (with-temp-buffer
       (when (zerop (call-process "git" nil t nil "rev-parse" "--show-toplevel"))
-        (string-trim (buffer-string))))))
+        (file-name-as-directory (string-trim (buffer-string)))))))
 
 (defun claude-mcp-magit--call-git (&rest args)
   "Call git with ARGS synchronously without creating magit buffers.
@@ -305,7 +305,7 @@ correctly returns the worktree-specific git dir."
   (let ((default-directory (or directory default-directory)))
     (with-temp-buffer
       (when (zerop (call-process "git" nil t nil "rev-parse" "--git-dir"))
-        (file-truename (string-trim (buffer-string)))))))
+        (file-name-as-directory (file-truename (string-trim (buffer-string))))))))
 
 (defun claude-mcp-magit--proposed-commit-path (&optional directory)
   "Return path to the proposed commit file for DIRECTORY's git repo.

@@ -35,65 +35,65 @@
 ;;;; Faces
 
 (defface claude-sessions-status-ready
-  '(((class color) (background dark))
+  '((((class color) (background dark))
      (:foreground "#98c379" :weight bold))
-    ((class color) (background light))
+    (((class color) (background light))
      (:foreground "#50a14f" :weight bold)))
   "Face for sessions that are ready for input."
   :group 'claude-agent-sessions)
 
 (defface claude-sessions-status-thinking
-  '(((class color) (background dark))
+  '((((class color) (background dark))
      (:foreground "#e5c07b" :weight bold))
-    ((class color) (background light))
+    (((class color) (background light))
      (:foreground "#986801" :weight bold)))
   "Face for sessions that are thinking/processing."
   :group 'claude-agent-sessions)
 
 (defface claude-sessions-status-typing
-  '(((class color) (background dark))
+  '((((class color) (background dark))
      (:foreground "#61afef" :weight bold))
-    ((class color) (background light))
+    (((class color) (background light))
      (:foreground "#4078f2" :weight bold)))
   "Face for sessions where user is typing."
   :group 'claude-agent-sessions)
 
 (defface claude-sessions-status-waiting
-  '(((class color) (background dark))
+  '((((class color) (background dark))
      (:foreground "#c678dd" :weight bold))
-    ((class color) (background light))
+    (((class color) (background light))
      (:foreground "#a626a4" :weight bold)))
   "Face for sessions waiting for user input."
   :group 'claude-agent-sessions)
 
 (defface claude-sessions-status-dead
-  '(((class color) (background dark))
+  '((((class color) (background dark))
      (:foreground "#e06c75" :weight bold))
-    ((class color) (background light))
+    (((class color) (background light))
      (:foreground "#e45649" :weight bold)))
   "Face for sessions that are dead/not running."
   :group 'claude-agent-sessions)
 
 (defface claude-sessions-project
-  '(((class color) (background dark))
+  '((((class color) (background dark))
      (:foreground "#61afef"))
-    ((class color) (background light))
+    (((class color) (background light))
      (:foreground "#4078f2")))
   "Face for project directory column."
   :group 'claude-agent-sessions)
 
 (defface claude-sessions-buffer
-  '(((class color) (background dark))
+  '((((class color) (background dark))
      (:foreground "#c678dd"))
-    ((class color) (background light))
+    (((class color) (background light))
      (:foreground "#a626a4")))
   "Face for buffer name column."
   :group 'claude-agent-sessions)
 
 (defface claude-sessions-label
-  '(((class color) (background dark))
+  '((((class color) (background dark))
      (:foreground "#98c379"))
-    ((class color) (background light))
+    (((class color) (background light))
      (:foreground "#50a14f")))
   "Face for session label column."
   :group 'claude-agent-sessions)

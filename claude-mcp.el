@@ -676,17 +676,17 @@ Each value is a plist with :start-line, :end-line, :start-pos, :end-pos,
   "Counter for generating unique lock IDs.")
 
 (defface claude-mcp-locked-region-face
-  '(((class color) (background dark))
+  '((((class color) (background dark))
      (:background "#3e4451" :extend t))
-    ((class color) (background light))
+    (((class color) (background light))
      (:background "#e5e5e6" :extend t)))
   "Face for highlighting Claude's locked region."
   :group 'claude-mcp)
 
 (defface claude-mcp-written-region-face
-  '(((class color) (background dark))
+  '((((class color) (background dark))
      (:background "#2e4a2e" :extend t))
-    ((class color) (background light))
+    (((class color) (background light))
      (:background "#e6ffe6" :extend t)))
   "Face for briefly highlighting newly written content."
   :group 'claude-mcp)
@@ -1276,9 +1276,9 @@ All lock IDs are validated before any unlocks are performed (atomic)."
   "The Claude buffer that watch mode is following.")
 
 (defface claude-mcp-watch-mode-line-face
-  '(((class color) (background dark))
+  '((((class color) (background dark))
      (:background "#e5c07b" :foreground "#282c34" :weight bold))
-    ((class color) (background light))
+    (((class color) (background light))
      (:background "#986801" :foreground "#fafafa" :weight bold)))
   "Face for watch mode indicator in mode line."
   :group 'claude-mcp)
@@ -1847,33 +1847,33 @@ EXPRESSION should be a string containing valid Emacs Lisp code."
   "Currently selected option index.")
 
 (defface claude-mcp-prompt-title-face
-  '(((class color) (background dark))
+  '((((class color) (background dark))
      (:foreground "#61afef" :weight bold :height 1.2))
-    ((class color) (background light))
+    (((class color) (background light))
      (:foreground "#4078f2" :weight bold :height 1.2)))
   "Face for prompt titles."
   :group 'claude-mcp)
 
 (defface claude-mcp-prompt-option-face
-  '(((class color) (background dark))
+  '((((class color) (background dark))
      (:foreground "#abb2bf"))
-    ((class color) (background light))
+    (((class color) (background light))
      (:foreground "#383a42")))
   "Face for unselected options."
   :group 'claude-mcp)
 
 (defface claude-mcp-prompt-selected-face
-  '(((class color) (background dark))
+  '((((class color) (background dark))
      (:foreground "#282c34" :background "#98c379" :weight bold))
-    ((class color) (background light))
+    (((class color) (background light))
      (:foreground "#fafafa" :background "#50a14f" :weight bold)))
   "Face for selected option."
   :group 'claude-mcp)
 
 (defface claude-mcp-prompt-hint-face
-  '(((class color) (background dark))
+  '((((class color) (background dark))
      (:foreground "#5c6370" :slant italic))
-    ((class color) (background light))
+    (((class color) (background light))
      (:foreground "#a0a1a7" :slant italic)))
   "Face for hint text."
   :group 'claude-mcp)
@@ -2110,105 +2110,105 @@ Blocks until user makes a selection. Returns the selected option or 'cancelled'.
       (delete-file mod-file))))
 
 (defface claude-mcp-proposal-header-face
-  '(((class color) (background dark))
+  '((((class color) (background dark))
      (:foreground "#98c379" :weight bold))
-    ((class color) (background light))
+    (((class color) (background light))
      (:foreground "#50a14f" :weight bold)))
   "Face for proposal header-line (accept/reject/edit instructions)."
   :group 'claude-mcp)
 
 (defface claude-mcp-proposal-title-face
-  '(((class color) (background dark))
+  '((((class color) (background dark))
      (:foreground "#61afef" :weight bold :height 1.1))
-    ((class color) (background light))
+    (((class color) (background light))
      (:foreground "#4078f2" :weight bold :height 1.1)))
   "Face for proposal title."
   :group 'claude-mcp)
 
 (defface claude-mcp-proposal-separator-face
-  '(((class color) (background dark))
+  '((((class color) (background dark))
      (:foreground "#3e4451"))
-    ((class color) (background light))
+    (((class color) (background light))
      (:foreground "#e5e5e6")))
   "Face for proposal separator line."
   :group 'claude-mcp)
 
 (defface claude-mcp-lock-label-face
-  '(((class color) (background dark))
+  '((((class color) (background dark))
      (:background "#61afef" :foreground "#282c34" :weight bold :height 0.85))
-    ((class color) (background light))
+    (((class color) (background light))
      (:background "#4078f2" :foreground "#fafafa" :weight bold :height 0.85)))
   "Face for lock overlay labels (e.g. \" 🔒 Locked by agent \")."
   :group 'claude-mcp)
 
 (defface claude-mcp-confirm-title-face
-  '(((class color) (background dark))
+  '((((class color) (background dark))
      (:foreground "#e5c07b" :weight bold :height 1.2))
-    ((class color) (background light))
+    (((class color) (background light))
      (:foreground "#986801" :weight bold :height 1.2)))
   "Face for confirmation dialog titles."
   :group 'claude-mcp)
 
 (defface claude-mcp-confirm-body-face
-  '(((class color) (background dark))
+  '((((class color) (background dark))
      (:foreground "#abb2bf"))
-    ((class color) (background light))
+    (((class color) (background light))
      (:foreground "#383a42")))
   "Face for confirmation dialog body text."
   :group 'claude-mcp)
 
 (defface claude-mcp-confirm-separator-face
-  '(((class color) (background dark))
+  '((((class color) (background dark))
      (:foreground "#5c6370"))
-    ((class color) (background light))
+    (((class color) (background light))
      (:foreground "#a0a1a7")))
   "Face for confirmation dialog separator lines."
   :group 'claude-mcp)
 
 (defface claude-mcp-key-accept-face
-  '(((class color) (background dark))
+  '((((class color) (background dark))
      (:foreground "#98c379" :weight bold))
-    ((class color) (background light))
+    (((class color) (background light))
      (:foreground "#50a14f" :weight bold)))
   "Face for accept/yes key hints (e.g. [y], C-c C-c)."
   :group 'claude-mcp)
 
 (defface claude-mcp-key-reject-face
-  '(((class color) (background dark))
+  '((((class color) (background dark))
      (:foreground "#e06c75" :weight bold))
-    ((class color) (background light))
+    (((class color) (background light))
      (:foreground "#e45649" :weight bold)))
   "Face for reject/no key hints (e.g. [n], C-c C-k)."
   :group 'claude-mcp)
 
 (defface claude-mcp-multiselect-unchecked-face
-  '(((class color) (background dark))
+  '((((class color) (background dark))
      (:foreground "#5c6370"))
-    ((class color) (background light))
+    (((class color) (background light))
      (:foreground "#a0a1a7")))
   "Face for unchecked items in multiselect dialogs."
   :group 'claude-mcp)
 
 (defface claude-mcp-multiselect-checked-face
-  '(((class color) (background dark))
+  '((((class color) (background dark))
      (:foreground "#98c379" :weight bold))
-    ((class color) (background light))
+    (((class color) (background light))
      (:foreground "#50a14f" :weight bold)))
   "Face for checked items in multiselect dialogs."
   :group 'claude-mcp)
 
 (defface claude-mcp-picker-path-face
-  '(((class color) (background dark))
+  '((((class color) (background dark))
      (:foreground "#5c6370"))
-    ((class color) (background light))
+    (((class color) (background light))
      (:foreground "#a0a1a7")))
   "Face for directory paths in file/dir picker dialogs."
   :group 'claude-mcp)
 
 (defface claude-mcp-picker-item-face
-  '(((class color) (background dark))
+  '((((class color) (background dark))
      (:foreground "#abb2bf"))
-    ((class color) (background light))
+    (((class color) (background light))
      (:foreground "#383a42")))
   "Face for items in file/dir picker dialogs."
   :group 'claude-mcp)
