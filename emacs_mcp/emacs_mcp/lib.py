@@ -99,6 +99,49 @@ class BashCommandTracker:
 # Global command tracker instance
 command_tracker = BashCommandTracker()
 
+
+class AsyncToolTracker:
+    """Track in-flight async elisp tool calls and their completion events.
+
+    Mirrors BashCommandTracker but for elisp tools that POST results
+    back via /async-tool-result when done.
+
+    Lifecycle:
+      1. register(task_id) — creates an asyncio.Event, returns it
+      2. Emacs tool runs async, POSTs to /async-tool-result on completion
+      3. complete(task_id, result) — stores result, sets the Event
+      4. get_result(task_id) — returns result dict, cleans up tracking
+    """
+    def __init__(self):
+        self.tasks: dict[str, asyncio.Event] = {}
+        self.results: dict[str, dict] = {}
+
+    def register(self, task_id: str) -> asyncio.Event:
+        """Register a task, return Event to await."""
+        event = asyncio.Event()
+        self.tasks[task_id] = event
+        return event
+
+    def complete(self, task_id: str, result: str, is_error: bool = False):
+        """Mark task complete with result, wake awaiting coroutine."""
+        self.results[task_id] = {
+            'result': result,
+            'is_error': is_error,
+            'timestamp': time.time(),
+        }
+        if task_id in self.tasks:
+            self.tasks[task_id].set()
+
+    def get_result(self, task_id: str) -> dict | None:
+        """Get result and clean up tracking state."""
+        result = self.results.pop(task_id, None)
+        self.tasks.pop(task_id, None)
+        return result
+
+
+# Global async tool tracker instance
+async_tool_tracker = AsyncToolTracker()
+
 # Global HTTP server port (set by server.py after starting HTTP server)
 http_server_port: int | None = None
 

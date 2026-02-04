@@ -2969,5 +2969,238 @@ Includes both elisp-defined tools and native Python tools."
               (format "mcp__emacs__%s" name))
             (append elisp-tools native-tools))))
 
+
+;;;; Async Tool Infrastructure
+;;
+;; Support for async elisp tools that don't block emacsclient.
+;; Async tools receive a task-id, do work asynchronously (via timers,
+;; processes, etc.), and POST their result back to the MCP server's
+;; HTTP endpoint when done.
+;;
+;; See the design doc in the task description for full architecture.
+
+(defcustom claude-mcp-async-max-tasks 5
+  "Maximum number of concurrent async tool tasks.
+When this limit is reached, new async tool calls will return an error
+asking the agent to retry later."
+  :type 'integer
+  :group 'claude-agent)
+
+(defvar claude-mcp-async--lease-active nil
+  "Non-nil when the lease timer has been started.
+Used to ensure we only start it once per Emacs session.")
+(defvar claude-mcp-async-tasks (make-hash-table :test 'equal)
+  "Active async tasks.  Maps task-id -> plist.
+Plist keys:
+  :port       - HTTP port of the MCP server that owns this task
+  :timer      - a timer object to cancel on cleanup
+  :process    - a process object to kill on cleanup
+  :cleanup-fn - a zero-arg function for custom cleanup
+  :lease-expiry - float-time when this task's lease expires")
+
+(defvar claude-mcp-async--lease-timer nil
+  "Repeating timer that checks for expired task leases.")
+
+;;; --- Port management ---
+
+(defun claude-mcp-async-start-lease-timer ()
+  "Ensure the periodic lease-expiry checker is running.
+Called by the MCP server at startup via emacsclient.
+Safe to call multiple times; only starts the timer once."
+  (unless claude-mcp-async--lease-active
+    (claude-mcp-async--start-lease-timer)
+    (setq claude-mcp-async--lease-active t)
+    (message "claude-mcp: lease timer started"))
+  "ok")
+
+;;; --- Task registry ---
+
+(defun claude-mcp-async-register (task-id &rest props)
+  "Register async task TASK-ID with tracking metadata PROPS.
+PROPS is a plist that can include:
+  :port       - HTTP port of the MCP server (REQUIRED for callbacks)
+  :timer      - a timer object to cancel on cleanup
+  :process    - a process object to kill on cleanup
+  :cleanup-fn - a zero-arg function for custom cleanup
+  :timeout    - timeout in seconds (used to compute lease expiry)
+
+The lease expiry is automatically set to 2 * :timeout from now,
+providing a safety net if the MCP server dies."
+  (unless (plist-get props :port)
+    (error "claude-mcp-async-register: :port is required for task %s" task-id))
+  (let* ((timeout (or (plist-get props :timeout) 120))
+         (lease-expiry (+ (float-time) (* 2 timeout))))
+    (puthash task-id (plist-put props :lease-expiry lease-expiry)
+             claude-mcp-async-tasks)))
+
+(defun claude-mcp-async-task-count ()
+  "Return the number of active async tasks."
+  (hash-table-count claude-mcp-async-tasks))
+
+;;; --- Completion callbacks ---
+
+(defun claude-mcp-async-complete (task-id result)
+  "Post successful RESULT for TASK-ID back to the MCP server.
+Removes the task from the registry after posting."
+  (let ((port (plist-get (gethash task-id claude-mcp-async-tasks) :port)))
+    (claude-mcp-async--post port `((task_id . ,task-id)
+                                    (result . ,result)
+                                    (status . "ok")))
+    (claude-mcp-async--cleanup task-id)))
+
+(defun claude-mcp-async-error (task-id error-message)
+  "Post an error for TASK-ID back to the MCP server.
+ERROR-MESSAGE is sent as-is.  The MCP server surfaces this as
+is_error: true to the agent."
+  (let ((port (plist-get (gethash task-id claude-mcp-async-tasks) :port)))
+    (claude-mcp-async--post port `((task_id . ,task-id)
+                                    (error . ,error-message)
+                                    (status . "error")))
+    (claude-mcp-async--cleanup task-id)))
+
+(defun claude-mcp-async--post (port payload)
+  "POST PAYLOAD as JSON to the MCP server on PORT.
+Uses `url-retrieve' (async) so we don't block Emacs if the server
+is slow.  PORT is the HTTP port of the specific MCP server instance
+that owns this task."
+  (if (not port)
+      (message "claude-mcp: WARNING — no port for async task, cannot post result")
+    (let* ((url-request-method "POST")
+           (url-request-extra-headers '(("Content-Type" . "application/json")))
+           (url-request-data (encode-coding-string (json-encode payload) 'utf-8))
+           (url (format "http://localhost:%d/async-tool-result" port)))
+      ;; Fire-and-forget — kill the response buffer on completion
+      (url-retrieve url
+                    (lambda (_status)
+                      (when (buffer-live-p (current-buffer))
+                        (kill-buffer (current-buffer))))
+                    nil t t))))
+
+;;; --- Cancellation ---
+
+(defun claude-mcp-async-cancel (task-id)
+  "Cancel async task TASK-ID.
+Cleans up timer/process and removes from registry.
+Called by the MCP server on timeout or agent abort."
+  (let ((props (gethash task-id claude-mcp-async-tasks)))
+    (if (not props)
+        (message "claude-mcp: WARNING — cancel called for unknown task %s \
+(tool may have forgotten to call claude-mcp-async-register)" task-id)
+      ;; Cancel timer if any
+      (when-let ((timer (plist-get props :timer)))
+        (when (timerp timer) (cancel-timer timer)))
+      ;; Kill process if any
+      (when-let ((proc (plist-get props :process)))
+        (when (process-live-p proc) (kill-process proc)))
+      ;; Run custom cleanup
+      (when-let ((cleanup-fn (plist-get props :cleanup-fn)))
+        (ignore-errors (funcall cleanup-fn)))
+      (claude-mcp-async--cleanup task-id)
+      (message "claude-mcp: cancelled async task %s" task-id)))
+  "ok")
+
+(defun claude-mcp-async-cancel-all ()
+  "Cancel all active async tasks.
+Called on MCP server startup to clean up orphans from a previous session."
+  (let ((count (hash-table-count claude-mcp-async-tasks))
+        task-ids)
+    (when (> count 0)
+      (message "claude-mcp: cancelling %d orphan async task(s)" count))
+    ;; Collect IDs first — modifying a hash table during maphash is undefined
+    (maphash (lambda (task-id _props) (push task-id task-ids))
+             claude-mcp-async-tasks)
+    (dolist (task-id task-ids)
+      (claude-mcp-async-cancel task-id))
+    (clrhash claude-mcp-async-tasks))
+  "ok")
+
+(defun claude-mcp-async--cleanup (task-id)
+  "Remove TASK-ID from the async task registry."
+  (remhash task-id claude-mcp-async-tasks))
+
+;;; --- Lease / heartbeat timer ---
+;;
+;; If the MCP server dies while an async task is running, the HTTP
+;; callback will fail and the task becomes a zombie.  The lease timer
+;; periodically checks for tasks whose lease has expired and cancels
+;; them.  Lease expiry is set to 2 * timeout when the task is
+;; registered.
+
+(defun claude-mcp-async--start-lease-timer ()
+  "Start the periodic lease-expiry checker (every 10 seconds)."
+  (when (and claude-mcp-async--lease-timer
+             (timerp claude-mcp-async--lease-timer))
+    (cancel-timer claude-mcp-async--lease-timer))
+  (setq claude-mcp-async--lease-timer
+        (run-with-timer 10 10 #'claude-mcp-async--check-leases)))
+
+(defun claude-mcp-async--check-leases ()
+  "Cancel any async tasks whose lease has expired."
+  (let ((now (float-time))
+        expired)
+    (maphash
+     (lambda (task-id props)
+       (when-let ((expiry (plist-get props :lease-expiry)))
+         (when (> now expiry)
+           (push task-id expired))))
+     claude-mcp-async-tasks)
+    (dolist (task-id expired)
+      (message "claude-mcp: lease expired for task %s — cancelling (MCP server may have died)"
+               task-id)
+      ;; Post an error back in case the server is actually still alive.
+      ;; async-error also calls --cleanup, so the task is removed from
+      ;; the registry.  If the POST itself fails, ignore-errors ensures
+      ;; we don't crash the lease timer.
+      (ignore-errors
+        (claude-mcp-async-error task-id
+          "Task lease expired — MCP server may have died"))
+      ;; Defensive: ensure cleanup even if async-error failed before reaching it
+      (remhash task-id claude-mcp-async-tasks))))
+
+;;; --- Debugging ---
+
+(defun claude-mcp-async-list ()
+  "Return a list of (task-id . props) for all active async tasks.
+Useful for debugging."
+  (let (result)
+    (maphash (lambda (id props) (push (cons id props) result))
+             claude-mcp-async-tasks)
+    (nreverse result)))
+
+;;; --- Proof-of-concept async tool ---
+
+(defun claude-mcp-async-eval--handler (task-id server-port expression)
+  "Evaluate EXPRESSION asynchronously via `run-with-timer'.
+TASK-ID is the MCP server's tracking identifier.
+SERVER-PORT is the HTTP port of the MCP server for posting results.
+The result is posted back to the MCP server when evaluation completes."
+  (let ((timer (run-with-timer 0.01 nil
+                 (lambda ()
+                   (condition-case err
+                       (let* ((result (eval (car (read-from-string expression)) t))
+                              (result-str (if (stringp result)
+                                              result
+                                            (prin1-to-string result))))
+                         (claude-mcp-async-complete task-id result-str))
+                     (error
+                      (claude-mcp-async-error task-id
+                        (error-message-string err))))))))
+    (claude-mcp-async-register task-id
+                               :port server-port
+                               :timer timer
+                               :timeout 30))
+  :async-started)
+
+(claude-mcp-deftool async-eval
+  "[EXECUTE] Evaluate an Emacs Lisp expression asynchronously without blocking.
+Use this for expressions that may take a while (e.g., compilation, process
+execution, interactive prompts).  The result is returned when evaluation
+completes.  For quick expressions, prefer the synchronous `eval' tool."
+  :async t
+  :timeout 30
+  :function #'claude-mcp-async-eval--handler
+  :safe nil
+  :args ((expression string :required "The Emacs Lisp expression to evaluate")))
+
 (provide 'claude-mcp)
 ;;; claude-mcp.el ends here

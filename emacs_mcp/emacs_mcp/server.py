@@ -9,6 +9,7 @@ import asyncio
 import json
 import os
 import sys
+import uuid
 from pathlib import Path
 
 import yaml
@@ -284,8 +285,17 @@ def substitute_variables(template: str, args: dict, arg_defs: dict) -> str:
     return result
 
 
-def build_elisp_from_spec(elisp_spec, args: dict, arg_defs: dict) -> str:
-    """Build elisp expression from various spec formats."""
+def build_elisp_from_spec(elisp_spec, args: dict, arg_defs: dict,
+                          prepend_args: list[str] | None = None) -> str:
+    """Build elisp expression from various spec formats.
+
+    Args:
+        elisp_spec: Function name, template string, list, or dict spec.
+        args: Tool arguments from the MCP call.
+        arg_defs: Tool argument definitions.
+        prepend_args: Optional list of pre-formatted elisp strings to insert
+            before normal arguments (used for async task-id injection).
+    """
     if isinstance(elisp_spec, str):
         # Simple function name or template string
         if "{{" in elisp_spec or "$" in elisp_spec:
@@ -293,7 +303,8 @@ def build_elisp_from_spec(elisp_spec, args: dict, arg_defs: dict) -> str:
             return substitute_variables(elisp_spec, args, arg_defs)
         else:
             # It's a simple function name, use old behavior
-            return build_elisp_call(elisp_spec, args, arg_defs)
+            return build_elisp_call(elisp_spec, args, arg_defs,
+                                    prepend_args=prepend_args)
 
     elif isinstance(elisp_spec, list):
         # List format: ["progn", ["message", "{{msg}}"], ["sit-for", 1]]
@@ -305,10 +316,12 @@ def build_elisp_from_spec(elisp_spec, args: dict, arg_defs: dict) -> str:
             return substitute_variables(elisp_spec["template"], args, arg_defs)
         elif "function" in elisp_spec:
             # Traditional function call
-            return build_elisp_call(elisp_spec["function"], args, arg_defs)
+            return build_elisp_call(elisp_spec["function"], args, arg_defs,
+                                    prepend_args=prepend_args)
 
     # Fallback to old behavior
-    return build_elisp_call(str(elisp_spec), args, arg_defs)
+    return build_elisp_call(str(elisp_spec), args, arg_defs,
+                            prepend_args=prepend_args)
 
 
 def build_elisp_from_list(spec_list: list, args: dict, arg_defs: dict) -> str:
@@ -369,15 +382,28 @@ def build_elisp_from_list(spec_list: list, args: dict, arg_defs: dict) -> str:
     return f"({' '.join(result_parts)})"
 
 
-def build_elisp_call(elisp_fn: str, args: dict, arg_defs: dict) -> str:
-    """Build an elisp function call from tool arguments (legacy format)."""
+def build_elisp_call(elisp_fn: str, args: dict, arg_defs: dict,
+                     prepend_args: list[str] | None = None) -> str:
+    """Build an elisp function call from tool arguments (legacy format).
+
+    Args:
+        elisp_fn: The elisp function name.
+        args: Tool arguments from the MCP call.
+        arg_defs: Tool argument definitions.
+        prepend_args: Optional list of pre-formatted elisp strings to insert
+            before normal arguments (used for async task-id injection).
+    """
+    # Start with any prepended args (e.g., task-id for async tools)
+    elisp_args = list(prepend_args) if prepend_args else []
+
     if not arg_defs:
+        if elisp_args:
+            return f"({elisp_fn} {' '.join(elisp_args)})"
         return f"({elisp_fn})"
 
     # Build argument list in definition order
     # We need to handle optional args carefully - if a later arg is provided,
     # we need to pass nil for earlier optional args to maintain positional order
-    elisp_args = []
     arg_names = list(arg_defs.keys())
 
     # Find the last provided argument
@@ -627,9 +653,26 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                         if isinstance(path_val, str) and (path_val.endswith("/") or not "." in os.path.basename(path_val)):
                             context_dir = path_val
 
+        # Check if this is an async tool
+        is_async = tool_def.get("async", False)
+        task_id = str(uuid.uuid4()) if is_async else None
+
         # Special case for eval_elisp - pass expression directly
         if elisp_fn == "eval" and "expression" in arguments:
             elisp_expr = arguments["expression"]
+            is_async = False  # eval_elisp is never async
+        elif is_async:
+            # For async tools, prepend task-id and server port as first two arguments
+            assert task_id is not None
+            elisp_expr = build_elisp_from_spec(
+                elisp_fn,
+                arguments,
+                tool_def.get("args", {}),
+                prepend_args=[
+                    f'"{escape_elisp_string(task_id)}"',
+                    str(lib.http_server_port),
+                ],
+            )
         else:
             elisp_expr = build_elisp_from_spec(
                 elisp_fn,
@@ -656,6 +699,76 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             elif session_cwd:
                 elisp_expr = wrap_with_context(elisp_expr, cwd=session_cwd)
 
+        # --- Async tool dispatch ---
+        if is_async:
+            assert task_id is not None  # guaranteed by is_async branch above
+            tool_timeout = tool_def.get("timeout")
+            if tool_timeout is None:
+                raise RuntimeError(
+                    f"Async tool '{name}' has no timeout configured. "
+                    f"This is a bug — all async tools must declare :timeout.")
+
+            # Check concurrent task limit
+            max_tasks_result = await lib.call_emacs_async(
+                '(claude-mcp-async-task-count)', timeout=5)
+            try:
+                active_count = int(max_tasks_result)
+            except (ValueError, TypeError):
+                active_count = 0
+            max_tasks_result = await lib.call_emacs_async(
+                '(symbol-value \'claude-mcp-async-max-tasks)', timeout=5)
+            try:
+                max_tasks = int(max_tasks_result)
+            except (ValueError, TypeError):
+                max_tasks = 5
+            if active_count >= max_tasks:
+                return [TextContent(
+                    type="text",
+                    text=f"Error: Too many concurrent async tasks "
+                         f"({active_count}/{max_tasks}). "
+                         f"Please wait for some to complete and retry.")]
+
+            # Register before calling elisp so the event exists when callback arrives
+            event = lib.async_tool_tracker.register(task_id)
+
+            # Call elisp — the tool should return :async-started quickly
+            startup_result = await lib.call_emacs_async(elisp_expr, timeout=10)
+
+            # Unescape if needed
+            if startup_result.startswith('"') and startup_result.endswith('"'):
+                startup_result = lib.unescape_elisp_string(startup_result)
+
+            # Fast path: tool completed synchronously despite being async-capable
+            if startup_result != ":async-started":
+                lib.async_tool_tracker.get_result(task_id)  # clean up unused registration
+                return [TextContent(type="text", text=startup_result)]
+
+            # Slow path: wait for HTTP callback from Emacs
+            try:
+                await asyncio.wait_for(event.wait(), timeout=tool_timeout)
+            except asyncio.TimeoutError:
+                lib.async_tool_tracker.get_result(task_id)  # clean up
+                # Tell Emacs to cancel the task
+                try:
+                    await lib.call_emacs_async(
+                        f'(claude-mcp-async-cancel "{escape_elisp_string(task_id)}")',
+                        timeout=5)
+                except Exception:
+                    pass  # Best-effort cancel
+                return [TextContent(
+                    type="text",
+                    text=f"Error: Async tool '{name}' timed out after {tool_timeout}s")]
+
+            result_data = lib.async_tool_tracker.get_result(task_id)
+            if result_data and result_data.get('is_error'):
+                return [TextContent(
+                    type="text",
+                    text=f"Error: {result_data['result']}")]
+            return [TextContent(
+                type="text",
+                text=result_data['result'] if result_data else "")]
+
+        # --- Sync tool dispatch (existing path) ---
         result = await lib.call_emacs_async(elisp_expr)
 
         # Unescape string results
@@ -692,6 +805,34 @@ async def bash_command_callback(request):
         return web.json_response({'error': str(e)}, status=500)
 
 
+async def async_tool_result_callback(request):
+    """HTTP endpoint: POST /async-tool-result
+
+    Receives completion from elisp async tools.
+    Payload: {"task_id": "xxx", "result": "...", "status": "ok"}
+         or: {"task_id": "xxx", "error": "...", "status": "error"}
+    """
+    try:
+        data = await request.json()
+        task_id = data.get('task_id')
+        if not task_id:
+            return web.json_response({'error': 'task_id required'}, status=400)
+
+        status = data.get('status', 'ok')
+        if status == 'error':
+            lib.async_tool_tracker.complete(
+                task_id, data.get('error', 'Unknown error'), is_error=True)
+        else:
+            lib.async_tool_tracker.complete(
+                task_id, data.get('result', ''))
+
+        return web.json_response({'status': 'ok'})
+
+    except Exception as e:
+        print(f"Error in async_tool_result_callback: {e}", file=sys.stderr)
+        return web.json_response({'error': str(e)}, status=500)
+
+
 async def start_http_server():
     """Start HTTP server on random available port.
 
@@ -699,6 +840,7 @@ async def start_http_server():
     """
     http_app = web.Application()
     http_app.router.add_post('/bash-command', bash_command_callback)
+    http_app.router.add_post('/async-tool-result', async_tool_result_callback)
 
     runner = web.AppRunner(http_app)
     await runner.setup()
@@ -726,12 +868,29 @@ async def main():
     # Load tools on startup
     await load_tools_async()
 
-    # Start HTTP server for bash command callbacks
+    # Start HTTP server for bash command callbacks and async tool results
     http_port, http_runner = await start_http_server()
     print(f"HTTP server listening on localhost:{http_port}", file=sys.stderr, flush=True)
 
     # Store port in lib for use by bash_async
     lib.http_server_port = http_port
+
+    # Ensure the lease timer is running in Emacs (safe to call multiple times)
+    try:
+        await lib.call_emacs_async(
+            '(claude-mcp-async-start-lease-timer)', timeout=5)
+        print(f"Async lease timer started in Emacs",
+              file=sys.stderr, flush=True)
+    except Exception as e:
+        print(f"Warning: Could not start async lease timer: {e}",
+              file=sys.stderr, flush=True)
+
+    # Clean up any orphan async tasks from a previous MCP server session
+    try:
+        await lib.call_emacs_async('(claude-mcp-async-cancel-all)', timeout=5)
+    except Exception as e:
+        print(f"Warning: Could not clean up orphan async tasks: {e}",
+              file=sys.stderr, flush=True)
 
     try:
         # Run stdio MCP server (this blocks until server exits)
