@@ -574,7 +574,9 @@ a distinct 🚫 indicator instead of the normal ✗ error icon.")
 ;;;; Buffer-local variables - Message queue
 
 (defvar-local claude-agent--message-queue nil
-  "List of messages queued while agent is busy. Each is a string.")
+  "List of messages queued while agent is busy.
+Each is a string.  Messages are appended to the end (FIFO order)
+and sent from the front when the agent becomes ready.")
 
 ;;;; Buffer-local variables - System message hooks state
 
@@ -592,9 +594,17 @@ Used by on_start/on_resume hooks to determine if they should fire.")
   :group 'claude-agent)
 
 (defface claude-agent-queued-header-face
-  '((t :foreground "#5c6370" :slant italic))
+  '((t :foreground "#5c6370" :weight bold))
   "Face for queued message headers."
   :group 'claude-agent)
+
+(defface claude-agent-queue-highlight-face
+  '((t :background "#3e4451"))
+  "Face for highlighting the queued message under the cursor."
+  :group 'claude-agent)
+
+(defvar-local claude-agent--queue-highlight-overlay nil
+  "Overlay used to highlight the queued message at point.")
 
 ;;;; Mode definition
 
@@ -605,6 +615,7 @@ Used by on_start/on_resume hooks to determine if they should fire.")
     (define-key map (kbd "C-<return>") #'claude-agent-send)
     (define-key map (kbd "C-c C-k") #'claude-agent-interrupt)
     (define-key map (kbd "C-c C-q") #'claude-agent-quit)
+    (define-key map (kbd "C-c C-d") #'claude-agent-queue-delete)
     (define-key map (kbd "M-p") #'claude-agent-previous-input)
     (define-key map (kbd "M-n") #'claude-agent-next-input)
     ;; Transient menu (C-c c for "claude")
@@ -1025,7 +1036,9 @@ and switches keymaps based on cursor position."
   ;; Switch keymaps based on position (magit-style in log area)
   (claude-agent--update-keymap)
   ;; Update tool result popup
-  (claude-agent--update-tool-popup))
+  (claude-agent--update-tool-popup)
+  ;; Update queue item highlight
+  (claude-agent--update-queue-highlight))
 
 ;;;; Section management
 ;;
@@ -1131,16 +1144,28 @@ This is a convenience wrapper for `append-to-log' without styling."
 Clears everything after static-end-marker and re-renders from state.
 Handles different input modes: text input vs permission prompt."
   (let* ((inhibit-read-only t)
-         ;; Only save cursor offset if in text mode
-         (cursor-offset (when (and (eq claude-agent--input-mode 'text)
-                                   claude-agent--input-start-marker
-                                   (marker-position claude-agent--input-start-marker)
-                                   (>= (point) claude-agent--input-start-marker))
+         ;; Track where the cursor is so we can restore it
+         (in-input (and (eq claude-agent--input-mode 'text)
+                        claude-agent--input-start-marker
+                        (marker-position claude-agent--input-start-marker)
+                        (>= (point) claude-agent--input-start-marker)))
+         ;; Save cursor offset relative to input-start (if in input area)
+         (cursor-offset (when in-input
                           (- (point) claude-agent--input-start-marker)))
+         ;; Save cursor offset relative to static-end (if in dynamic section)
+         (dynamic-offset (when (and (not in-input)
+                                    claude-agent--static-end-marker
+                                    (marker-position claude-agent--static-end-marker)
+                                    (>= (point) claude-agent--static-end-marker))
+                           (- (point) claude-agent--static-end-marker)))
          ;; Only capture input if in text mode (permission mode uses saved-input)
          (input-to-restore (if (eq claude-agent--input-mode 'text)
                                (claude-agent--get-input-text)
                              "")))
+    ;; Clear queue highlight overlay (will be recreated by post-command-hook)
+    (when claude-agent--queue-highlight-overlay
+      (delete-overlay claude-agent--queue-highlight-overlay)
+      (setq claude-agent--queue-highlight-overlay nil))
     ;; Clear overlays in dynamic section
     (when (and claude-agent--static-end-marker
                (marker-position claude-agent--static-end-marker))
@@ -1169,11 +1194,18 @@ Handles different input modes: text input vs permission prompt."
        ;; Update read-only and placeholder
        (claude-agent--update-read-only)
        (claude-agent--update-placeholder)
-       ;; Restore cursor position within input area
-       (if (and cursor-offset (>= cursor-offset 0))
-           (goto-char (min (+ claude-agent--input-start-marker cursor-offset)
-                           (point-max)))
-         (goto-char claude-agent--input-start-marker))
+       ;; Restore cursor position
+       (cond
+        ;; Cursor was in input area — restore relative to input-start
+        ((and cursor-offset (>= cursor-offset 0))
+         (goto-char (min (+ claude-agent--input-start-marker cursor-offset)
+                         (point-max))))
+        ;; Cursor was in dynamic section — restore relative to static-end
+        ((and dynamic-offset (>= dynamic-offset 0))
+         (goto-char (min (+ claude-agent--static-end-marker dynamic-offset)
+                         (1- (marker-position claude-agent--input-start-marker)))))
+        ;; Fallback — go to input
+        (t (goto-char claude-agent--input-start-marker)))
        ;; Scroll to show maximum content - put input near bottom
        (claude-agent--scroll-to-bottom))
 
@@ -1318,17 +1350,25 @@ Called by `render-dynamic-section'. Assumes point is positioned correctly."
           (claude-agent--apply-face start (point) face)))))
 
   ;; === Queued messages (if any) ===
+  ;; Rendered like dimmed user messages ("you>" but grayed out).
+  ;; Each message region gets a `claude-queue-index' text property so that
+  ;; `claude-agent-queue-delete' can identify which item the cursor is on.
+  ;; Cursor-sensitive highlighting is handled by `claude-agent--update-queue-highlight'.
   (when claude-agent--message-queue
-    (dolist (msg (reverse claude-agent--message-queue))
-      (let ((msg-start (point)))
-        (insert "\n┄┄┄ Queued ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n")
-        (claude-agent--apply-face msg-start (point) 'claude-agent-queued-header-face)
-        (setq msg-start (point))
-        (let ((lines (split-string msg "\n")))
-          (dolist (line lines)
-            (insert "  " line "\n")))
-        (claude-agent--apply-face msg-start (point) 'claude-agent-queued-face))))
-
+    (let ((queue-index 0))
+      (dolist (msg claude-agent--message-queue)
+        (let ((region-start (point)))
+          ;; Header — mirrors "you> " but dimmed
+          (let ((hdr-start (point)))
+            (insert "you> ")
+            (claude-agent--apply-face hdr-start (point) 'claude-agent-queued-header-face))
+          ;; Message body
+          (let ((body-start (point)))
+            (insert msg "\n")
+            (claude-agent--apply-face body-start (point) 'claude-agent-queued-face))
+          ;; Tag the whole region with the queue index for cursor-based deletion
+          (put-text-property region-start (point) 'claude-queue-index queue-index)
+          (setq queue-index (1+ queue-index))))))
   ;; === Status info line ===
   (let* ((model (or (plist-get claude-agent--session-info :model) "..."))
          (cost (or (plist-get claude-agent--session-info :cost) 0))
@@ -2705,13 +2745,85 @@ Optional ADDITIONAL-ALLOWED-TOOLS is a list of extra tools to pre-authorize."
   (claude-agent--render-dynamic-section))
 
 (defun claude-agent--send-next-queued ()
-  "Send the next queued message if any and not busy."
+  "Send all queued messages at once when the agent becomes ready.
+Concatenates all queued messages (FIFO order) into a single message
+separated by blank lines, then dispatches it as one user message.
+This avoids the problem of each queued message being interrupted
+individually."
   (when (and claude-agent--message-queue
              (not (claude-agent--is-busy-p))
              claude-agent--process
              (process-live-p claude-agent--process))
-    (let ((msg (pop claude-agent--message-queue)))
-      (claude-agent--dispatch-user-message msg))))
+    (let ((combined (mapconcat #'identity claude-agent--message-queue "\n\n")))
+      (setq claude-agent--message-queue nil)
+      (claude-agent--dispatch-user-message combined))))
+
+(defun claude-agent--queue-index-at-point ()
+  "Return the queue index of the queued message at point, or nil."
+  (get-text-property (point) 'claude-queue-index))
+
+(defun claude-agent--queue-region-bounds (pos)
+  "Return (BEG . END) of the queue item region at POS, or nil.
+Finds the contiguous region sharing the same `claude-queue-index' property."
+  (when-let ((idx (get-text-property pos 'claude-queue-index)))
+    (let ((beg pos) (end pos))
+      ;; Walk backward to find start of this queue item
+      (while (and (> beg (point-min))
+                  (eql (get-text-property (1- beg) 'claude-queue-index) idx))
+        (setq beg (1- beg)))
+      ;; Walk forward to find end of this queue item
+      (while (and (< end (point-max))
+                  (eql (get-text-property end 'claude-queue-index) idx))
+        (setq end (1+ end)))
+      (cons beg end))))
+
+(defun claude-agent--update-queue-highlight ()
+  "Update the queue highlight overlay based on cursor position.
+Called from `post-command-hook'.  When point is on a queued message,
+highlights the entire message region; otherwise removes the highlight."
+  (when (eq major-mode 'claude-agent-mode)
+    (condition-case nil
+        (let ((bounds (claude-agent--queue-region-bounds (point))))
+          (if bounds
+              (if claude-agent--queue-highlight-overlay
+                  ;; Move existing overlay
+                  (move-overlay claude-agent--queue-highlight-overlay
+                                (car bounds) (cdr bounds))
+                ;; Create new overlay
+                (setq claude-agent--queue-highlight-overlay
+                      (make-overlay (car bounds) (cdr bounds)))
+                (overlay-put claude-agent--queue-highlight-overlay
+                             'face 'claude-agent-queue-highlight-face)
+                (overlay-put claude-agent--queue-highlight-overlay
+                             'evaporate t))
+            ;; No queue item at point — remove overlay
+            (when claude-agent--queue-highlight-overlay
+              (delete-overlay claude-agent--queue-highlight-overlay)
+              (setq claude-agent--queue-highlight-overlay nil))))
+      ;; Silently ignore errors to prevent buffer corruption
+      (error
+       (when claude-agent--queue-highlight-overlay
+         (delete-overlay claude-agent--queue-highlight-overlay)
+         (setq claude-agent--queue-highlight-overlay nil))))))
+
+(defun claude-agent-queue-delete ()
+  "Delete the queued message at point (C-c C-d).
+Move cursor to a queued message in the dynamic section to delete it."
+  (interactive)
+  ;; Capture the queue index at point BEFORE switching to base buffer,
+  ;; since `with-current-buffer' changes point to the base buffer's point.
+  (let ((index (claude-agent--queue-index-at-point)))
+    (claude-agent--in-base-buffer
+     (if (null index)
+         (message "No queued message at point (move cursor to a queued message)")
+       (let* ((msg (nth index claude-agent--message-queue))
+              (preview (truncate-string-to-width
+                        (replace-regexp-in-string "\n" " " msg) 50)))
+         (setq claude-agent--message-queue
+               (append (seq-take claude-agent--message-queue index)
+                       (seq-drop claude-agent--message-queue (1+ index))))
+         (claude-agent--render-dynamic-section)
+         (message "Deleted: \"%s\"" preview))))))
 
 (defun claude-agent-send ()
   "Send the current input to Claude, or queue if busy."
@@ -2733,7 +2845,8 @@ Optional ADDITIONAL-ALLOWED-TOOLS is a list of extra tools to pre-authorize."
          ;; If busy, queue the message; otherwise send directly
          (if (claude-agent--is-busy-p)
              (progn
-               (push input claude-agent--message-queue)
+               (setq claude-agent--message-queue
+                     (append claude-agent--message-queue (list input)))
                (claude-agent--render-dynamic-section)
                (message "Message queued (agent is busy)"))
            ;; Dispatch with hook evaluation

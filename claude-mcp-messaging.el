@@ -30,10 +30,31 @@
 (declare-function claude-agent-run "claude-agent-repl")
 
 ;;;; Message Queue System
+;;
+;; There are two distinct queue systems that serve different purposes:
+;;
+;; 1. `claude-mcp-message-queues' (this file, global hash table):
+;;    The inter-agent INBOX.  Stores messages from other agents so the
+;;    recipient can retrieve them later via the `check_messages' MCP tool.
+;;    This is a persistent record of received messages.
+;;
+;; 2. `claude-agent--message-queue' (claude-agent-repl.el, buffer-local):
+;;    The DELIVERY queue.  When a message needs to be sent to the Claude
+;;    process but the agent is busy (thinking/waiting for permissions),
+;;    the message is queued here and automatically delivered when the
+;;    agent becomes ready.  Messages are in FIFO order.
+;;
+;; When `claude-mcp-message-agent' sends a message, it adds to BOTH:
+;; - The MCP inbox (so the agent can retrieve it via check_messages)
+;; - The repl delivery queue (so it gets delivered to the process)
+;; This dual-queue approach is intentional: the inbox is the persistent
+;; record, the delivery queue handles timing.
 
 (defvar claude-mcp-message-queues (make-hash-table :test 'equal)
-  "Hash table mapping buffer names to message queues.
-Each queue is a list of plists with keys: :message, :sender, :timestamp.")
+  "Hash table mapping buffer names to inter-agent message inboxes.
+Each queue is a list of plists with keys: :message, :sender, :timestamp.
+This is distinct from `claude-agent--message-queue' (the delivery queue);
+see the commentary above for the relationship between the two systems.")
 
 (defun claude-mcp-message-queue-add (buffer-name message sender)
   "Add MESSAGE from SENDER to the queue for BUFFER-NAME.
@@ -236,15 +257,17 @@ Designed to be called via MCP by Claude AI."
       ;; Log to message board
       (claude-mcp-message-board-log sender buffer-name message)
 
-      ;; Deliver the message to the agent's repl
+      ;; Deliver the message to the agent's repl queue system directly.
+      ;; We never manipulate the buffer -- we go through the queue or dispatch.
       (let ((formatted-message (format "[From %s]: %s" sender message)))
         (with-current-buffer buffer-name
           (if (claude-agent--is-busy-p)
-              ;; Agent is busy -- push onto repl-level queue for later delivery
+              ;; Agent is busy -- append to repl-level queue (FIFO) for later delivery
               (progn
-                (push formatted-message claude-agent--message-queue)
+                (setq claude-agent--message-queue
+                      (append claude-agent--message-queue (list formatted-message)))
                 (claude-agent--render-dynamic-section))
-            ;; Agent is idle -- deliver immediately
+            ;; Agent is idle -- deliver immediately via dispatch
             (claude-agent--dispatch-user-message formatted-message))))
 
       (format "Message sent to %s from %s (%d message%s in MCP queue)."
