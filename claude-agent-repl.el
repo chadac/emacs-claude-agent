@@ -2281,6 +2281,21 @@ If VIRTUAL-INDENT is non-nil, apply it as line-prefix/wrap-prefix."
     ("session_message_end"
      (setq claude-agent--parse-state nil))
 
+    ;; Retry status - transient error being retried
+    ("retry_status"
+     (let ((attempt (cdr (assq 'attempt msg)))
+           (max-retries (cdr (assq 'max_retries msg)))
+           (error-detail (cdr (assq 'error msg)))
+           (delay (cdr (assq 'delay_seconds msg))))
+       (let ((retry-msg (format "⟳ Transient error, retrying (%s/%s) in %ss: %s"
+                                attempt max-retries delay error-detail)))
+         (claude-agent--append-to-log
+          (format "\n%s\n" retry-msg)
+          'claude-agent-session-face)
+         (message "Claude agent: %s" retry-msg)
+         (claude-agent--set-thinking
+          (format "Retrying (%s/%s) in %ss..." attempt max-retries delay)))))
+
     ;; Error
     ("error"
      (let ((message-text (cdr (assq 'message msg)))
@@ -2829,6 +2844,9 @@ Optional ADDITIONAL-ALLOWED-TOOLS is a list of extra tools to pre-authorize."
           (with-temp-file reject-file
             (insert (json-encode rules)))
           (setq args (append args (list "--auto-reject-config" reject-file))))))
+    ;; Pass max-retries for transient API error handling
+    (setq args (append args (list "--max-retries"
+                                  (number-to-string claude-max-retries))))
     ;; System message hooks are now evaluated on the Emacs side
     ;; (see claude-agent--dispatch-user-message)
     ;; Use pipe (nil) instead of PTY to avoid focus-related buffering issues

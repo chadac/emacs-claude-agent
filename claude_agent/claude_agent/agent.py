@@ -9,6 +9,8 @@ import glob
 import io
 import json
 import os
+import random
+import re
 import sys
 import traceback
 from dataclasses import dataclass, field
@@ -154,6 +156,7 @@ class ClaudeAgent:
         system_prompt: Optional[str] = None,
         block_direct_edit: bool = True,
         auto_reject_rules: Optional[list[dict]] = None,
+        max_retries: int = 3,
     ):
         self.work_dir = work_dir
         self.mcp_config = mcp_config
@@ -170,6 +173,7 @@ class ClaudeAgent:
         self._block_direct_edit = block_direct_edit  # Block Edit/Write tools for Emacs integration
         self._auto_reject_rules = auto_reject_rules or []  # Auto-reject rules for worktree confinement
         self._first_message = True  # Track if this is the first message
+        self._max_retries = max_retries  # Max retries for transient API errors
         if log_file:
             os.makedirs(os.path.dirname(log_file), exist_ok=True)
             self._log_handle = open(log_file, "w")
@@ -711,15 +715,119 @@ class ClaudeAgent:
         self._client = ClaudeSDKClient(options=options)
         await self._client.connect()
 
+    # ── Retry helpers ──────────────────────────────────────────────────
+
+    # Patterns that indicate transient / retryable errors
+    _TRANSIENT_PATTERNS: list[re.Pattern] = [
+        re.compile(r"\b(500|502|503)\b"),          # HTTP 5xx
+        re.compile(r"\b529\b"),                     # Anthropic overloaded
+        re.compile(r"overloaded", re.IGNORECASE),
+        re.compile(r"server.error", re.IGNORECASE),
+        re.compile(r"rate.limit", re.IGNORECASE),
+        re.compile(r"\b429\b"),                     # HTTP 429 rate-limit
+        re.compile(r"too many requests", re.IGNORECASE),
+        re.compile(r"internal server error", re.IGNORECASE),
+        re.compile(r"service unavailable", re.IGNORECASE),
+        re.compile(r"bad gateway", re.IGNORECASE),
+        re.compile(r"gateway timeout", re.IGNORECASE),
+    ]
+
+    # Patterns that indicate permanent / non-retryable errors
+    _PERMANENT_PATTERNS: list[re.Pattern] = [
+        re.compile(r"\b(400|401|403|404)\b"),       # HTTP client errors
+        re.compile(r"authentication.failed", re.IGNORECASE),
+        re.compile(r"billing.error", re.IGNORECASE),
+        re.compile(r"invalid.request", re.IGNORECASE),
+        re.compile(r"permission denied", re.IGNORECASE),
+        re.compile(r"content cannot be empty", re.IGNORECASE),  # SDK bug
+    ]
+
+    def _is_transient_error(self, error_text: str, subtype: str = "") -> bool:
+        """Determine whether an error is transient (retryable).
+
+        Checks both the error text and the SDK error subtype.
+        Permanent errors are checked first — if an error matches a permanent
+        pattern it is never retried, even if it also matches a transient one.
+        """
+        combined = f"{error_text} {subtype}"
+
+        # Permanent errors are never retried
+        for pat in self._PERMANENT_PATTERNS:
+            if pat.search(combined):
+                return False
+
+        # Check for transient patterns
+        for pat in self._TRANSIENT_PATTERNS:
+            if pat.search(combined):
+                return True
+
+        # Also treat the SDK "server_error" subtype as transient
+        if subtype in ("server_error", "rate_limit"):
+            return True
+
+        return False
+
+    def _extract_retry_after(self, error_text: str) -> Optional[float]:
+        """Try to extract a Retry-After value (seconds) from error/stderr text.
+
+        Looks for patterns like 'Retry-After: 30' or 'retry after 30s' in
+        the error message and recent stderr output.
+        """
+        sources = [error_text] + self._stderr_lines[-10:]
+        for text in sources:
+            # Standard header: "Retry-After: <seconds>"
+            m = re.search(r"retry[- ]after\s*[:=]\s*(\d+)", text, re.IGNORECASE)
+            if m:
+                return float(m.group(1))
+            # Prose: "retry after 30s" / "retry in 30 seconds"
+            m = re.search(r"retry (?:after|in)\s+(\d+)\s*s", text, re.IGNORECASE)
+            if m:
+                return float(m.group(1))
+        return None
+
+    def _calculate_retry_delay(self, attempt: int, retry_after: Optional[float] = None) -> float:
+        """Calculate delay before the next retry.
+
+        Uses exponential back-off with jitter: base * 2^attempt + random jitter.
+        If a Retry-After value is available (e.g. from a 429), it is used as
+        the minimum delay.
+        """
+        base_delay = 1.0  # 1 second base
+        backoff = base_delay * (2 ** attempt)
+        jitter = random.uniform(0, backoff * 0.25)
+        delay = backoff + jitter
+
+        if retry_after is not None:
+            delay = max(delay, retry_after)
+
+        # Cap at 60 seconds
+        return min(delay, 60.0)
+
+    def _emit_retry_status(self, attempt: int, max_retries: int,
+                           error_detail: str, delay: float) -> None:
+        """Emit a retry_status message so Emacs can display retry progress."""
+        self._emit({
+            "type": "retry_status",
+            "attempt": attempt,
+            "max_retries": max_retries,
+            "error": error_detail,
+            "delay_seconds": round(delay, 1),
+        })
+
     async def send_user_message(self, message: str) -> None:
-        """Send a user message to Claude and stream the response."""
+        """Send a user message to Claude and stream the response.
+
+        Wraps the query/stream cycle in a retry loop so that transient API
+        errors (500, 529, 429, etc.) are retried with exponential back-off
+        instead of killing the session.
+        """
         # Clear stderr buffer for fresh error context
         self._stderr_lines.clear()
         # Ensure client is connected
         if not self._client:
             await self.connect()
 
-        # Echo the user message back
+        # Echo the user message back (only once, not on retries)
         self._emit({"type": "user_start"})
         self._emit({"type": "user_text", "text": message})
         self._emit({"type": "user_end"})
@@ -739,271 +847,347 @@ class ClaudeAgent:
         self.state.status = "thinking"
         self._emit({"type": "thinking", "status": "Thinking..."})
 
-        try:
-            # Send the query
-            await self._client.query(full_message)
-
-            # Stream the response
-            total_output_tokens = 0
-            total_input_tokens = 0
-            in_assistant_block = False
-            # Track pending tools by their tool_use_id for proper result association
-            # Dict of tool_use_id -> tool_name
-            pending_tools: dict[str, str] = {}
-
-            self._log_json("DEBUG", {"action": "waiting for SDK messages..."})
-            async for msg in self._client.receive_messages():
-                self._log_json("RECV", {"type": type(msg).__name__, "data": str(msg)[:200]})
-                msg_type = type(msg).__name__
-
-                if msg_type == "SystemMessage":
-                    # Check subtype for special handling
-                    subtype = getattr(msg, "subtype", None)
-                    data = getattr(msg, "data", {})
-
-                    # Handle compacting notification
-                    if subtype and "compact" in subtype.lower():
-                        self._emit({
-                            "type": "compacting",
-                            "status": "start",
-                            "subtype": subtype,
-                        })
-                        self._emit({
-                            "type": "thinking",
-                            "status": "Compacting conversation...",
-                        })
-                    # Handle other system message subtypes
-                    elif subtype:
-                        self._log_json("SYSTEM_SUBTYPE", {"subtype": subtype, "data": data})
-
-                    # Init message with model and session info
-                    model = data.get("model")
-                    session_id = data.get("session_id")
-                    if model or session_id:
-                        self._emit_session_info(model=model, session_id=session_id)
-
-                    # Emit MCP server status if available
-                    mcp_servers = data.get("mcp_servers", [])
-                    if mcp_servers:
-                        self._emit({
-                            "type": "mcp_status",
-                            "servers": mcp_servers,
-                        })
-
-                elif msg_type == "AssistantMessage":
-                    # Extract model if available
-                    model = getattr(msg, "model", None)
-                    if model and model != self.state.model:
-                        self._emit_session_info(model=model)
-
-                    # Handle content blocks in the assistant message
-                    for block in getattr(msg, "content", []):
-                        block_type = type(block).__name__
-
-                        if block_type == "TextBlock":
-                            text = getattr(block, "text", "")
-                            if text:
-                                if not in_assistant_block:
-                                    # Strip leading newlines from the first text block.
-                                    # The SDK often returns text starting with "\n\n"
-                                    # which creates unwanted blank lines above the message.
-                                    text = text.lstrip("\n")
-                                    self._emit({"type": "assistant_start"})
-                                    in_assistant_block = True
-                                if text:
-                                    self._emit({"type": "assistant_text", "text": text})
-
-                        elif block_type == "ToolUseBlock":
-                            if in_assistant_block:
-                                self._emit({"type": "assistant_end"})
-                                in_assistant_block = False
-                            tool_name = getattr(block, "name", "unknown")
-                            tool_input = getattr(block, "input", {})
-                            tool_use_id = getattr(block, "id", None) or f"tool_{len(pending_tools)}"
-                            # Track this tool for result association
-                            pending_tools[tool_use_id] = tool_name
-
-                            # Special handling for Edit tool - emit diff info
-                            if tool_name == "Edit":
-                                self._emit({
-                                    "type": "edit_tool",
-                                    "tool_use_id": tool_use_id,
-                                    "file_path": tool_input.get("file_path", ""),
-                                    "old_string": tool_input.get("old_string", ""),
-                                    "new_string": tool_input.get("new_string", ""),
-                                })
-                            # Write tool - emit with content for diff-like popup display
-                            elif tool_name == "Write":
-                                self._emit({
-                                    "type": "write_tool",
-                                    "tool_use_id": tool_use_id,
-                                    "file_path": tool_input.get("file_path", ""),
-                                    "content": tool_input.get("content", ""),
-                                })
-                            # Special handling for TodoWrite - emit todo list
-                            elif tool_name == "TodoWrite":
-                                todos = tool_input.get("todos", [])
-                                self._emit({
-                                    "type": "todo_update",
-                                    "todos": todos,
-                                })
-                            else:
-                                # Emit tool call with unique ID
-                                self._emit({
-                                    "type": "tool_call",
-                                    "tool_use_id": tool_use_id,
-                                    "name": tool_name,
-                                    "input": tool_input,
-                                })
-                                # Also emit thinking status for tool execution
-                                tool_args = self._format_tool_args(tool_name, tool_input)
-                                self._emit({
-                                    "type": "thinking",
-                                    "status": f"Running: {tool_name}({tool_args})",
-                                })
-
-                    # Update token counts if available
-                    usage = getattr(msg, "usage", None)
-                    if usage:
-                        total_output_tokens = getattr(usage, "output_tokens", 0)
-                        total_input_tokens = getattr(usage, "input_tokens", 0)
-                        self._emit({
-                            "type": "progress",
-                            "input_tokens": total_input_tokens,
-                            "output_tokens": total_output_tokens,
-                        })
-
-                elif msg_type == "UserMessage":
-                    # UserMessage contains tool results
-                    for block in getattr(msg, "content", []):
-                        block_type = type(block).__name__
-
-                        if block_type == "ToolResultBlock":
-                            # Get the tool_use_id to match with the original tool call
-                            tool_use_id = getattr(block, "tool_use_id", None)
-                            tool_name = pending_tools.get(tool_use_id, "unknown") if tool_use_id else "unknown"
-                            # Emit tool result content
-                            content = getattr(block, "content", None)
-                            is_error = getattr(block, "is_error", False)
-                            result_text = ""
-                            if content:
-                                # Content can be a string or list of content blocks
-                                if isinstance(content, str):
-                                    result_text = self._filter_system_reminders(content)
-                                elif isinstance(content, list):
-                                    parts = []
-                                    for item in content:
-                                        if hasattr(item, "text"):
-                                            parts.append(self._filter_system_reminders(item.text))
-                                        elif isinstance(item, dict) and "text" in item:
-                                            parts.append(self._filter_system_reminders(item["text"]))
-                                        elif isinstance(item, str):
-                                            parts.append(self._filter_system_reminders(item))
-                                    result_text = "\n".join(parts)
-
-                            # Safety net: Use centralized validation to ensure non-empty error content
-                            # This should already be handled by the hook, but we validate here as well
-                            # to catch any SDK bugs that bypass the hook
-                            validated = validate_tool_result(
-                                {"content": content, "is_error": is_error},
-                                tool_name
-                            )
-
-                            # If validation added content, extract it
-                            if not result_text and validated.get("content"):
-                                validated_content = validated["content"]
-                                if isinstance(validated_content, list):
-                                    parts = []
-                                    for item in validated_content:
-                                        if isinstance(item, dict) and "text" in item:
-                                            parts.append(item["text"])
-                                        elif isinstance(item, str):
-                                            parts.append(item)
-                                    result_text = "\n".join(parts)
-                                elif isinstance(validated_content, str):
-                                    result_text = validated_content
-
-                            self._emit({
-                                "type": "tool_result",
-                                "tool_use_id": tool_use_id or "unknown",
-                                "content": result_text,
-                                "is_error": is_error,
-                            })
-                            # Close the tool and remove from pending
-                            if tool_use_id:
-                                self._emit({"type": "tool_end", "tool_use_id": tool_use_id})
-                                pending_tools.pop(tool_use_id, None)
-                            self._log_json("DEBUG", {"action": "tool_result processed", "tool_use_id": tool_use_id})
-
-                elif msg_type == "ResultMessage":
-                    # Conversation turn complete
-                    if in_assistant_block:
-                        self._emit({"type": "assistant_end"})
-                        in_assistant_block = False
-                    # Close any remaining pending tools
-                    for tool_id in list(pending_tools.keys()):
-                        self._emit({"type": "tool_end", "tool_use_id": tool_id})
-                    pending_tools.clear()
-
-                    # Check for error results from the CLI
-                    subtype = getattr(msg, "subtype", "success")
-                    is_error = getattr(msg, "is_error", False)
-                    result_text = getattr(msg, "result", None)
-
-                    if is_error or subtype == "error_during_execution":
-                        error_detail = result_text or subtype
-                        self._log_json("RESULT_ERROR", {
-                            "subtype": subtype,
-                            "is_error": is_error,
-                            "result": result_text,
-                        })
-                        self._emit_error(
-                            f"Claude encountered an error: {error_detail}",
-                        )
-
-                    # Get cost and session info
-                    cost = getattr(msg, "total_cost_usd", None) or getattr(msg, "cost_usd", 0) or 0
-                    session_id = getattr(msg, "session_id", None)
-
-                    # Emit final stats
-                    self._emit({
-                        "type": "result",
-                        "cost_usd": cost,
-                        "duration_ms": getattr(msg, "duration_ms", 0) or 0,
-                        "num_turns": getattr(msg, "num_turns", 0) or 0,
-                        "total_input": total_input_tokens,
-                        "total_output": total_output_tokens,
-                    })
-                    # ResultMessage signals end of turn - break out of loop
-                    self._log_json("DEBUG", {"action": "breaking out of receive_messages loop"})
-                    break
-
-        except Exception as e:
-            error_msg = str(e)
-            # Check for the specific SDK bug with empty error content
-            if "content cannot be empty if `is_error` is true" in error_msg:
-                self._emit_error(
-                    "Session corrupted due to SDK bug (empty error content after permission timeout). "
-                    "This is a known issue. Please restart the session.",
-                    _format_traceback()
-                )
-                # Force disconnect to prevent further corruption
-                if self._client:
+        # ── Retry loop ─────────────────────────────────────────────────
+        last_error_msg: Optional[str] = None
+        for attempt in range(self._max_retries + 1):
+            # On retry, reconnect the client (the previous process likely died)
+            if attempt > 0:
+                self._stderr_lines.clear()
+                self._log_json("RETRY", {
+                    "attempt": attempt,
+                    "max_retries": self._max_retries,
+                    "previous_error": last_error_msg,
+                })
+                # Reconnect — the old process is gone after a ProcessError
+                if not self._client:
                     try:
-                        await self._client.disconnect()
-                    except Exception:
-                        pass
-                self._client = None
-                self._emit_session_message(
-                    "Session terminated. Please use claude-run to start a new session."
-                )
-            else:
-                # Enhance error message with stderr context if available
-                if "Check stderr" in error_msg or "exit code" in error_msg:
-                    stderr_context = self._get_stderr_context()
-                    if stderr_context:
-                        error_msg = f"{error_msg}\n\nStderr output:\n{stderr_context}"
+                        await self.connect()
+                    except Exception as conn_err:
+                        self._emit_error(
+                            f"Failed to reconnect on retry {attempt}: {conn_err}",
+                            _format_traceback(),
+                        )
+                        break
+                self._emit({"type": "thinking", "status": f"Retrying ({attempt}/{self._max_retries})..."})
+
+            _should_retry = False
+            try:
+                # Send the query
+                await self._client.query(full_message)
+
+                # Stream the response
+                total_output_tokens = 0
+                total_input_tokens = 0
+                in_assistant_block = False
+                # Track pending tools by their tool_use_id for proper result association
+                # Dict of tool_use_id -> tool_name
+                pending_tools: dict[str, str] = {}
+
+                self._log_json("DEBUG", {"action": "waiting for SDK messages..."})
+                async for msg in self._client.receive_messages():
+                    self._log_json("RECV", {"type": type(msg).__name__, "data": str(msg)[:200]})
+                    msg_type = type(msg).__name__
+
+                    if msg_type == "SystemMessage":
+                        # Check subtype for special handling
+                        subtype = getattr(msg, "subtype", None)
+                        data = getattr(msg, "data", {})
+
+                        # Handle compacting notification
+                        if subtype and "compact" in subtype.lower():
+                            self._emit({
+                                "type": "compacting",
+                                "status": "start",
+                                "subtype": subtype,
+                            })
+                            self._emit({
+                                "type": "thinking",
+                                "status": "Compacting conversation...",
+                            })
+                        # Handle other system message subtypes
+                        elif subtype:
+                            self._log_json("SYSTEM_SUBTYPE", {"subtype": subtype, "data": data})
+
+                        # Init message with model and session info
+                        model = data.get("model")
+                        session_id = data.get("session_id")
+                        if model or session_id:
+                            self._emit_session_info(model=model, session_id=session_id)
+
+                        # Emit MCP server status if available
+                        mcp_servers = data.get("mcp_servers", [])
+                        if mcp_servers:
+                            self._emit({
+                                "type": "mcp_status",
+                                "servers": mcp_servers,
+                            })
+
+                    elif msg_type == "AssistantMessage":
+                        # Extract model if available
+                        model = getattr(msg, "model", None)
+                        if model and model != self.state.model:
+                            self._emit_session_info(model=model)
+
+                        # Handle content blocks in the assistant message
+                        for block in getattr(msg, "content", []):
+                            block_type = type(block).__name__
+
+                            if block_type == "TextBlock":
+                                text = getattr(block, "text", "")
+                                if text:
+                                    if not in_assistant_block:
+                                        # Strip leading newlines from the first text block.
+                                        # The SDK often returns text starting with "\n\n"
+                                        # which creates unwanted blank lines above the message.
+                                        text = text.lstrip("\n")
+                                        self._emit({"type": "assistant_start"})
+                                        in_assistant_block = True
+                                    if text:
+                                        self._emit({"type": "assistant_text", "text": text})
+
+                            elif block_type == "ToolUseBlock":
+                                if in_assistant_block:
+                                    self._emit({"type": "assistant_end"})
+                                    in_assistant_block = False
+                                tool_name = getattr(block, "name", "unknown")
+                                tool_input = getattr(block, "input", {})
+                                tool_use_id = getattr(block, "id", None) or f"tool_{len(pending_tools)}"
+                                # Track this tool for result association
+                                pending_tools[tool_use_id] = tool_name
+
+                                # Special handling for Edit tool - emit diff info
+                                if tool_name == "Edit":
+                                    self._emit({
+                                        "type": "edit_tool",
+                                        "tool_use_id": tool_use_id,
+                                        "file_path": tool_input.get("file_path", ""),
+                                        "old_string": tool_input.get("old_string", ""),
+                                        "new_string": tool_input.get("new_string", ""),
+                                    })
+                                # Write tool - emit with content for diff-like popup display
+                                elif tool_name == "Write":
+                                    self._emit({
+                                        "type": "write_tool",
+                                        "tool_use_id": tool_use_id,
+                                        "file_path": tool_input.get("file_path", ""),
+                                        "content": tool_input.get("content", ""),
+                                    })
+                                # Special handling for TodoWrite - emit todo list
+                                elif tool_name == "TodoWrite":
+                                    todos = tool_input.get("todos", [])
+                                    self._emit({
+                                        "type": "todo_update",
+                                        "todos": todos,
+                                    })
+                                else:
+                                    # Emit tool call with unique ID
+                                    self._emit({
+                                        "type": "tool_call",
+                                        "tool_use_id": tool_use_id,
+                                        "name": tool_name,
+                                        "input": tool_input,
+                                    })
+                                    # Also emit thinking status for tool execution
+                                    tool_args = self._format_tool_args(tool_name, tool_input)
+                                    self._emit({
+                                        "type": "thinking",
+                                        "status": f"Running: {tool_name}({tool_args})",
+                                    })
+
+                        # Update token counts if available
+                        usage = getattr(msg, "usage", None)
+                        if usage:
+                            total_output_tokens = getattr(usage, "output_tokens", 0)
+                            total_input_tokens = getattr(usage, "input_tokens", 0)
+                            self._emit({
+                                "type": "progress",
+                                "input_tokens": total_input_tokens,
+                                "output_tokens": total_output_tokens,
+                            })
+
+                    elif msg_type == "UserMessage":
+                        # UserMessage contains tool results
+                        for block in getattr(msg, "content", []):
+                            block_type = type(block).__name__
+
+                            if block_type == "ToolResultBlock":
+                                # Get the tool_use_id to match with the original tool call
+                                tool_use_id = getattr(block, "tool_use_id", None)
+                                tool_name = pending_tools.get(tool_use_id, "unknown") if tool_use_id else "unknown"
+                                # Emit tool result content
+                                content = getattr(block, "content", None)
+                                is_error = getattr(block, "is_error", False)
+                                result_text = ""
+                                if content:
+                                    # Content can be a string or list of content blocks
+                                    if isinstance(content, str):
+                                        result_text = self._filter_system_reminders(content)
+                                    elif isinstance(content, list):
+                                        parts = []
+                                        for item in content:
+                                            if hasattr(item, "text"):
+                                                parts.append(self._filter_system_reminders(item.text))
+                                            elif isinstance(item, dict) and "text" in item:
+                                                parts.append(self._filter_system_reminders(item["text"]))
+                                            elif isinstance(item, str):
+                                                parts.append(self._filter_system_reminders(item))
+                                        result_text = "\n".join(parts)
+
+                                # Safety net: Use centralized validation to ensure non-empty error content
+                                # This should already be handled by the hook, but we validate here as well
+                                # to catch any SDK bugs that bypass the hook
+                                validated = validate_tool_result(
+                                    {"content": content, "is_error": is_error},
+                                    tool_name
+                                )
+
+                                # If validation added content, extract it
+                                if not result_text and validated.get("content"):
+                                    validated_content = validated["content"]
+                                    if isinstance(validated_content, list):
+                                        parts = []
+                                        for item in validated_content:
+                                            if isinstance(item, dict) and "text" in item:
+                                                parts.append(item["text"])
+                                            elif isinstance(item, str):
+                                                parts.append(item)
+                                        result_text = "\n".join(parts)
+                                    elif isinstance(validated_content, str):
+                                        result_text = validated_content
+
+                                self._emit({
+                                    "type": "tool_result",
+                                    "tool_use_id": tool_use_id or "unknown",
+                                    "content": result_text,
+                                    "is_error": is_error,
+                                })
+                                # Close the tool and remove from pending
+                                if tool_use_id:
+                                    self._emit({"type": "tool_end", "tool_use_id": tool_use_id})
+                                    pending_tools.pop(tool_use_id, None)
+                                self._log_json("DEBUG", {"action": "tool_result processed", "tool_use_id": tool_use_id})
+
+                    elif msg_type == "ResultMessage":
+                        # Conversation turn complete
+                        if in_assistant_block:
+                            self._emit({"type": "assistant_end"})
+                            in_assistant_block = False
+                        # Close any remaining pending tools
+                        for tool_id in list(pending_tools.keys()):
+                            self._emit({"type": "tool_end", "tool_use_id": tool_id})
+                        pending_tools.clear()
+
+                        # Check for error results from the CLI
+                        subtype = getattr(msg, "subtype", "success")
+                        is_error = getattr(msg, "is_error", False)
+                        result_text = getattr(msg, "result", None)
+
+                        if is_error or subtype == "error_during_execution":
+                            error_detail = result_text or subtype
+                            self._log_json("RESULT_ERROR", {
+                                "subtype": subtype,
+                                "is_error": is_error,
+                                "result": result_text,
+                            })
+
+                            # Check if this is a transient error we can retry
+                            if (attempt < self._max_retries
+                                    and self._is_transient_error(error_detail, subtype)):
+                                retry_after = self._extract_retry_after(error_detail)
+                                delay = self._calculate_retry_delay(attempt, retry_after)
+                                self._emit_retry_status(
+                                    attempt + 1, self._max_retries, error_detail, delay,
+                                )
+                                last_error_msg = error_detail
+                                # Disconnect before retry — we need a fresh process
+                                if self._client:
+                                    try:
+                                        await self._client.disconnect()
+                                    except Exception:
+                                        pass
+                                self._client = None
+                                await asyncio.sleep(delay)
+                                # Use a flag to signal the outer retry loop
+                                _should_retry = True
+                                break  # break out of receive_messages loop → retry
+                            else:
+                                # Permanent error or retries exhausted
+                                self._emit_error(
+                                    f"Claude encountered an error: {error_detail}",
+                                )
+
+                        # Get cost and session info
+                        cost = getattr(msg, "total_cost_usd", None) or getattr(msg, "cost_usd", 0) or 0
+                        session_id = getattr(msg, "session_id", None)
+
+                        # Emit final stats
+                        self._emit({
+                            "type": "result",
+                            "cost_usd": cost,
+                            "duration_ms": getattr(msg, "duration_ms", 0) or 0,
+                            "num_turns": getattr(msg, "num_turns", 0) or 0,
+                            "total_input": total_input_tokens,
+                            "total_output": total_output_tokens,
+                        })
+                        # ResultMessage signals end of turn - break out of loop
+                        self._log_json("DEBUG", {"action": "breaking out of receive_messages loop"})
+                        break
+
+                # After the receive_messages loop:
+                # If _should_retry was set, continue the retry loop; otherwise we're done.
+                if _should_retry:
+                    continue  # next retry attempt
+                break  # success or permanent error — exit retry loop
+            except Exception as e:
+                error_msg = str(e)
+                # Check for the specific SDK bug with empty error content
+                if "content cannot be empty if `is_error` is true" in error_msg:
+                    self._emit_error(
+                        "Session corrupted due to SDK bug (empty error content after permission timeout). "
+                        "This is a known issue. Please restart the session.",
+                        _format_traceback()
+                    )
+                    # Force disconnect to prevent further corruption
+                    if self._client:
+                        try:
+                            await self._client.disconnect()
+                        except Exception:
+                            pass
+                    self._client = None
+                    self._emit_session_message(
+                        "Session terminated. Please use claude-run to start a new session."
+                    )
+                    break  # permanent — no retry
+
+                # Check if this exception represents a transient error
+                stderr_context = self._get_stderr_context() if (
+                    "Check stderr" in error_msg or "exit code" in error_msg
+                ) else ""
+                combined_error = f"{error_msg} {stderr_context}"
+
+                if (attempt < self._max_retries
+                        and self._is_transient_error(combined_error)):
+                    retry_after = self._extract_retry_after(combined_error)
+                    delay = self._calculate_retry_delay(attempt, retry_after)
+                    self._emit_retry_status(
+                        attempt + 1, self._max_retries, error_msg, delay,
+                    )
+                    last_error_msg = error_msg
+                    # Ensure client is cleaned up for reconnection
+                    if self._client:
+                        try:
+                            await self._client.disconnect()
+                        except Exception:
+                            pass
+                    self._client = None
+                    await asyncio.sleep(delay)
+                    continue  # retry
+
+                # Permanent error or retries exhausted — emit and stop
+                if stderr_context:
+                    error_msg = f"{error_msg}\n\nStderr output:\n{stderr_context}"
                 self._emit_error(error_msg, _format_traceback())
+                break
 
         self.state.status = "ready"
         self._emit_ready()
@@ -1044,6 +1228,7 @@ async def run_agent(
     system_prompt: Optional[str] = None,
     block_direct_edit: bool = True,
     auto_reject_rules: Optional[list[dict]] = None,
+    max_retries: int = 3,
 ) -> None:
     """Run the agent, reading commands from stdin."""
     agent = ClaudeAgent(
@@ -1058,6 +1243,7 @@ async def run_agent(
         system_prompt=system_prompt,
         block_direct_edit=block_direct_edit,
         auto_reject_rules=auto_reject_rules,
+        max_retries=max_retries,
     )
 
     # Show initial session info
@@ -1218,7 +1404,12 @@ def main() -> None:
         default=None,
         help="Path to JSON file with auto-reject rules",
     )
-
+    parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=3,
+        help="Max retries for transient API errors (default: 3, 0 to disable)",
+    )
     args = parser.parse_args()
 
     allowed_tools = None
@@ -1254,6 +1445,7 @@ def main() -> None:
             system_prompt=system_prompt,
             block_direct_edit=not args.no_block_direct_edit,
             auto_reject_rules=auto_reject_rules,
+            max_retries=args.max_retries,
         )
     )
 

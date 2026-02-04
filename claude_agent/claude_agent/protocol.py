@@ -197,6 +197,14 @@ class ErrorMessage(TypedDict):
     traceback: str | None
 
 
+class RetryStatusMessage(TypedDict):
+    """Transient error being retried with backoff."""
+    type: Literal["retry_status"]
+    attempt: int           # Current retry attempt (1-based)
+    max_retries: int       # Maximum retries configured
+    error: str             # Error detail that triggered the retry
+    delay_seconds: float   # Seconds until next retry
+
 # Session info messages (legacy compatibility)
 
 class SessionMessageStartMessage(TypedDict):
@@ -243,6 +251,7 @@ AgentMessage = (
     | PermissionGrantedMessage
     | PermissionDeniedMessage
     | ErrorMessage
+    | RetryStatusMessage
     | SessionMessageStartMessage
     | SessionMessageTextMessage
     | SessionMessageEndMessage

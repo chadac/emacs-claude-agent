@@ -231,6 +231,17 @@ Claude buffer as the current buffer."
   :type 'hook
   :group 'claude-agent)
 
+(defcustom claude-max-retries 3
+  "Maximum number of automatic retries for transient API errors.
+When the Anthropic API returns a transient error (HTTP 500, 529,
+429 rate-limit, etc.), the agent will automatically retry the
+request with exponential backoff instead of dying.
+
+Each retry is logged in *Messages* and shown in the session buffer.
+Set to 0 to disable automatic retries."
+  :type 'integer
+  :group 'claude-agent)
+
 ;;;; Buffer-local Variables
 (defvar-local claude--cwd nil
   "Buffer-local variable storing the current working directory for this Claude session.")
