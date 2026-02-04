@@ -762,7 +762,17 @@ These single-key bindings only apply outside the input area.")
   (add-hook 'evil-insert-state-entry-hook
             #'claude-agent--on-insert-state-entry nil t)
   ;; Add C-c c for transient menu (works in all states)
-  (local-set-key (kbd "C-c c") #'claude-menu))
+  (local-set-key (kbd "C-c c") #'claude-menu)
+  ;; Clean up spinner timer when buffer is killed to prevent orphaned
+  ;; global timers that could stack with new buffers' timers.
+  (add-hook 'kill-buffer-hook #'claude-agent--cleanup-spinner-timer nil t))
+
+(defun claude-agent--cleanup-spinner-timer ()
+  "Cancel the spinner timer for the current buffer.
+Added to `kill-buffer-hook' to prevent orphaned global timers."
+  (when claude-agent--spinner-timer
+    (cancel-timer claude-agent--spinner-timer)
+    (setq claude-agent--spinner-timer nil)))
 
 ;;;; Helper functions
 
@@ -1465,14 +1475,24 @@ Called by `render-dynamic-section'. Assumes point is positioned correctly."
     (insert "\n")
     (claude-agent--apply-face start (point) 'claude-agent-header-face)))
 
-(defun claude-agent--spinner-tick ()
-  "Advance spinner and update in-place (lightweight)."
-  (when claude-agent--thinking-status
-    (setq claude-agent--spinner-index
-          (mod (1+ claude-agent--spinner-index)
-               (length claude-agent--spinner-frames)))
-    ;; Only update the spinner/elapsed time, don't rebuild everything
-    (claude-agent--update-spinner-display)))
+(defun claude-agent--spinner-tick (buf)
+  "Advance spinner in BUF and update in-place (lightweight).
+BUF is captured at timer creation time so the tick always runs in
+the correct buffer context, even when the user has switched away."
+  (if (not (buffer-live-p buf))
+      ;; Buffer was killed -- cancel this orphaned timer to prevent leaks.
+      ;; We cannot access the buffer-local timer var, so scan timer-list.
+      (dolist (timer timer-list)
+        (when (and (eq (timer--function timer) #'claude-agent--spinner-tick)
+                   (equal (timer--args timer) (list buf)))
+          (cancel-timer timer)))
+    (with-current-buffer buf
+      (when claude-agent--thinking-status
+        (setq claude-agent--spinner-index
+              (mod (1+ claude-agent--spinner-index)
+                   (length claude-agent--spinner-frames)))
+        ;; Only update the spinner/elapsed time, don't rebuild everything
+        (claude-agent--update-spinner-display)))))
 
 (defun claude-agent--update-spinner-display ()
   "Update spinner and elapsed time in-place without full rebuild."
@@ -1523,9 +1543,12 @@ Called by `render-dynamic-section'. Assumes point is positioned correctly."
         ;; Start timing if not already
         (unless claude-agent--thinking-start-time
           (setq claude-agent--thinking-start-time (current-time)))
-        ;; Start spinner timer
-        (setq claude-agent--spinner-timer
-              (run-with-timer 0.1 0.1 #'claude-agent--spinner-tick)))
+        ;; Start spinner timer, passing current buffer so the tick
+        ;; always runs in the correct context (run-with-timer is global,
+        ;; but our state variables are buffer-local).
+        (let ((buf (current-buffer)))
+          (setq claude-agent--spinner-timer
+                (run-with-timer 0.1 0.1 #'claude-agent--spinner-tick buf))))
     ;; Clear timing when done
     (setq claude-agent--thinking-start-time nil))
 
