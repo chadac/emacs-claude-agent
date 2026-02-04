@@ -1046,6 +1046,88 @@ Returns t on success, nil on failure."
     (= 0 (call-process "git" nil "*org-roam-todo-git-output*" nil
                        "push" "-u" "origin" "HEAD"))))
 
+(defun org-roam-todo--close-worktree-plist (todo &optional force)
+  "Close the worktree described by TODO plist.
+TODO should have :worktree-path, :project-root, :file, :title, and :status.
+FORCE if non-nil, force-removes worktree without prompting.
+Returns a list of result strings describing what was done.
+Continues through all steps even if individual steps fail."
+  (let* ((worktree-path (plist-get todo :worktree-path))
+         (project-root (plist-get todo :project-root))
+         (file (plist-get todo :file))
+         (title (plist-get todo :title))
+         (current-status (plist-get todo :status))
+         (branch-name (when file
+                        (with-temp-buffer
+                          (insert-file-contents file nil 0 2000)
+                          (when (re-search-forward "^:WORKTREE_BRANCH:\\s-*\\(.+\\)$" nil t)
+                            (match-string 1)))))
+         (results '()))
+    ;; Kill Claude session
+    (condition-case err
+        (when (org-roam-todo--kill-claude-session worktree-path)
+          (push "killed Claude session" results))
+      (error (push (format "FAILED to kill Claude session: %s" (error-message-string err)) results)))
+    ;; Kill file buffers
+    (condition-case err
+        (let ((killed (org-roam-todo--kill-worktree-buffers worktree-path)))
+          (when (> killed 0)
+            (push (format "killed %d buffer(s)" killed) results)))
+      (error (push (format "FAILED to kill buffers: %s" (error-message-string err)) results)))
+    ;; Remove worktree if it exists
+    (condition-case err
+        (if (org-roam-todo--worktree-exists-p worktree-path)
+            (let ((result (org-roam-todo--remove-worktree project-root worktree-path force)))
+              (if (= 0 result)
+                  (push "removed worktree" results)
+                ;; Try force removal
+                (if (or force
+                        (yes-or-no-p "Worktree has uncommitted changes. Force remove? "))
+                    (let ((force-result (org-roam-todo--remove-worktree project-root worktree-path t)))
+                      (if (= 0 force-result)
+                          (push "force-removed worktree" results)
+                        (push "FAILED to remove worktree" results)))
+                  (push "skipped worktree removal" results))))
+          (push "worktree already gone" results))
+      (error (push (format "FAILED worktree removal: %s" (error-message-string err)) results)))
+    ;; Delete branch if it exists
+    (condition-case err
+        (when (and branch-name
+                   project-root
+                   (org-roam-todo--branch-exists-p project-root branch-name))
+          (let ((result (org-roam-todo--delete-branch project-root branch-name)))
+            (if (= 0 result)
+                (push (format "deleted branch '%s'" branch-name) results)
+              ;; Unmerged - prompt for force delete
+              (if (or force
+                      (yes-or-no-p (format "Branch '%s' is not fully merged. Force delete? " branch-name)))
+                  (progn
+                    (org-roam-todo--delete-branch project-root branch-name t)
+                    (push (format "force-deleted branch '%s'" branch-name) results))
+                (push (format "skipped branch deletion '%s'" branch-name) results)))))
+      (error (push (format "FAILED branch deletion: %s" (error-message-string err)) results)))
+    ;; Clear worktree properties and mark done in the file
+    (condition-case err
+        (when file
+          (with-current-buffer (find-file-noselect file)
+            (save-excursion
+              (goto-char (point-min))
+              ;; Delete WORKTREE_PATH line
+              (when (re-search-forward "^:WORKTREE_PATH:\\s-*.+\n" nil t)
+                (replace-match ""))
+              (goto-char (point-min))
+              ;; Delete WORKTREE_BRANCH line
+              (when (re-search-forward "^:WORKTREE_BRANCH:\\s-*.+\n" nil t)
+                (replace-match ""))
+              (goto-char (point-min))
+              ;; Mark as done (unless already done/rejected)
+              (unless (member current-status '("done" "rejected"))
+                (when (re-search-forward "^:STATUS:\\s-*.+$" nil t)
+                  (replace-match ":STATUS: done"))))
+            (save-buffer)))
+      (error (push (format "FAILED to update TODO file: %s" (error-message-string err)) results)))
+    (nreverse results)))
+
 ;;;###autoload
 (defun org-roam-todo-close-worktree (&optional force)
   "Close the worktree associated with the current TODO.
@@ -1057,48 +1139,21 @@ Also deletes the branch (prompting if unmerged) and marks TODO as done."
     (user-error "Not in an org-roam TODO node"))
   (let* ((project-root (org-roam-todo--get-property "PROJECT_ROOT"))
          (worktree-path (org-roam-todo--get-property "WORKTREE_PATH"))
-         (branch-name (org-roam-todo--get-property "WORKTREE_BRANCH"))
-         (current-status (org-roam-todo--get-property "STATUS")))
+         (current-status (org-roam-todo--get-property "STATUS"))
+         (title (save-excursion
+                  (goto-char (point-min))
+                  (when (re-search-forward "^#\\+title: \\(.+\\)$" nil t)
+                    (match-string 1)))))
     (unless worktree-path
       (user-error "No worktree associated with this TODO"))
-    (unless (org-roam-todo--worktree-exists-p worktree-path)
-      ;; Worktree doesn't exist, just clear properties
-      (org-roam-todo--set-property "WORKTREE_PATH" nil)
-      (org-roam-todo--set-property "WORKTREE_BRANCH" nil)
-      (save-buffer)
-      (user-error "Worktree no longer exists, cleared properties"))
-    ;; Kill Claude session first (no prompt needed)
-    (org-roam-todo--kill-claude-session worktree-path)
-    ;; Kill file buffers
-    (org-roam-todo--kill-worktree-buffers worktree-path)
-    ;; Remove worktree
-    (let ((result (org-roam-todo--remove-worktree project-root worktree-path force)))
-      (unless (= 0 result)
-        (if (and (not force)
-                 (yes-or-no-p "Worktree has uncommitted changes. Force remove? "))
-            (setq result (org-roam-todo--remove-worktree project-root worktree-path t))
-          (user-error "Failed to remove worktree (exit code %d)" result)))
-      (unless (= 0 result)
-        (user-error "Failed to remove worktree (exit code %d)" result)))
-    ;; Clear worktree properties
-    (org-roam-todo--set-property "WORKTREE_PATH" nil)
-    (org-roam-todo--set-property "WORKTREE_BRANCH" nil)
-
-
-    ;; Delete branch automatically (prompt only if unmerged)
-    (when (and branch-name
-               (org-roam-todo--branch-exists-p project-root branch-name))
-      (let ((result (org-roam-todo--delete-branch project-root branch-name)))
-        (if (= 0 result)
-            (message "Deleted branch '%s'" branch-name)
-          ;; Branch is unmerged - prompt for force delete
-          (when (yes-or-no-p (format "Branch '%s' is not fully merged. Force delete? " branch-name))
-            (org-roam-todo--delete-branch project-root branch-name t)))))
-    ;; Mark TODO as done (unless already done/rejected)
-    (unless (member current-status '("done" "rejected"))
-      (org-roam-todo--set-property "STATUS" "done"))
-    (save-buffer)
-    (message "Closed worktree and marked TODO as done: %s" worktree-path)))
+    (let* ((todo (list :worktree-path worktree-path
+                       :project-root project-root
+                       :file (buffer-file-name)
+                       :title title
+                       :status current-status))
+           (results (org-roam-todo--close-worktree-plist todo force)))
+      (message "Closed worktree for '%s': %s"
+               (or title "TODO") (string-join results ", ")))))
 
 ;;;###autoload
 (defun org-roam-todo-mark-done (&optional skip-commit)
@@ -1114,7 +1169,6 @@ With prefix arg SKIP-COMMIT, skip the auto-commit/push step."
     (user-error "Not in an org-roam TODO node"))
   (let* ((worktree-path (org-roam-todo--get-property "WORKTREE_PATH"))
          (project-root (org-roam-todo--get-property "PROJECT_ROOT"))
-         (branch-name (org-roam-todo--get-property "WORKTREE_BRANCH"))
          (current-status (org-roam-todo--get-property "STATUS"))
          (title (save-excursion
                   (goto-char (point-min))
@@ -1143,48 +1197,37 @@ With prefix arg SKIP-COMMIT, skip the auto-commit/push step."
             (message "Warning: Commit failed - changes not committed"))))
       ;; Now handle worktree cleanup
       (when (yes-or-no-p "Delete associated worktree and close buffers? ")
-        ;; Kill Claude session
-        (org-roam-todo--kill-claude-session worktree-path)
-        ;; Kill file buffers
-        (org-roam-todo--kill-worktree-buffers worktree-path)
-        ;; Remove worktree (with force prompt if needed)
-        (let ((result (org-roam-todo--remove-worktree project-root worktree-path)))
-          (unless (= 0 result)
-            (when (yes-or-no-p "Worktree has uncommitted changes. Force remove? ")
-              (org-roam-todo--remove-worktree project-root worktree-path t))))
-        ;; Clear worktree properties
-        (org-roam-todo--set-property "WORKTREE_PATH" nil)
-        (org-roam-todo--set-property "WORKTREE_BRANCH" nil)
-
-        ;; Optionally delete branch
-        (when (and branch-name
-                   (org-roam-todo--branch-exists-p project-root branch-name)
-                   (yes-or-no-p (format "Delete branch '%s'? " branch-name)))
-          (let ((result (org-roam-todo--delete-branch project-root branch-name)))
-            (unless (= 0 result)
-              (when (yes-or-no-p (format "Branch '%s' is not fully merged. Force delete? " branch-name))
-                (org-roam-todo--delete-branch project-root branch-name t)))))))
-    ;; Mark as done (unless already done/rejected)
-    (unless (member current-status '("done" "rejected"))
-      (org-roam-todo--set-property "STATUS" "done"))
-    (save-buffer)
+        (let* ((todo (list :worktree-path worktree-path
+                           :project-root project-root
+                           :file (buffer-file-name)
+                           :title title
+                           :status current-status))
+               (results (org-roam-todo--close-worktree-plist todo)))
+          (message "Worktree cleanup: %s" (string-join results ", ")))))
+    ;; If no worktree, just mark as done
+    (unless (and worktree-path
+                 (org-roam-todo--worktree-exists-p worktree-path))
+      (unless (member current-status '("done" "rejected"))
+        (org-roam-todo--set-property "STATUS" "done"))
+      (save-buffer))
     (message "Marked TODO as done")))
 
 ;;;###autoload
 (defun org-roam-todo-select-close-worktree (&optional project-filter)
   "Select a TODO with a worktree and close it.
-Optional PROJECT-FILTER limits selection to a specific project."
+Optional PROJECT-FILTER limits selection to a specific project.
+Uses TODO data directly without needing to visit the org file."
   (interactive)
   (let* ((todos (cl-remove-if-not
                  (lambda (todo)
                    (plist-get todo :worktree-path))
                  (org-roam-todo--query-todos project-filter)))
          (todo (when todos
-                 (let* ((candidates (mapcar (lambda (t)
+                 (let* ((candidates (mapcar (lambda (td)
                                               (cons (format "[%s] %s"
-                                                            (plist-get t :project)
-                                                            (plist-get t :title))
-                                                    t))
+                                                            (plist-get td :project)
+                                                            (plist-get td :title))
+                                                    td))
                                             todos))
                         (choice (completing-read "Close worktree for: "
                                                  (mapcar #'car candidates)
@@ -1192,8 +1235,11 @@ Optional PROJECT-FILTER limits selection to a specific project."
                    (cdr (assoc choice candidates))))))
     (unless todo
       (user-error "No TODOs with worktrees found"))
-    (find-file (plist-get todo :file))
-    (org-roam-todo-close-worktree)))
+    (unless (yes-or-no-p (format "Close worktree for '%s'? " (plist-get todo :title)))
+      (user-error "Cancelled"))
+    (let ((results (org-roam-todo--close-worktree-plist todo)))
+      (message "Closed worktree for '%s': %s"
+               (plist-get todo :title) (string-join results ", ")))))
 
 ;;;; Start Claude on TODO
 
@@ -1387,23 +1433,36 @@ Returns a propertized string: ready, thinking, waiting, typing, dead, or empty."
      ;; No worktree
      (t ""))))
 
+(defun org-roam-todo-list--format-worktree (worktree-path)
+  "Format worktree indicator for WORKTREE-PATH.
+Shows a marker if the worktree exists on disk, a warning if path is set
+but directory is missing, or empty if no worktree."
+  (cond
+   ((and worktree-path (org-roam-todo--worktree-exists-p worktree-path))
+    (propertize "✓ exists" 'face 'success))
+   (worktree-path
+    (propertize "✗ missing" 'face 'warning))
+   (t "")))
+
 (defun org-roam-todo-list--get-entries ()
   "Get tabulated list entries for TODOs.
-Columns: Status, Title, Claude, Created, Project."
+Columns: Status, Title, Claude, Project, Worktree, Created."
   (mapcar
    (lambda (todo)
      (let ((title (plist-get todo :title))
            (project (plist-get todo :project))
            (status (plist-get todo :status))
            (created (plist-get todo :created))
-           (file (plist-get todo :file)))
+           (file (plist-get todo :file))
+           (worktree-path (plist-get todo :worktree-path)))
        (list file
              (vector
               (org-roam-todo--format-status status)
               (propertize (or title "Untitled") 'face 'org-roam-todo-title)
               (org-roam-todo-list--claude-status todo)
-              (or created "")
-              (propertize (or project "") 'face 'org-roam-todo-project)))))
+              (propertize (or project "") 'face 'org-roam-todo-project)
+              (org-roam-todo-list--format-worktree worktree-path)
+              (or created "")))))
    (org-roam-todo--query-todos org-roam-todo-list--project-filter)))
 
 (defun org-roam-todo-list-refresh ()
@@ -1745,6 +1804,27 @@ Re-initializes the table format to handle stale buffers with outdated columns."
     (unless found
       (org-roam-todo-list--stop-auto-refresh))))
 
+(defun org-roam-todo-list-close-worktree ()
+  "Close the worktree for the TODO at point.
+Removes the worktree, kills associated buffers and Claude session,
+deletes the branch, and marks the TODO as done.
+Works directly from the TODO list view without needing to visit the file."
+  (interactive)
+  (when-let ((file (tabulated-list-get-id)))
+    (let* ((todos (org-roam-todo--query-todos org-roam-todo-list--project-filter))
+           (todo (cl-find-if (lambda (td) (string= (plist-get td :file) file)) todos))
+           (worktree-path (plist-get todo :worktree-path))
+           (title (plist-get todo :title)))
+      (unless worktree-path
+        (user-error "No worktree associated with this TODO"))
+      (unless (yes-or-no-p (format "Close worktree for '%s'? " title))
+        (user-error "Cancelled"))
+      (let ((results (org-roam-todo--close-worktree-plist todo)))
+        ;; Refresh the list
+        (org-roam-todo-list-refresh)
+        (message "Closed worktree for '%s': %s"
+                 title (string-join results ", "))))))
+
 ;;;; TODO List Keybindings
 
 (defvar org-roam-todo-list-mode-map
@@ -1759,6 +1839,8 @@ Re-initializes the table format to handle stale buffers with outdated columns."
     (define-key map (kbd "r") #'org-roam-todo-list-mark-rejected)
     (define-key map (kbd "a") #'org-roam-todo-list-mark-active)
     (define-key map (kbd "u") #'org-roam-todo-list-mark-draft)
+    (define-key map (kbd "x") #'org-roam-todo-list-close-worktree)
+    (define-key map (kbd "TAB") #'org-roam-todo-list-cycle-status)
     (define-key map (kbd "?") #'org-roam-todo-list-help)
     (define-key map (kbd "q") #'quit-window)
     map)
@@ -1777,6 +1859,8 @@ Re-initializes the table format to handle stale buffers with outdated columns."
     (kbd "r") #'org-roam-todo-list-mark-rejected
     (kbd "a") #'org-roam-todo-list-mark-active
     (kbd "u") #'org-roam-todo-list-mark-draft
+    (kbd "x") #'org-roam-todo-list-close-worktree
+    (kbd "TAB") #'org-roam-todo-list-cycle-status
     (kbd "?") #'org-roam-todo-list-help
     (kbd "q") #'quit-window))
 
@@ -1789,8 +1873,9 @@ Re-initializes the table format to handle stale buffers with outdated columns."
                            (org-roam-todo--status-sort-key (aref (cadr b) 0)))))
          ("Title" 50 t)
          ("Claude" 10 t)
-         ("Created" 12 t)
-         ("Project" 20 t)])
+         ("Project" 20 t)
+         ("Worktree" 12 t)
+         ("Created" 12 t)])
   (setq tabulated-list-padding 2)
   (setq tabulated-list-sort-key '("Status" . nil))
   (setq tabulated-list-entries #'org-roam-todo-list--get-entries)
@@ -1935,7 +2020,7 @@ Returns JSON with the TODO details or null if not in a worktree."
   (let ((file (org-roam-todo-mcp--resolve-todo nil)))
     (if file
         (let ((todos (org-roam-todo--query-todos)))
-          (let ((todo (cl-find-if (lambda (t) (string= (plist-get t :file) file)) todos)))
+          (let ((todo (cl-find-if (lambda (td) (string= (plist-get td :file) file)) todos)))
             (json-encode
              `((id . ,(plist-get todo :id))
                (title . ,(plist-get todo :title))
