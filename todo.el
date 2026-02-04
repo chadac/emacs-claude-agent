@@ -1706,6 +1706,18 @@ and executes the command in the TODO list buffer.  C-g just closes."
     (cancel-timer org-roam-todo-list--refresh-timer)
     (setq org-roam-todo-list--refresh-timer nil)))
 
+(defun org-roam-todo-list-refresh-all ()
+  "Refresh all TODO list buffers regardless of visibility.
+Call this after operations that change TODO state (e.g., merge, cleanup)."
+  (dolist (buffer (buffer-list))
+    (when (and (buffer-live-p buffer)
+               (with-current-buffer buffer
+                 (derived-mode-p 'org-roam-todo-list-mode)))
+      (with-current-buffer buffer
+        (let ((pos (point)))
+          (tabulated-list-revert)
+          (goto-char (min pos (point-max))))))))
+
 (defun org-roam-todo-list--auto-refresh ()
   "Auto-refresh callback that only refreshes if a TODO list buffer is visible."
   (let ((found nil))

@@ -33,11 +33,7 @@
 (declare-function magit-get "magit-git")
 (declare-function magit-get-current-branch "magit-git")
 (declare-function forge-create-pullreq "forge-commands")
-<<<<<<< Updated upstream
-(declare-function claude-mcp-magit--insert-pending-message "claude-mcp-magit")
-=======
 (declare-function claude-mcp-magit-commit-prefill "claude-mcp-magit")
->>>>>>> Stashed changes
 (declare-function org-roam-todo--set-property "todo")
 (declare-function org-roam-todo--kill-claude-session "todo")
 (declare-function org-roam-todo--kill-worktree-buffers "todo")
@@ -45,12 +41,7 @@
 (declare-function org-roam-todo--delete-branch "todo")
 (declare-function org-roam-todo--branch-exists-p "todo")
 (declare-function org-roam-todo--worktree-exists-p "todo")
-
-<<<<<<< Updated upstream
-(defvar claude-mcp-magit--pending-message)
-
-=======
->>>>>>> Stashed changes
+(declare-function org-roam-todo-list-refresh-all "todo")
 ;;;; Customization
 
 (defgroup org-roam-todo-merge nil
@@ -171,16 +162,9 @@ Handles slow GPG signing by polling for HEAD to change."
   ;; Use with-editor-post-finish-hook (fires when C-c C-c is pressed)
   ;; rather than git-commit-post-finish-hook (which times out after 1s)
   (add-hook 'with-editor-post-finish-hook #'org-roam-todo-merge--post-finish-hook)
-<<<<<<< Updated upstream
-  ;; Pre-fill the commit message using the same mechanism as magit-commit-approve
-  (when commit-message
-    (setq claude-mcp-magit--pending-message commit-message)
-    (add-hook 'git-commit-setup-hook #'claude-mcp-magit--insert-pending-message 90))
-=======
   ;; Pre-fill the commit message using worktree-scoped one-shot hook
   (when commit-message
     (claude-mcp-magit-commit-prefill commit-message worktree-path))
->>>>>>> Stashed changes
   ;; Open magit-status and start commit
   (let ((default-directory worktree-path))
     (magit-status worktree-path)
@@ -290,7 +274,9 @@ clears properties, and marks TODO as done."
                          (point-max)))))
             (delete-region start end))))
       (save-buffer))
-    (message "Cleaned up worktree and marked TODO as done")))
+    (message "Cleaned up worktree and marked TODO as done")
+    ;; Refresh TODO list buffers to reflect the status change
+    (org-roam-todo-list-refresh-all)))
 
 ;;;; Local Rebase Workflow
 
@@ -344,7 +330,7 @@ moved forward since the agent's initial rebase."
   ;; Step 2: Rebase onto latest main before merge
   (message "Rebasing %s onto %s..." branch-name main-branch)
   (let ((rebase-result (org-roam-todo-merge--git-run
-                        worktree-path "rebase" main-branch)))
+                        worktree-path "rebase" "--autostash" main-branch)))
     (unless (= 0 (car rebase-result))
       ;; Abort the failed rebase
       (org-roam-todo-merge--git-run worktree-path "rebase" "--abort")
@@ -364,6 +350,8 @@ moved forward since the agent's initial rebase."
     (org-roam-todo-merge--git-run! project-root
                                    "merge" "--ff-only" branch-name)
     (message "Successfully merged %s into %s" branch-name main-branch)
+    ;; Refresh TODO list to show merge status
+    (org-roam-todo-list-refresh-all)
 
     ;; Step 5: Cleanup
     (when org-roam-todo-merge-cleanup-after
