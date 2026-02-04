@@ -48,8 +48,6 @@ back to `claude--package-dir' (set at load time), and finally tries
 cannot be determined."
   (or claude-agent-root-directory
       claude--package-dir
-      (when-let ((f (locate-library "claudemacs")))
-        (file-name-directory f))
       (when-let ((f (locate-library "claude-agent")))
         (file-name-directory f))))
 
@@ -490,7 +488,7 @@ Returns the path to the generated config file."
 
 (defun claude--get-custom-prompt ()
   "Generate --append-system-prompt flag if custom prompt file exists.
-Looks for claude-prompt.md in the claudemacs package directory.
+Looks for claude-prompt.md in the claude-agent package directory.
 Returns nil if file doesn't exist."
   (let* ((this-dir (claude--package-root))
          (prompt-file (when this-dir
@@ -581,7 +579,7 @@ Removes accumulated history, keeping only the last 10KB of content."
 
 ;;;###autoload
 (defun claude-spawn-agent (directory &optional agent-name &rest extra-args)
-  "Spawn a new claudemacs agent in DIRECTORY with optional AGENT-NAME.
+  "Spawn a new Claude agent in DIRECTORY with optional AGENT-NAME.
 When called interactively, uses current directory and prompts for agent identifier.
 If AGENT-NAME is nil or empty, buffer will be named *claude:/path*.
 If provided, buffer will be named *claude:/path:agent-name*.
@@ -665,7 +663,7 @@ TARGET-BUFFER-NAME is the exact buffer name to use (optional)."
 ;;;###autoload
 (defun claude-restart (&optional target-work-dir target-buffer-name)
   "Restart Claude session, reloading elisp files and MCP server.
-This kills the current session, reloads claudemacs elisp files,
+This kills the current session, reloads claude-agent elisp files,
 and starts a new session with --resume to continue the conversation.
 If TARGET-WORK-DIR is provided, restart the session for that directory.
 If TARGET-BUFFER-NAME is provided, restart that specific buffer (for custom-named agents).
@@ -718,10 +716,10 @@ Otherwise, restart the session for the current project."
       (kill-buffer claude-buffer))
 
     ;; Reload elisp files
-    (message "Reloading claudemacs elisp files...")
+    (message "Reloading claude-agent elisp files...")
     (when this-dir
       (load-file (expand-file-name "claude-ai.el" this-dir))
-      (load-file (expand-file-name "claudemacs.el" this-dir)))
+      (load-file (expand-file-name "claude-agent.el" this-dir)))
 
     ;; Start new session with either --resume <id> or --continue
     ;; Always spawn without stealing focus
@@ -963,7 +961,7 @@ Sends without newline so you can continue typing."
 
 ;;;###autoload
 (defun claude-paste-context-to-shell ()
-  "Paste current point/selection context into claudemacs shell without sending.
+  "Paste current point/selection context into Claude shell without sending.
 Shows buffer name, file name, line numbers, and the actual content with line number prefixes.
 Works with both file buffers and non-file buffers.
 This allows you to review and edit the context before sending to Claude."
@@ -1176,7 +1174,7 @@ Hide if current, focus if visible elsewhere, show if hidden."
       ;;
       ;; Edge case: the window was created for Claude, but in the meantime you
       ;; have switched to another workspace and back, the window is no longer
-      ;; created just for claudemacs -- it has shown something previous, so it
+      ;; created just for Claude -- it has shown something previous, so it
       ;; will no longer go away if you toggle. Them's the breaks.
       (with-selected-window (get-buffer-window claude-buffer)
         (quit-window)))
@@ -1193,7 +1191,7 @@ Hide if current, focus if visible elsewhere, show if hidden."
             (set-window-point (get-buffer-window claude-buffer) (point-max)))))))))
 
 ;;;; User Interface
-;;;###autoload (autoload 'claude-transient-menu "claudemacs" nil t)
+;;;###autoload (autoload 'claude-transient-menu "claude-agent" nil t)
 (transient-define-prefix claude-transient-menu ()
   "Claude Code AI Pair Programming Interface."
   ["Claude: AI pair programming with Claude Code"

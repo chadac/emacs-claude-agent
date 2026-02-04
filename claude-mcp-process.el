@@ -1,6 +1,6 @@
 ;;; claude-mcp-process.el --- Process & buffer management for Claude MCP -*- lexical-binding: t; -*-
 
-;; This file is part of Claudemacs.
+;; This file is part of Claude Agent.
 
 ;;; Commentary:
 

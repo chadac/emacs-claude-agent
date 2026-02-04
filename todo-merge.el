@@ -1,6 +1,6 @@
 ;;; todo-merge.el --- Per-project merge/approval workflows for TODO worktrees -*- lexical-binding: t; -*-
 
-;; This file is part of Claude Agent / Claudemacs.
+;; This file is part of Claude Agent.
 
 ;;; Commentary:
 

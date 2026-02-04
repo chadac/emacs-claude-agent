@@ -5,7 +5,7 @@
 ;; Package-Requires: ((emacs "28.1") (ert "1.0"))
 
 ;;; Commentary:
-;; Test suite for claudemacs.el using ERT (Emacs Lisp Regression Testing).
+;; Test suite for claude-agent.el using ERT (Emacs Lisp Regression Testing).
 ;; 
 ;; Test categories:
 ;; - :unit - Pure function tests, no external dependencies
@@ -18,20 +18,20 @@
 (require 'ert)
 (require 'cl-lib)
 
-;; Add parent directory to load path to find claudemacs
+;; Add parent directory to load path to find claude-agent
 (add-to-list 'load-path (file-name-directory (directory-file-name (file-name-directory load-file-name))))
 (require 'claude-agent)
 
 ;;; Test Utilities
 
-(defmacro claudemacs-test-with-temp-buffer (&rest body)
-  "Execute BODY in a temporary buffer with claudemacs loaded.
+(defmacro claude-test-with-temp-buffer (&rest body)
+  "Execute BODY in a temporary buffer with claude-agent loaded.
 This provides a clean environment for testing without side effects."
   `(with-temp-buffer
      (let ((inhibit-message t))
        ,@body)))
 
-(defmacro claudemacs-test-with-temp-file (filename content &rest body)
+(defmacro claude-test-with-temp-file (filename content &rest body)
   "Execute BODY with a temporary file FILENAME containing CONTENT.
 The file is automatically cleaned up after BODY executes."
   (declare (indent 2))
@@ -44,15 +44,15 @@ The file is automatically cleaned up after BODY executes."
        (when (file-exists-p temp-file)
          (delete-file temp-file)))))
 
-(defun claudemacs-test-cleanup-buffers ()
-  "Clean up any claudemacs test buffers."
+(defun claude-test-cleanup-buffers ()
+  "Clean up any Claude test buffers."
   (dolist (buffer (buffer-list))
     (when (string-match-p "^\\*claude:.*test\\*" (buffer-name buffer))
       (kill-buffer buffer))))
 
 ;;; Basic Sanity Tests
 
-(ert-deftest claudemacs-test-sanity ()
+(ert-deftest claude-test-sanity ()
   "Basic sanity test to verify ERT is working."
   :tags '(:unit :sanity)
   (should t)
@@ -61,33 +61,33 @@ The file is automatically cleaned up after BODY executes."
   (should (string= "hello" "hello"))
   (should (listp '(1 2 3))))
 
-(ert-deftest claudemacs-test-package-loaded ()
-  "Test that claudemacs package is loaded correctly."
+(ert-deftest claude-test-package-loaded ()
+  "Test that claude-agent package is loaded correctly."
   :tags '(:unit :sanity)
-  (should (featurep 'claudemacs))
-  (should (fboundp 'claudemacs-run))
-  (should (fboundp 'claudemacs-kill))
-  (should (fboundp 'claudemacs-toggle-buffer))
-  (should (boundp 'claudemacs-program))
-  (should (boundp 'claudemacs-notify-on-await)))
+  (should (featurep 'claude-agent))
+  (should (fboundp 'claude-run))
+  (should (fboundp 'claude-kill))
+  (should (fboundp 'claude-toggle-buffer))
+  (should (boundp 'claude-program))
+  (should (boundp 'claude-notify-on-await)))
 
-(ert-deftest claudemacs-test-custom-group-exists ()
-  "Test that claudemacs custom group is properly defined."
+(ert-deftest claude-test-custom-group-exists ()
+  "Test that claude-agent custom group is properly defined."
   :tags '(:unit :sanity)
-  (should (get 'claudemacs 'group-documentation))
+  (should (get 'claude-agent 'group-documentation))
   ;; Check that the group has members (custom variables and faces)
-  (should (get 'claudemacs 'custom-group))
+  (should (get 'claude-agent 'custom-group))
   ;; Verify some expected members are in the group
-  (let ((members (get 'claudemacs 'custom-group)))
-    (should (assq 'claudemacs-program members))
-    (should (assq 'claudemacs-notify-on-await members))))
+  (let ((members (get 'claude-agent 'custom-group)))
+    (should (assq 'claude-program members))
+    (should (assq 'claude-notify-on-await members))))
 
 ;;; Project Root Detection Tests
 
-(ert-deftest claudemacs-test-project-root-detection-git ()
+(ert-deftest claude-test-project-root-detection-git ()
   "Test project root detection with git repository."
   :tags '(:unit :project)
-  (let ((test-dir (make-temp-file "claudemacs-test" t)))
+  (let ((test-dir (make-temp-file "claude-test" t)))
     (unwind-protect
         (progn
           ;; Create a git repo
@@ -105,7 +105,7 @@ The file is automatically cleaned up after BODY executes."
             (cl-letf (((symbol-function 'buffer-file-name) 
                        (lambda () test-file)))
               ;; Remove trailing slash for comparison
-              (should (string= (file-name-as-directory (claudemacs--project-root)) 
+              (should (string= (file-name-as-directory (claude--project-root)) 
                                (file-name-as-directory test-dir)))))
           
           ;; Test from subdirectory
@@ -115,17 +115,17 @@ The file is automatically cleaned up after BODY executes."
             (write-region "sub content" nil sub-file)
             (cl-letf (((symbol-function 'buffer-file-name) 
                        (lambda () sub-file)))
-              (should (string= (file-name-as-directory (claudemacs--project-root)) 
+              (should (string= (file-name-as-directory (claude--project-root)) 
                                (file-name-as-directory test-dir))))))
       
       ;; Cleanup
       (when (file-exists-p test-dir)
         (delete-directory test-dir t)))))
 
-(ert-deftest claudemacs-test-project-root-detection-no-git ()
+(ert-deftest claude-test-project-root-detection-no-git ()
   "Test project root detection without git repository."
   :tags '(:unit :project)
-  (let ((test-dir (make-temp-file "claudemacs-no-git-test" t)))
+  (let ((test-dir (make-temp-file "claude-no-git-test" t)))
     (unwind-protect
         (progn
           ;; Create a regular directory (no git)
@@ -137,16 +137,16 @@ The file is automatically cleaned up after BODY executes."
             (cl-letf (((symbol-function 'buffer-file-name) 
                        (lambda () test-file)))
               ;; Should return buffer dir since there's no git repo
-              (should (string= (file-name-directory (buffer-file-name)) (claudemacs--project-root))))))
+              (should (string= (file-name-directory (buffer-file-name)) (claude--project-root))))))
       
       ;; Cleanup
       (when (file-exists-p test-dir)
         (delete-directory test-dir t)))))
 
-(ert-deftest claudemacs-test-project-root-with-explicit-dir ()
+(ert-deftest claude-test-project-root-with-explicit-dir ()
   "Test project root detection with explicit directory parameter."
   :tags '(:unit :project)
-  (let ((test-dir (make-temp-file "claudemacs-explicit-test" t)))
+  (let ((test-dir (make-temp-file "claude-explicit-test" t)))
     (unwind-protect
         (progn
           ;; Create a git repo
@@ -160,23 +160,23 @@ The file is automatically cleaned up after BODY executes."
                          "commit" "-m" "initial" "--quiet"))
           
           ;; Test with explicit directory parameter (normalize trailing slashes)
-          (should (string= (file-name-as-directory (claudemacs--project-root test-dir)) 
+          (should (string= (file-name-as-directory (claude--project-root test-dir)) 
                            (file-name-as-directory test-dir)))
           
           ;; Test with subdirectory
           (let ((subdir (expand-file-name "sub" test-dir)))
             (make-directory subdir)
-            (should (string= (file-name-as-directory (claudemacs--project-root subdir)) 
+            (should (string= (file-name-as-directory (claude--project-root subdir)) 
                              (file-name-as-directory test-dir)))))
       
       ;; Cleanup
       (when (file-exists-p test-dir)
         (delete-directory test-dir t)))))
 
-(ert-deftest claudemacs-test-project-root-nested-repos ()
+(ert-deftest claude-test-project-root-nested-repos ()
   "Test project root detection with nested git repositories."
   :tags '(:unit :project)
-  (let ((outer-dir (make-temp-file "claudemacs-outer" t))
+  (let ((outer-dir (make-temp-file "claude-outer" t))
         (inner-dir nil))
     (unwind-protect
         (progn
@@ -203,11 +203,11 @@ The file is automatically cleaned up after BODY executes."
                          "commit" "-m" "inner" "--quiet"))
           
           ;; Test that inner directory returns inner repo, not outer (normalize paths)
-          (should (string= (file-name-as-directory (claudemacs--project-root inner-dir)) 
+          (should (string= (file-name-as-directory (claude--project-root inner-dir)) 
                            (file-name-as-directory inner-dir)))
           
           ;; Test that outer directory returns outer repo
-          (should (string= (file-name-as-directory (claudemacs--project-root outer-dir)) 
+          (should (string= (file-name-as-directory (claude--project-root outer-dir)) 
                            (file-name-as-directory outer-dir))))
       
       ;; Cleanup
@@ -216,7 +216,7 @@ The file is automatically cleaned up after BODY executes."
 
 ;;; Session ID Generation Tests
 
-(ert-deftest claudemacs-test-session-id-doom-workspace ()
+(ert-deftest claude-test-session-id-doom-workspace ()
   "Test session ID generation with Doom Emacs workspace."
   :tags '(:unit :session)
   (cl-letf (((symbol-function '+workspace-current-name)
@@ -224,9 +224,9 @@ The file is automatically cleaned up after BODY executes."
             ((symbol-function 'fboundp) 
              (lambda (func) 
                (eq func '+workspace-current-name))))
-    (should (string= (claudemacs--session-id) "my-doom-workspace"))))
+    (should (string= (claude--session-id) "my-doom-workspace"))))
 
-(ert-deftest claudemacs-test-session-id-perspective-workspace ()
+(ert-deftest claude-test-session-id-perspective-workspace ()
   "Test session ID generation with Perspective mode."
   :tags '(:unit :session)
   (cl-letf (((symbol-function '+workspace-current-name) (lambda () nil))
@@ -237,29 +237,29 @@ The file is automatically cleaned up after BODY executes."
             ((symbol-function 'fboundp) 
              (lambda (func) 
                (memq func '(safe-persp-name get-current-persp)))))
-    (should (string= (claudemacs--session-id) "my-perspective"))))
+    (should (string= (claude--session-id) "my-perspective"))))
 
-(ert-deftest claudemacs-test-session-id-fallback-to-project ()
+(ert-deftest claude-test-session-id-fallback-to-project ()
   "Test session ID fallback to project root when no workspace is active."
   :tags '(:unit :session)
   (cl-letf (((symbol-function '+workspace-current-name) (lambda () nil))
             ((symbol-function 'safe-persp-name) (lambda (persp) nil))
             ((symbol-function 'get-current-persp) (lambda () nil))
             ((symbol-function 'fboundp) (lambda (func) nil))
-            ((symbol-function 'claudemacs--project-root) (lambda () "/tmp/test-project"))
+            ((symbol-function 'claude--project-root) (lambda () "/tmp/test-project"))
             ((symbol-function 'file-truename) (lambda (path) path)))
-    (should (string= (claudemacs--session-id) "/tmp/test-project"))))
+    (should (string= (claude--session-id) "/tmp/test-project"))))
 
-(ert-deftest claudemacs-test-session-id-empty-workspace-names ()
+(ert-deftest claude-test-session-id-empty-workspace-names ()
   "Test session ID with empty or nil workspace names."
   :tags '(:unit :session)
   ;; Test with Doom workspace returning empty string
   (cl-letf (((symbol-function '+workspace-current-name) (lambda () ""))
             ((symbol-function 'fboundp) 
              (lambda (func) (eq func '+workspace-current-name)))
-            ((symbol-function 'claudemacs--project-root) (lambda () "/fallback"))
+            ((symbol-function 'claude--project-root) (lambda () "/fallback"))
             ((symbol-function 'file-truename) (lambda (path) path)))
-    (should (string= (claudemacs--session-id) "/fallback")))
+    (should (string= (claude--session-id) "/fallback")))
   
   ;; Test with Perspective returning nil
   (cl-letf (((symbol-function '+workspace-current-name) (lambda () nil))
@@ -267,11 +267,11 @@ The file is automatically cleaned up after BODY executes."
             ((symbol-function 'get-current-persp) (lambda () 'fake-persp))
             ((symbol-function 'fboundp) 
              (lambda (func) (memq func '(safe-persp-name get-current-persp))))
-            ((symbol-function 'claudemacs--project-root) (lambda () "/fallback2"))
+            ((symbol-function 'claude--project-root) (lambda () "/fallback2"))
             ((symbol-function 'file-truename) (lambda (path) path)))
-    (should (string= (claudemacs--session-id) "/fallback2"))))
+    (should (string= (claude--session-id) "/fallback2"))))
 
-(ert-deftest claudemacs-test-session-id-workspace-priority ()
+(ert-deftest claude-test-session-id-workspace-priority ()
   "Test that Doom workspace takes priority over Perspective."
   :tags '(:unit :session)
   (cl-letf (((symbol-function '+workspace-current-name) (lambda () "doom-wins"))
@@ -280,84 +280,84 @@ The file is automatically cleaned up after BODY executes."
             ((symbol-function 'fboundp) 
              (lambda (func) 
                (memq func '(+workspace-current-name safe-persp-name get-current-persp)))))
-    (should (string= (claudemacs--session-id) "doom-wins"))))
+    (should (string= (claude--session-id) "doom-wins"))))
 
 ;;; Buffer Name Generation Tests
 
-(ert-deftest claudemacs-test-buffer-name-generation ()
+(ert-deftest claude-test-buffer-name-generation ()
   "Test buffer name generation from session ID."
   :tags '(:unit :session)
-  (cl-letf (((symbol-function 'claudemacs--session-id) (lambda () "test-session")))
-    (should (string= (claudemacs--get-buffer-name) "*claude:test-session*"))))
+  (cl-letf (((symbol-function 'claude--session-id) (lambda () "test-session")))
+    (should (string= (claude--get-buffer-name) "*claude:test-session*"))))
 
-(ert-deftest claudemacs-test-buffer-name-with-special-chars ()
+(ert-deftest claude-test-buffer-name-with-special-chars ()
   "Test buffer name generation with special characters in session ID."
   :tags '(:unit :session)
-  (cl-letf (((symbol-function 'claudemacs--session-id) 
+  (cl-letf (((symbol-function 'claude--session-id) 
              (lambda () "/path/with/slashes")))
-    (should (string= (claudemacs--get-buffer-name) "*claude:/path/with/slashes*"))))
+    (should (string= (claude--get-buffer-name) "*claude:/path/with/slashes*"))))
 
-(ert-deftest claudemacs-test-buffer-detection ()
-  "Test claudemacs buffer detection."
+(ert-deftest claude-test-buffer-detection ()
+  "Test Claude buffer detection."
   :tags '(:unit :session)
-  (claudemacs-test-with-temp-buffer
-    ;; Test non-claudemacs buffer
-    (should-not (claudemacs--is-claudemacs-buffer-p))
+  (claude-test-with-temp-buffer
+    ;; Test non-Claude buffer
+    (should-not (claude--is-claude-buffer-p))
     
-    ;; Test claudemacs buffer
+    ;; Test Claude buffer
     (rename-buffer "*claude:test*")
-    (should (claudemacs--is-claudemacs-buffer-p))
+    (should (claude--is-claude-buffer-p))
     
     ;; Test with specific buffer argument
     (with-temp-buffer
-      (should-not (claudemacs--is-claudemacs-buffer-p (current-buffer)))
+      (should-not (claude--is-claude-buffer-p (current-buffer)))
       (rename-buffer "*claude:another*")
-      (should (claudemacs--is-claudemacs-buffer-p (current-buffer)))))
+      (should (claude--is-claude-buffer-p (current-buffer)))))
   
   ;; Test with non-live buffer
   (let ((dead-buffer (get-buffer-create "*test-dead*")))
     (kill-buffer dead-buffer)
-    (should-not (claudemacs--is-claudemacs-buffer-p dead-buffer))))
+    (should-not (claude--is-claude-buffer-p dead-buffer))))
 
 ;;; Startup Hook Tests
 
-(ert-deftest claudemacs-test-startup-hook-exists ()
-  "Test that claudemacs-startup-hook variable exists."
+(ert-deftest claude-test-startup-hook-exists ()
+  "Test that claude-startup-hook variable exists."
   :tags '(:unit :startup-hook)
-  (should (boundp 'claudemacs-startup-hook))
-  (should (eq claudemacs-startup-hook nil))) ; Default value should be nil
+  (should (boundp 'claude-startup-hook))
+  (should (eq claude-startup-hook nil))) ; Default value should be nil
 
-(ert-deftest claudemacs-test-startup-hook-is-hook ()
-  "Test that claudemacs-startup-hook is properly defined as a hook."
+(ert-deftest claude-test-startup-hook-is-hook ()
+  "Test that claude-startup-hook is properly defined as a hook."
   :tags '(:unit :startup-hook)
-  (should (get 'claudemacs-startup-hook 'custom-type))
-  (should (eq (get 'claudemacs-startup-hook 'custom-type) 'hook)))
+  (should (get 'claude-startup-hook 'custom-type))
+  (should (eq (get 'claude-startup-hook 'custom-type) 'hook)))
 
-(ert-deftest claudemacs-test-startup-hook-documentation ()
-  "Test that claudemacs-startup-hook has proper documentation."
+(ert-deftest claude-test-startup-hook-documentation ()
+  "Test that claude-startup-hook has proper documentation."
   :tags '(:unit :startup-hook)
-  (let ((doc (documentation-property 'claudemacs-startup-hook 'variable-documentation)))
+  (let ((doc (documentation-property 'claude-startup-hook 'variable-documentation)))
     (should doc)
     (should (string-match-p "after.*finished starting up" doc))
     (should (string-match-p "current buffer" doc))))
 
-(ert-deftest claudemacs-test-startup-hook-called-during-setup ()
+(ert-deftest claude-test-startup-hook-called-during-setup ()
   "Test that claude-mcp-startup-hook is called during agent setup."
   :tags '(:integration :startup-hook)
   (let ((hook-called nil)
-        (hook-called-in-claudemacs-buffer nil)
+        (hook-called-in-claude-buffer nil)
         (test-buffer nil)
         (hook-fn (lambda () 
                    (setq hook-called t)
-                   (when (claudemacs--is-claudemacs-buffer-p)
-                     (setq hook-called-in-claudemacs-buffer t)))))
+                   (when (claude--is-claude-buffer-p)
+                     (setq hook-called-in-claude-buffer t)))))
     
     ;; Create a test hook function
     (add-hook 'claude-mcp-startup-hook hook-fn)
     
     (unwind-protect
         (progn
-          ;; Create a buffer that looks like a claudemacs buffer
+          ;; Create a buffer that looks like a Claude buffer
           (setq test-buffer (get-buffer-create "*claude:test-hook*"))
           (with-current-buffer test-buffer
             ;; Set up minimal fake claude-agent--process
@@ -370,7 +370,7 @@ The file is automatically cleaned up after BODY executes."
           
           ;; Verify hook was called
           (should hook-called)
-          (should hook-called-in-claudemacs-buffer))
+          (should hook-called-in-claude-buffer))
       
       ;; Cleanup
       (remove-hook 'claude-mcp-startup-hook hook-fn)
@@ -381,8 +381,8 @@ The file is automatically cleaned up after BODY executes."
             (delete-process claude-agent--process)))
         (kill-buffer test-buffer)))))
 
-(ert-deftest claudemacs-test-startup-hook-multiple-functions ()
-  "Test that multiple functions can be added to claudemacs-startup-hook."
+(ert-deftest claude-test-startup-hook-multiple-functions ()
+  "Test that multiple functions can be added to claude-startup-hook."
   :tags '(:integration :startup-hook)
   (let ((hook1-called nil)
         (hook2-called nil)
@@ -394,7 +394,7 @@ The file is automatically cleaned up after BODY executes."
     
     (unwind-protect
         (progn
-          ;; Create a buffer that looks like a claudemacs buffer
+          ;; Create a buffer that looks like a Claude buffer
           (setq test-buffer (get-buffer-create "*claude:test-multiple*"))
           (with-current-buffer test-buffer
             ;; Set up minimal fake claude-agent--process
@@ -419,8 +419,8 @@ The file is automatically cleaned up after BODY executes."
             (delete-process claude-agent--process)))
         (kill-buffer test-buffer)))))
 
-(ert-deftest claudemacs-test-startup-hook-buffer-context ()
-  "Test that claude-mcp-startup-hook runs with claudemacs buffer as current buffer."
+(ert-deftest claude-test-startup-hook-buffer-context ()
+  "Test that claude-mcp-startup-hook runs with Claude buffer as current buffer."
   :tags '(:integration :startup-hook)
   (let ((captured-buffer-name nil)
         (captured-cwd nil)
@@ -434,7 +434,7 @@ The file is automatically cleaned up after BODY executes."
     
     (unwind-protect
         (progn
-          ;; Create a buffer that looks like a claudemacs buffer
+          ;; Create a buffer that looks like a Claude buffer
           (setq test-buffer (get-buffer-create "*claude:test-context*"))
           (with-current-buffer test-buffer
             ;; Set up minimal fake environment
@@ -464,7 +464,7 @@ The file is automatically cleaned up after BODY executes."
             (delete-process claude-agent--process)))
         (kill-buffer test-buffer)))))
 
-(ert-deftest claudemacs-test-startup-hook-error-handling ()
+(ert-deftest claude-test-startup-hook-error-handling ()
   "Test that errors in claude-mcp-startup-hook are propagated."
   :tags '(:integration :startup-hook)
   (let ((hook-error-occurred nil)
@@ -476,7 +476,7 @@ The file is automatically cleaned up after BODY executes."
     
     (unwind-protect
         (progn
-          ;; Create a buffer that looks like a claudemacs buffer
+          ;; Create a buffer that looks like a Claude buffer
           (setq test-buffer (get-buffer-create "*claude:test-error*"))
           (with-current-buffer test-buffer
             ;; Set up minimal fake claude-agent--process
@@ -503,59 +503,40 @@ The file is automatically cleaned up after BODY executes."
 
 ;;; Custom Variable Tests
 
-(ert-deftest claudemacs-test-custom-variable-defaults ()
+(ert-deftest claude-test-custom-variable-defaults ()
   "Test that custom variables have correct default values."
   :tags '(:unit :config)
-  (should (string= claudemacs-program "claude"))
-  (should (eq claudemacs-program-switches nil))
-  (should (eq claudemacs-switch-to-buffer-on-create t))
-  (should (eq claudemacs-switch-to-buffer-on-toggle t))
-  (should (eq claudemacs-m-return-is-submit nil))
-  (should (eq claudemacs-shift-return-newline t))
-  (should (eq claudemacs-switch-to-buffer-on-file-add nil))
-  (should (eq claudemacs-notify-on-await t))
-  (should (string= claudemacs-notification-sound-mac "Submarine"))
-  (should (eq claudemacs-startup-hook nil))) ; Include startup hook in defaults test
+  (should (string= claude-program "claude"))
+  (should (eq claude-program-switches nil))
+  (should (eq claude-switch-to-buffer-on-create t))
+  (should (eq claude-switch-to-buffer-on-toggle t))
+  (should (eq claude-m-return-is-submit nil))
+  (should (eq claude-shift-return-newline t))
+  (should (eq claude-switch-to-buffer-on-file-add nil))
+  (should (eq claude-notify-on-await t))
+  (should (string= claude-notification-sound-mac "Submarine"))
+  (should (eq claude-startup-hook nil))) ; Include startup hook in defaults test
 
-(ert-deftest claudemacs-test-custom-variable-types ()
+(ert-deftest claude-test-custom-variable-types ()
   "Test that custom variables have correct types."
   :tags '(:unit :config)
   ;; Test string variables
-  (should (stringp claudemacs-program))
-  (should (stringp claudemacs-notification-sound-mac))
+  (should (stringp claude-program))
+  (should (stringp claude-notification-sound-mac))
   
   ;; Test boolean variables
-  (should (booleanp claudemacs-switch-to-buffer-on-create))
-  (should (booleanp claudemacs-switch-to-buffer-on-toggle))
-  (should (booleanp claudemacs-m-return-is-submit))
-  (should (booleanp claudemacs-shift-return-newline))
-  (should (booleanp claudemacs-switch-to-buffer-on-file-add))
-  (should (booleanp claudemacs-notify-on-await))
+  (should (booleanp claude-switch-to-buffer-on-create))
+  (should (booleanp claude-switch-to-buffer-on-toggle))
+  (should (booleanp claude-m-return-is-submit))
+  (should (booleanp claude-shift-return-newline))
+  (should (booleanp claude-switch-to-buffer-on-file-add))
+  (should (booleanp claude-notify-on-await))
   
   ;; Test list variable
-  (should (listp claudemacs-program-switches)))
+  (should (listp claude-program-switches)))
 
-(ert-deftest claudemacs-test-bell-handler-behavior ()
-  "Test that claudemacs-notify-on-await affects bell handler behavior."
-  :tags '(:unit :config)
-  (let ((notification-called nil))
-    ;; Mock system notification
-    (cl-letf (((symbol-function 'claudemacs--system-notification)
-               (lambda (&rest args) (setq notification-called t))))
-      
-      ;; Test with notifications enabled
-      (let ((claudemacs-notify-on-await t))
-        (claudemacs--bell-handler nil)
-        (should notification-called))
-      
-      ;; Test with notifications disabled
-      (setq notification-called nil)
-      (let ((claudemacs-notify-on-await nil))
-        (claudemacs--bell-handler nil)
-        (should-not notification-called)))))
-
-(ert-deftest claudemacs-test-notification-sound-behavior ()
-  "Test that claudemacs-notification-sound-mac affects notification calls."
+(ert-deftest claude-test-notification-sound-behavior ()
+  "Test that claude-notification-sound-mac affects notification calls."
   :tags '(:unit :config)
   (let ((notification-command nil))
     ;; Mock call-process to capture the full command
@@ -567,37 +548,37 @@ The file is automatically cleaned up after BODY executes."
               (system-type 'darwin))
       
       ;; Test with custom sound
-      (let ((claudemacs-notification-sound-mac "Ping"))
-        (claudemacs--system-notification "Test message" "Test title")
+      (let ((claude-notification-sound-mac "Ping"))
+        (claude--system-notification "Test message" "Test title")
         (should notification-command)
         (should (string-match-p "Ping" notification-command)))
       
       ;; Test with different sound
       (setq notification-command nil)
-      (let ((claudemacs-notification-sound-mac "Glass"))
-        (claudemacs--system-notification "Test message" "Test title") 
+      (let ((claude-notification-sound-mac "Glass"))
+        (claude--system-notification "Test message" "Test title") 
         (should notification-command)
         (should (string-match-p "Glass" notification-command))))))
 
-(ert-deftest claudemacs-test-program-switches-behavior ()
-  "Test that claudemacs-program-switches affects command construction."
+(ert-deftest claude-test-program-switches-behavior ()
+  "Test that claude-program-switches affects command construction."
   :tags '(:unit :config)
   ;; Test the switches logic directly without complex mocking
-  (let ((claudemacs-program-switches nil)
+  (let ((claude-program-switches nil)
         (args '("--resume")))
     ;; Test with no custom switches - should just have the passed args
-    (let ((result (remove nil (append args claudemacs-program-switches))))
+    (let ((result (remove nil (append args claude-program-switches))))
       (should (equal result '("--resume"))))
     
     ;; Test with custom switches - should include both
-    (setq claudemacs-program-switches '("--verbose" "--test"))
-    (let ((result (remove nil (append args claudemacs-program-switches))))
+    (setq claude-program-switches '("--verbose" "--test"))
+    (let ((result (remove nil (append args claude-program-switches))))
       (should (member "--verbose" result))
       (should (member "--test" result))
       (should (member "--resume" result))
       (should (= (length result) 3)))))
 
-(ert-deftest claudemacs-test-switch-to-buffer-behavior ()
+(ert-deftest claude-test-switch-to-buffer-behavior ()
   "Test buffer switching behavior based on custom variables."
   :tags '(:unit :config)
   (let ((window-selected nil))
@@ -614,19 +595,19 @@ The file is automatically cleaned up after BODY executes."
             (progn
               ;; Test with switching enabled
               (setq window-selected nil)
-              (let ((claudemacs-switch-to-buffer-on-create t))
+              (let ((claude-switch-to-buffer-on-create t))
                 (with-current-buffer test-buffer
                   (let ((window (display-buffer test-buffer)))
-                    (when claudemacs-switch-to-buffer-on-create
+                    (when claude-switch-to-buffer-on-create
                       (select-window window))))
                 (should window-selected))
               
               ;; Test with switching disabled  
               (setq window-selected nil)
-              (let ((claudemacs-switch-to-buffer-on-create nil))
+              (let ((claude-switch-to-buffer-on-create nil))
                 (with-current-buffer test-buffer
                   (let ((window (display-buffer test-buffer)))
-                    (when claudemacs-switch-to-buffer-on-create
+                    (when claude-switch-to-buffer-on-create
                       (select-window window))))
                 (should-not window-selected)))
           

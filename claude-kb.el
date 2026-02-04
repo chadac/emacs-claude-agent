@@ -2,7 +2,7 @@
 ;; Author: Claude + Chad Crawford
 ;; Version: 0.1.0
 ;; Package-Requires: ((emacs "28.1") (org-roam "2.0"))
-;; Keywords: claudemacs ai emacs llm tools knowledge-base
+;; Keywords: claude-agent ai emacs llm tools knowledge-base
 ;; SPDX-License-Identifier: MIT
 ;; This file is not part of GNU Emacs.
 
@@ -101,15 +101,10 @@ Otherwise return nil."
               (let ((main-git-dir (substring gitdir 0 (match-beginning 0))))
                 (expand-file-name main-git-dir)))))))))
 
-(defvar claudemacs-session-cwd nil
-  "The working directory for the current claudemacs session.
-Set by the MCP server via a let binding to provide session context.")
-
 (defun claude-kb--get-current-project ()
   "Get the current project name from context.
 Uses the session cwd, with worktree detection to find the main repo."
-  (let* ((cwd (or (bound-and-true-p claudemacs-session-cwd)
-                  (bound-and-true-p claude-session-cwd)
+  (let* ((cwd (or (bound-and-true-p claude-session-cwd)
                   (bound-and-true-p claude--cwd)
                   default-directory))
          (expanded-cwd (expand-file-name cwd))

@@ -1069,7 +1069,7 @@ If the buffer was unmodified before locking, it will be auto-saved after writing
   "The original buffer shown in the watch window before watch mode.")
 
 (defvar claude-mcp--watch-source-buffer nil
-  "The claudemacs buffer that watch mode is following.")
+  "The Claude buffer that watch mode is following.")
 
 (defface claude-mcp-watch-mode-line-face
   '((t :background "#e5c07b" :foreground "#282c34" :weight bold))
@@ -1339,7 +1339,7 @@ Designed to be called via emacsclient by Claude AI."
           ;; Pass work-dir and buffer name to claude-restart to target the correct session
           (run-at-time 0.5 nil
                        (lambda (dir buf)
-                         (require 'claudemacs)
+                         (require 'claude-agent)
                          ;; Call claude-restart with both work-dir and buffer-name
                          (claude-restart dir buf))
                        work-dir target-buffer)
@@ -1598,10 +1598,10 @@ Designed to be called via MCP by Claude AI."
          (end integer :required "End position (1-indexed)")))
 
 (claude-mcp-deftool clear-buffer
-  "Clear the terminal content in a claudemacs buffer. Useful when the buffer gets too large and causing performance issues."
+  "Clear the terminal content in a Claude buffer. Useful when the buffer gets too large and causing performance issues."
   :function #'claude-mcp-clear-buffer
   :safe nil
-  :args ((buffer-name string :required "Name of the claudemacs buffer to clear")))
+  :args ((buffer-name string :required "Name of the Claude buffer to clear")))
 
 (defun claude-mcp-eval (expression)
   "Evaluate EXPRESSION as Emacs Lisp and return the result.

@@ -261,7 +261,7 @@ Designed to be called via MCP by Claude AI."
     (with-current-buffer buf
       (unless (eq major-mode 'org-mode)
         (org-mode)
-        (insert "#+TITLE: Claudemacs Message Board\n")
+        (insert "#+TITLE: Claude Agent Message Board\n")
         (insert "#+STARTUP: overview\n\n")
         (insert "* Log\n\n")))
     buf))
@@ -370,10 +370,10 @@ Counts messages by sender/recipient pairs."
   :function #'claude-mcp-spawn-agent
   :safe t
   :args ((directory string :required "Directory path where the agent should work (will be expanded)")
-         (agent-name string "Optional identifier for the agent (e.g., 'test', 'debug'). If not provided, buffer will be named *claudemacs:/path*. If provided, buffer will be *claudemacs:/path:agent-name*.")))
+         (agent-name string "Optional identifier for the agent (e.g., 'test', 'debug'). If not provided, buffer will be named *claude:/path*. If provided, buffer will be *claude:/path:agent-name*.")))
 
 (claude-mcp-deftool list-agents
-  "List all running claudemacs agent sessions. Returns (buffer-name, directory) pairs."
+  "List all running Claude agent sessions. Returns (buffer-name, directory) pairs."
   :function #'claude-mcp-list-agents
   :safe t
   :args ())

@@ -48,7 +48,7 @@
       (unless (assoc "cc" org-roam-capture-templates)
         (setq org-roam-capture-templates
               (append org-roam-capture-templates
-                      `(("cc" "Claudemacs Concept" plain "%?"
+                      `(("cc" "Claude Concept" plain "%?"
                          :target (file+head
                                   ,(concat "projects/" project-name "/concept-${slug}.org")
                                   ":PROPERTIES:
@@ -61,7 +61,7 @@
 #+filetags: :ai_generated:claude:concepts:${project}:
 ")
                          :unnarrowed t)
-                        ("cd" "Claudemacs Documentation" plain "%?"
+                        ("cd" "Claude Documentation" plain "%?"
                          :target (file+head
                                   ,(concat "projects/" project-name "/doc-${slug}.org")
                                   ":PROPERTIES:
@@ -74,7 +74,7 @@
 #+filetags: :ai_generated:claude:documentation:${project}:
 ")
                          :unnarrowed t)
-                        ("ct" "Claudemacs Tool" plain "%?"
+                        ("ct" "Claude Tool" plain "%?"
                          :target (file+head
                                   ,(concat "projects/" project-name "/tool-${slug}.org")
                                   ":PROPERTIES:
@@ -87,7 +87,7 @@
 #+filetags: :ai_generated:claude:tools:${project}:
 ")
                          :unnarrowed t)
-                        ("cs" "Claudemacs Summary" plain "%?"
+                        ("cs" "Claude Summary" plain "%?"
                          :target (file+head
                                   ,(concat "projects/" project-name "/summary-${slug}.org")
                                   ":PROPERTIES:
@@ -142,7 +142,7 @@
         (org-roam-capture))
     (call-interactively #'claude-notes-add-summary-interactive)))
 
-;;;; TODO Capture with Claudemacs Integration
+;;;; TODO Capture with Claude Integration
 
 (defvar claude-notes--todo-target-project nil
   "The projectile project root for the current TODO capture.
@@ -345,7 +345,7 @@ Returns the file path of the created node."
 Each section is a (NAME . DESCRIPTION) pair.")
 
 (defconst claude-notes-default-template
-  "#+TITLE: Claudemacs Session Notes
+  "#+TITLE: Claude Session Notes
 #+STARTUP: overview
 
 * SUMMARIES
@@ -1343,13 +1343,13 @@ This helps Claude identify messages sent via the notes integration.")
                     (process-send-string claude-agent--process
                                          (format "[INPUT]\n%s\n[/INPUT]\n" prefixed-text))))
                 (message "Sent to claude: %s..." (truncate-string-to-width text 50)))
-            (user-error "Claudemacs buffer not found for %s" work-dir)))
+            (user-error "Claude buffer not found for %s" work-dir)))
       (user-error "Not in a Claude notes buffer"))))
 
 (defun claude-notes--get-claude-buffer ()
   "Get the Claude buffer associated with this notes buffer.
 Notes buffer: *claude-notes:/path/to/dir*
-Claudemacs buffer: *claude:/path/to/dir/*"
+Claude buffer: *claude:/path/to/dir/*"
   (when-let ((path (claude-notes--get-work-dir-from-buffer)))
     (get-buffer (format "*claude:%s/*" path))))
 

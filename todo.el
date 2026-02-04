@@ -9,7 +9,7 @@
 
 ;;; Commentary:
 
-;; Org-roam based TODO management with optional Claude/claudemacs integration.
+;; Org-roam based TODO management with optional Claude integration.
 ;;
 ;; This provides a simple workflow:
 ;; 1. Create a TODO node for a project: `org-roam-todo-capture' (C-c n t t)
@@ -1986,8 +1986,7 @@ Otherwise searches by title."
   (cond
    ;; No ID - try to infer from current worktree
    ((null todo-id)
-    (let* ((cwd (or (bound-and-true-p claudemacs-session-cwd)
-                    (bound-and-true-p claude-session-cwd)
+    (let* ((cwd (or (bound-and-true-p claude-session-cwd)
                     (bound-and-true-p claude--cwd)
                     default-directory))
            (expanded-cwd (directory-file-name (expand-file-name cwd)))
@@ -2253,8 +2252,7 @@ This will:
 6. Set TODO status to 'review'
 7. Store the COMMIT-MESSAGE on the TODO for the merge workflow
 The user will then review the commit and run the merge workflow."
-  (let* ((cwd (or (bound-and-true-p claudemacs-session-cwd)
-                  (bound-and-true-p claude-session-cwd)
+  (let* ((cwd (or (bound-and-true-p claude-session-cwd)
                   (bound-and-true-p claude--cwd)
                   default-directory))
          (expanded-cwd (directory-file-name (expand-file-name cwd)))

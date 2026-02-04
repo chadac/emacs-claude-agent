@@ -367,7 +367,7 @@ Columns: Project, Label, Status, Worktree, Directory."
     (kbd "o") #'claude-sessions-display-buffer
     (kbd "q") #'quit-window))
 
-(define-derived-mode claude-sessions-mode tabulated-list-mode "Claudemacs-Sessions"
+(define-derived-mode claude-sessions-mode tabulated-list-mode "Claude-Sessions"
   "Major mode for viewing and managing Claude sessions.
 
 \\{claude-sessions-mode-map}"
