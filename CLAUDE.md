@@ -134,3 +134,13 @@ claude-mcp-process.el (standalone, loaded separately)
 ```
 
 Note: `claude-agent.el` defines `claude--package-root` and the defcustom. Files loaded before it (`claude-mcp.el`, `todo.el`) use `fboundp` guards to safely call `claude--package-root` when available.
+
+## Visual Style Guide
+
+All user-visible UI — faces, colors, overlays, dialogs — must follow
+[docs/STYLE_GUIDE.md](docs/STYLE_GUIDE.md). Key rules:
+
+- **Color palette**: Use only the Atom One Dark palette colors listed in the guide
+- **Faces**: Always use `defface` with both dark and light theme variants; never inline hex colors in `propertize`
+- **Height scaling**: Use only the four standardized tiers (0.85, 1.0, 1.1, 1.2)
+- **Overlays**: Follow the locked-region label pattern for all overlay indicators

@@ -231,11 +231,6 @@ Claude buffer as the current buffer."
   :type 'hook
   :group 'claude-agent)
 
-(defface claude-repl-face
-  nil
-  "Face for Claude REPL."
-  :group 'claude-agent)
-
 ;;;; Buffer-local Variables
 (defvar-local claude--cwd nil
   "Buffer-local variable storing the current working directory for this Claude session.")

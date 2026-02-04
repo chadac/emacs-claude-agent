@@ -316,97 +316,154 @@ If the associated TODO is in review status, auto-reverts to active."
 ;;;; Faces
 
 (defface claude-agent-header-face
-  '((t :foreground "#56b6c2" :slant italic))
+  '(((class color) (background dark))
+     (:foreground "#56b6c2" :slant italic))
+    ((class color) (background light))
+     (:foreground "#0184bc" :slant italic)))
   "Face for the header section."
   :group 'claude-agent)
 
 (defface claude-agent-user-header-face
-  '((t :foreground "#61afef" :weight bold))
+  '(((class color) (background dark))
+     (:foreground "#61afef" :weight bold))
+    ((class color) (background light))
+     (:foreground "#4078f2" :weight bold)))
   "Face for user message headers."
   :group 'claude-agent)
 
 (defface claude-agent-user-face
-  '((t :foreground "#c8ccd4"))  ; Slightly off-white (lighter than default)
+  '(((class color) (background dark))
+     (:foreground "#c8ccd4"))
+    ((class color) (background light))
+     (:foreground "#383a42")))
   "Face for user message text."
   :group 'claude-agent)
 
 (defface claude-agent-assistant-header-face
-  '((t :foreground "#c678dd" :weight bold))
+  '(((class color) (background dark))
+     (:foreground "#c678dd" :weight bold))
+    ((class color) (background light))
+     (:foreground "#a626a4" :weight bold)))
   "Face for assistant message headers."
   :group 'claude-agent)
 
 (defface claude-agent-assistant-face
-  '((t :foreground "#e5e5e5"))
+  '(((class color) (background dark))
+     (:foreground "#e5e5e5"))
+    ((class color) (background light))
+     (:foreground "#1a1a1a")))
   "Face for assistant message text."
   :group 'claude-agent)
 
 (defface claude-agent-tool-face
-  '((t :foreground "#e5c07b" :slant italic))
+  '(((class color) (background dark))
+     (:foreground "#e5c07b" :slant italic))
+    ((class color) (background light))
+     (:foreground "#986801" :slant italic)))
   "Face for tool call indicators."
   :group 'claude-agent)
 
 (defface claude-agent-status-face
-  '((t :foreground "#56b6c2" :slant italic))
+  '(((class color) (background dark))
+     (:foreground "#56b6c2" :slant italic))
+    ((class color) (background light))
+     (:foreground "#0184bc" :slant italic)))
   "Face for status info section (model, cost, session)."
   :group 'claude-agent)
 
 (defface claude-agent-thinking-face
-  '((t :foreground "#98c379" :weight bold))
+  '(((class color) (background dark))
+     (:foreground "#98c379" :weight bold))
+    ((class color) (background light))
+     (:foreground "#50a14f" :weight bold)))
   "Face for thinking indicator."
   :group 'claude-agent)
 
 (defface claude-agent-progress-face
-  '((t :foreground "#61afef"))
+  '(((class color) (background dark))
+     (:foreground "#61afef"))
+    ((class color) (background light))
+     (:foreground "#4078f2")))
   "Face for progress indicators."
   :group 'claude-agent)
 
 (defface claude-agent-progress-header-face
-  '((t :foreground "#5c6370" :slant italic))
+  '(((class color) (background dark))
+     (:foreground "#5c6370" :slant italic))
+    ((class color) (background light))
+     (:foreground "#a0a1a7" :slant italic)))
   "Face for progress section header."
   :group 'claude-agent)
 
 (defface claude-agent-compacting-face
-  '((t :foreground "#e5c07b" :weight bold :slant italic))
+  '(((class color) (background dark))
+     (:foreground "#e5c07b" :weight bold :slant italic))
+    ((class color) (background light))
+     (:foreground "#986801" :weight bold :slant italic)))
   "Face for compacting indicator (yellow/warning color)."
   :group 'claude-agent)
 
 (defface claude-agent-todo-pending-face
-  '((t :foreground "#5c6370"))
+  '(((class color) (background dark))
+     (:foreground "#5c6370"))
+    ((class color) (background light))
+     (:foreground "#a0a1a7")))
   "Face for pending todo items."
   :group 'claude-agent)
 
 (defface claude-agent-todo-in-progress-face
-  '((t :foreground "#61afef" :weight bold))
+  '(((class color) (background dark))
+     (:foreground "#61afef" :weight bold))
+    ((class color) (background light))
+     (:foreground "#4078f2" :weight bold)))
   "Face for in-progress todo items."
   :group 'claude-agent)
 
 (defface claude-agent-todo-completed-face
-  '((t :foreground "#98c379" :strike-through t))
+  '(((class color) (background dark))
+     (:foreground "#98c379" :strike-through t))
+    ((class color) (background light))
+     (:foreground "#50a14f" :strike-through t)))
   "Face for completed todo items."
   :group 'claude-agent)
 
 (defface claude-agent-error-face
-  '((t :foreground "#e06c75" :weight bold))
+  '(((class color) (background dark))
+     (:foreground "#e06c75" :weight bold))
+    ((class color) (background light))
+     (:foreground "#e45649" :weight bold)))
   "Face for error messages."
   :group 'claude-agent)
 
 (defface claude-agent-session-face
-  '((t :foreground "#56b6c2" :slant italic))
+  '(((class color) (background dark))
+     (:foreground "#56b6c2" :slant italic))
+    ((class color) (background light))
+     (:foreground "#0184bc" :slant italic)))
   "Face for session info messages."
   :group 'claude-agent)
 
 (defface claude-agent-system-header-face
-  '((t :foreground "#5c6370" :weight bold))
+  '(((class color) (background dark))
+     (:foreground "#5c6370" :weight bold))
+    ((class color) (background light))
+     (:foreground "#a0a1a7" :weight bold)))
   "Face for system message headers (the \"system>\" prompt)."
   :group 'claude-agent)
 
 (defface claude-agent-system-message-face
-  '((t :foreground "#5c6370" :slant italic))
+  '(((class color) (background dark))
+     (:foreground "#5c6370" :slant italic))
+    ((class color) (background light))
+     (:foreground "#a0a1a7" :slant italic)))
   "Face for system message body text shown in the REPL."
   :group 'claude-agent)
 
 (defface claude-agent-input-header-face
-  '((t :foreground "#5c6370" :weight bold))
+  '(((class color) (background dark))
+     (:foreground "#5c6370" :weight bold))
+    ((class color) (background light))
+     (:foreground "#a0a1a7" :weight bold)))
   "Face for the input area header."
   :group 'claude-agent)
 
@@ -421,7 +478,10 @@ If the associated TODO is in review status, auto-reverts to active."
   :group 'claude-agent)
 
 (defface claude-agent-diff-header
-  '((t :foreground "#5c6370"))
+  '(((class color) (background dark))
+     (:foreground "#5c6370"))
+    ((class color) (background light))
+     (:foreground "#a0a1a7")))
   "Face for diff box drawing characters."
   :group 'claude-agent)
 
@@ -431,7 +491,10 @@ If the associated TODO is in review status, auto-reverts to active."
   :group 'claude-agent)
 
 (defface claude-agent-line-number
-  '((t :foreground "#5c6370"))
+  '(((class color) (background dark))
+     (:foreground "#5c6370"))
+    ((class color) (background light))
+     (:foreground "#a0a1a7")))
   "Face for line numbers in file content display."
   :group 'claude-agent)
 
@@ -559,7 +622,10 @@ a distinct 🚫 indicator instead of the normal ✗ error icon.")
   "Placeholder text shown when input area is empty.")
 
 (defface claude-agent-placeholder-face
-  '((t :foreground "#5c6370" :slant italic))
+  '(((class color) (background dark))
+     (:foreground "#5c6370" :slant italic))
+    ((class color) (background light))
+     (:foreground "#a0a1a7" :slant italic)))
   "Face for placeholder text in empty input area."
   :group 'claude-agent)
 
@@ -589,20 +655,28 @@ Used by system message hooks to determine when to fire.")
 Used by on_start/on_resume hooks to determine if they should fire.")
 
 (defface claude-agent-queued-face
-  '((t :foreground "#5c6370" :slant italic))
+  '(((class color) (background dark))
+     (:foreground "#5c6370" :slant italic))
+    ((class color) (background light))
+     (:foreground "#a0a1a7" :slant italic)))
   "Face for queued messages (grayed out)."
   :group 'claude-agent)
 
 (defface claude-agent-queued-header-face
-  '((t :foreground "#5c6370" :weight bold))
+  '(((class color) (background dark))
+     (:foreground "#5c6370" :weight bold))
+    ((class color) (background light))
+     (:foreground "#a0a1a7" :weight bold)))
   "Face for queued message headers."
   :group 'claude-agent)
 
 (defface claude-agent-queue-highlight-face
-  '((t :background "#3e4451"))
+  '(((class color) (background dark))
+     (:background "#3e4451"))
+    ((class color) (background light))
+     (:background "#e5e5e6")))
   "Face for highlighting the queued message under the cursor."
   :group 'claude-agent)
-
 (defvar-local claude-agent--queue-highlight-overlay nil
   "Overlay used to highlight the queued message at point.")
 
@@ -783,7 +857,10 @@ STATUS should be `success', `error', or `denied'."
     (posframe-hide claude-agent--tool-popup-buffer)))
 
 (defface claude-agent-popup-hint-face
-  '((t :foreground "#5c6370" :slant italic))
+  '(((class color) (background dark))
+     (:foreground "#5c6370" :slant italic))
+    ((class color) (background light))
+     (:foreground "#a0a1a7" :slant italic)))
   "Face for hint text in tool popup."
   :group 'claude-agent)
 
@@ -1565,55 +1642,84 @@ Returns the status overlay for later updates (e.g., permission denied)."
     status-ov))
 
 (defface claude-agent-tool-name-face
-  '((t :foreground "#e5c07b" :weight bold))
+  '(((class color) (background dark))
+     (:foreground "#e5c07b" :weight bold))
+    ((class color) (background light))
+     (:foreground "#986801" :weight bold)))
   "Face for tool names in tool calls (orange, like headers)."
   :group 'claude-agent)
 
 (defface claude-agent-tool-arrow-face
-  '((t :foreground "#e5c07b"))
+  '(((class color) (background dark))
+     (:foreground "#e5c07b"))
+    ((class color) (background light))
+     (:foreground "#986801")))
   "Face for the arrow separator in tool calls."
   :group 'claude-agent)
 
 (defface claude-agent-tool-cmd-face
-  '((t :foreground "#abb2bf"))
+  '(((class color) (background dark))
+     (:foreground "#abb2bf"))
+    ((class color) (background light))
+     (:foreground "#383a42")))
   "Face for command text in tool calls."
   :group 'claude-agent)
 
 (defface claude-agent-tool-file-face
-  '((t :foreground "#61afef"))
+  '(((class color) (background dark))
+     (:foreground "#61afef"))
+    ((class color) (background light))
+     (:foreground "#4078f2")))
   "Face for file paths in tool calls."
   :group 'claude-agent)
 
 (defface claude-agent-tool-pattern-face
-  '((t :foreground "#98c379"))
+  '(((class color) (background dark))
+     (:foreground "#98c379"))
+    ((class color) (background light))
+     (:foreground "#50a14f")))
   "Face for patterns (glob, grep) in tool calls."
   :group 'claude-agent)
 
 (defface claude-agent-tool-continuation-face
-  '((t :foreground "#5c6370"))
+  '(((class color) (background dark))
+     (:foreground "#5c6370"))
+    ((class color) (background light))
+     (:foreground "#a0a1a7")))
   "Face for continuation markers in multi-line tool calls."
   :group 'claude-agent)
 
 (defface claude-agent-tool-status-pending-face
-  '((t :foreground "#e5c07b"))
+  '(((class color) (background dark))
+     (:foreground "#e5c07b"))
+    ((class color) (background light))
+     (:foreground "#986801")))
   "Face for pending tool status icon (yellow circle)."
   :group 'claude-agent)
 
 (defface claude-agent-tool-status-success-face
-  '((t :foreground "#98c379"))
+  '(((class color) (background dark))
+     (:foreground "#98c379"))
+    ((class color) (background light))
+     (:foreground "#50a14f")))
   "Face for successful tool status icon (green checkmark)."
   :group 'claude-agent)
 
 (defface claude-agent-tool-status-error-face
-  '((t :foreground "#e06c75"))
+  '(((class color) (background dark))
+     (:foreground "#e06c75"))
+    ((class color) (background light))
+     (:foreground "#e45649")))
   "Face for error tool status icon (red X)."
   :group 'claude-agent)
 
 (defface claude-agent-tool-status-denied-face
-  '((t :foreground "#e06c75"))
+  '(((class color) (background dark))
+     (:foreground "#e06c75"))
+    ((class color) (background light))
+     (:foreground "#e45649")))
   "Face for permission-denied tool status icon (🚫)."
   :group 'claude-agent)
-
 (defun claude-agent--format-bash-multiline (command)
   "Format a multi-line bash COMMAND with pipe continuations."
   (let ((lines (split-string command "\n")))
@@ -2204,20 +2310,28 @@ Each element is permission data (an alist with tool_use_id, tool_name, tool_inpu
   "Currently selected option in permission prompt (0-3).")
 
 (defface claude-agent-permission-box-face
-  '((t :foreground "#e5c07b" :background "#3e4451" :box (:line-width 1 :color "#5c6370")))
+  '(((class color) (background dark))
+     (:foreground "#e5c07b" :background "#3e4451" :box (:line-width 1 :color "#5c6370")))
+    ((class color) (background light))
+     (:foreground "#986801" :background "#e5e5e6" :box (:line-width 1 :color "#a0a1a7"))))
   "Face for permission dialog box."
   :group 'claude-agent)
 
 (defface claude-agent-permission-selected-face
-  '((t :foreground "#282c34" :background "#61afef" :weight bold))
+  '(((class color) (background dark))
+     (:foreground "#282c34" :background "#61afef" :weight bold))
+    ((class color) (background light))
+     (:foreground "#fafafa" :background "#4078f2" :weight bold)))
   "Face for selected option in permission dialog."
   :group 'claude-agent)
 
 (defface claude-agent-permission-option-face
-  '((t :foreground "#abb2bf"))
+  '(((class color) (background dark))
+     (:foreground "#abb2bf"))
+    ((class color) (background light))
+     (:foreground "#383a42")))
   "Face for unselected options in permission dialog."
   :group 'claude-agent)
-
 (defun claude-agent--format-tool-input (tool-name tool-input)
   "Format TOOL-INPUT for display based on TOOL-NAME."
   (cond

@@ -1427,36 +1427,58 @@ Works for both main session TODOs and worktree TODOs."
 ;;;; Faces for TODO List
 
 (defface org-roam-todo-status-draft
-  '((t :foreground "#888888" :weight normal))
+  '(((class color) (background dark))
+     (:foreground "#5c6370" :weight normal))
+    ((class color) (background light))
+     (:foreground "#a0a1a7" :weight normal)))
   "Face for draft status."
   :group 'org-roam-todo)
 
 (defface org-roam-todo-status-active
-  '((t :foreground "#ffaa00" :weight bold))
+  '(((class color) (background dark))
+     (:foreground "#e5c07b" :weight bold))
+    ((class color) (background light))
+     (:foreground "#986801" :weight bold)))
   "Face for active status."
   :group 'org-roam-todo)
 
 (defface org-roam-todo-status-done
-  '((t :foreground "#00ff00" :weight bold))
+  '(((class color) (background dark))
+     (:foreground "#98c379" :weight bold))
+    ((class color) (background light))
+     (:foreground "#50a14f" :weight bold)))
   "Face for done status."
   :group 'org-roam-todo)
 
 (defface org-roam-todo-status-rejected
-  '((t :foreground "#ff4444" :weight normal :strike-through t))
+  '(((class color) (background dark))
+     (:foreground "#e06c75" :weight normal :strike-through t))
+    ((class color) (background light))
+     (:foreground "#e45649" :weight normal :strike-through t)))
   "Face for rejected status."
   :group 'org-roam-todo)
 
 (defface org-roam-todo-status-review
-  '((t :foreground "#4488ff" :weight bold))
+  '(((class color) (background dark))
+     (:foreground "#61afef" :weight bold))
+    ((class color) (background light))
+     (:foreground "#4078f2" :weight bold)))
   "Face for review status (agent completed, awaiting user review)."
   :group 'org-roam-todo)
+
 (defface org-roam-todo-title
-  '((t :foreground "#aaccff"))
+  '(((class color) (background dark))
+     (:foreground "#61afef"))
+    ((class color) (background light))
+     (:foreground "#4078f2")))
   "Face for TODO title."
   :group 'org-roam-todo)
 
 (defface org-roam-todo-project
-  '((t :foreground "#88aaff"))
+  '(((class color) (background dark))
+     (:foreground "#61afef"))
+    ((class color) (background light))
+     (:foreground "#4078f2")))
   "Face for project name."
   :group 'org-roam-todo)
 
