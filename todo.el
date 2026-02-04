@@ -1765,28 +1765,36 @@ and executes the command in the TODO list buffer.  C-g just closes."
     (cancel-timer org-roam-todo-list--refresh-timer)
     (setq org-roam-todo-list--refresh-timer nil)))
 
+(defconst org-roam-todo-list--column-format
+  [("Status" 12 (lambda (a b)
+                  (< (org-roam-todo--status-sort-key (aref (cadr a) 0))
+                     (org-roam-todo--status-sort-key (aref (cadr b) 0)))))
+   ("Title" 50 t)
+   ("Claude" 10 t)
+   ("Created" 12 t)
+   ("Project" 20 t)]
+  "Column format for TODO list buffers.")
+
+(defun org-roam-todo-list--safe-revert ()
+  "Revert the current TODO list buffer, re-initializing format if stale.
+Must be called with the TODO list buffer current."
+  (let ((pos (point)))
+    ;; Re-set the format in case columns changed since buffer was created
+    (unless (equal tabulated-list-format org-roam-todo-list--column-format)
+      (setq tabulated-list-format org-roam-todo-list--column-format)
+      (tabulated-list-init-header))
+    (tabulated-list-revert)
+    (goto-char (min pos (point-max)))))
+
 (defun org-roam-todo-list-refresh-all ()
   "Refresh all TODO list buffers regardless of visibility.
-Call this after operations that change TODO state (e.g., merge, cleanup).
-Re-initializes the table format to handle stale buffers with outdated columns."
+Call this after operations that change TODO state (e.g., merge, cleanup)."
   (dolist (buffer (buffer-list))
     (when (and (buffer-live-p buffer)
                (with-current-buffer buffer
                  (derived-mode-p 'org-roam-todo-list-mode)))
       (with-current-buffer buffer
-        (let ((pos (point)))
-          ;; Re-set the format in case columns changed since buffer was created
-          (setq tabulated-list-format
-                [("Status" 12 (lambda (a b)
-                                (< (org-roam-todo--status-sort-key (aref (cadr a) 0))
-                                   (org-roam-todo--status-sort-key (aref (cadr b) 0)))))
-                 ("Title" 50 t)
-                 ("Claude" 10 t)
-                 ("Created" 12 t)
-                 ("Project" 20 t)])
-          (tabulated-list-init-header)
-          (tabulated-list-revert)
-          (goto-char (min pos (point-max))))))))
+        (org-roam-todo-list--safe-revert)))))
 
 (defun org-roam-todo-list--auto-refresh ()
   "Auto-refresh callback that only refreshes if a TODO list buffer is visible."
@@ -1798,9 +1806,7 @@ Re-initializes the table format to handle stale buffers with outdated columns."
                  (get-buffer-window buffer 'visible))
         (setq found t)
         (with-current-buffer buffer
-          (let ((pos (point)))
-            (tabulated-list-revert)
-            (goto-char (min pos (point-max)))))))
+          (org-roam-todo-list--safe-revert))))
     (unless found
       (org-roam-todo-list--stop-auto-refresh))))
 
@@ -1867,15 +1873,7 @@ Works directly from the TODO list view without needing to visit the file."
 (define-derived-mode org-roam-todo-list-mode tabulated-list-mode "Org-Roam-TODOs"
   "Major mode for viewing and managing org-roam project TODOs.
 \\{org-roam-todo-list-mode-map}"
-  (setq tabulated-list-format
-        [("Status" 12 (lambda (a b)
-                        (< (org-roam-todo--status-sort-key (aref (cadr a) 0))
-                           (org-roam-todo--status-sort-key (aref (cadr b) 0)))))
-         ("Title" 50 t)
-         ("Claude" 10 t)
-         ("Project" 20 t)
-         ("Worktree" 12 t)
-         ("Created" 12 t)])
+  (setq tabulated-list-format org-roam-todo-list--column-format)
   (setq tabulated-list-padding 2)
   (setq tabulated-list-sort-key '("Status" . nil))
   (setq tabulated-list-entries #'org-roam-todo-list--get-entries)
