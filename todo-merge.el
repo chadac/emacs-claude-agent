@@ -33,7 +33,11 @@
 (declare-function magit-get "magit-git")
 (declare-function magit-get-current-branch "magit-git")
 (declare-function forge-create-pullreq "forge-commands")
+<<<<<<< Updated upstream
 (declare-function claude-mcp-magit--insert-pending-message "claude-mcp-magit")
+=======
+(declare-function claude-mcp-magit-commit-prefill "claude-mcp-magit")
+>>>>>>> Stashed changes
 (declare-function org-roam-todo--set-property "todo")
 (declare-function org-roam-todo--kill-claude-session "todo")
 (declare-function org-roam-todo--kill-worktree-buffers "todo")
@@ -42,8 +46,11 @@
 (declare-function org-roam-todo--branch-exists-p "todo")
 (declare-function org-roam-todo--worktree-exists-p "todo")
 
+<<<<<<< Updated upstream
 (defvar claude-mcp-magit--pending-message)
 
+=======
+>>>>>>> Stashed changes
 ;;;; Customization
 
 (defgroup org-roam-todo-merge nil
@@ -164,10 +171,16 @@ Handles slow GPG signing by polling for HEAD to change."
   ;; Use with-editor-post-finish-hook (fires when C-c C-c is pressed)
   ;; rather than git-commit-post-finish-hook (which times out after 1s)
   (add-hook 'with-editor-post-finish-hook #'org-roam-todo-merge--post-finish-hook)
+<<<<<<< Updated upstream
   ;; Pre-fill the commit message using the same mechanism as magit-commit-approve
   (when commit-message
     (setq claude-mcp-magit--pending-message commit-message)
     (add-hook 'git-commit-setup-hook #'claude-mcp-magit--insert-pending-message 90))
+=======
+  ;; Pre-fill the commit message using worktree-scoped one-shot hook
+  (when commit-message
+    (claude-mcp-magit-commit-prefill commit-message worktree-path))
+>>>>>>> Stashed changes
   ;; Open magit-status and start commit
   (let ((default-directory worktree-path))
     (magit-status worktree-path)

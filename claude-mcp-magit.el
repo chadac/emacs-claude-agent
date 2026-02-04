@@ -295,25 +295,52 @@ Works correctly in git worktrees."
       (error "Not in a git repository: %s" start-dir))
     (claude-mcp-magit--git-output "log" (format "-%d" n) "--oneline" "--no-decorate")))
 
-(defvar claude-mcp-magit--pending-commit nil
-  "Pending commit proposal: (directory message files).")
+(defconst claude-mcp-magit--proposed-commit-file "CLAUDE_PROPOSED_COMMIT_MSG"
+  "Filename within .git dir for storing proposed commit messages.")
 
-(defvar claude-mcp-magit--pending-message nil
-  "Pending commit message to insert into COMMIT_EDITMSG.")
+(defun claude-mcp-magit--git-dir (&optional directory)
+  "Get the .git directory for DIRECTORY (works for worktrees too).
+Unlike `magit-gitdir', this works without magit initialization and
+correctly returns the worktree-specific git dir."
+  (let ((default-directory (or directory default-directory)))
+    (with-temp-buffer
+      (when (zerop (call-process "git" nil t nil "rev-parse" "--git-dir"))
+        (file-truename (string-trim (buffer-string)))))))
 
-(defun claude-mcp-magit--insert-pending-message ()
-  "Insert pending commit message and remove self from hook."
-  (when claude-mcp-magit--pending-message
-    (goto-char (point-min))
-    (insert claude-mcp-magit--pending-message)
-    (setq claude-mcp-magit--pending-message nil)
-    (remove-hook 'git-commit-setup-hook #'claude-mcp-magit--insert-pending-message)
-    ;; Save the buffer so the commit message isn't empty
-    (save-buffer)))
+(defun claude-mcp-magit--proposed-commit-path (&optional directory)
+  "Return path to the proposed commit file for DIRECTORY's git repo.
+Each worktree has its own .git dir, so proposals never collide."
+  (let ((git-dir (claude-mcp-magit--git-dir directory)))
+    (when git-dir
+      (expand-file-name claude-mcp-magit--proposed-commit-file git-dir))))
+
+(defun claude-mcp-magit--write-proposed-commit (message &optional directory)
+  "Write proposed commit MESSAGE to the git dir for DIRECTORY."
+  (let ((path (claude-mcp-magit--proposed-commit-path directory)))
+    (unless path
+      (error "Cannot determine .git directory"))
+    (with-temp-file path
+      (insert message))
+    path))
+
+(defun claude-mcp-magit--read-proposed-commit (&optional directory)
+  "Read the proposed commit message for DIRECTORY, or nil if none."
+  (let ((path (claude-mcp-magit--proposed-commit-path directory)))
+    (when (and path (file-exists-p path))
+      (with-temp-buffer
+        (insert-file-contents path)
+        (buffer-string)))))
+
+(defun claude-mcp-magit--clear-proposed-commit (&optional directory)
+  "Remove the proposed commit file for DIRECTORY."
+  (let ((path (claude-mcp-magit--proposed-commit-path directory)))
+    (when (and path (file-exists-p path))
+      (delete-file path))))
 
 (defun claude-mcp-magit-commit-propose (message &optional directory)
   "Propose a commit with MESSAGE for user approval.
-This stages the proposal but does not commit.  User must approve.
+Writes the proposed message to .git/CLAUDE_PROPOSED_COMMIT_MSG so it
+persists across sessions and doesn't collide with other worktrees.
 DIRECTORY defaults to claude-session-cwd.
 Returns instructions for the user.
 Works correctly in git worktrees."
@@ -324,54 +351,96 @@ Works correctly in git worktrees."
     (let ((staged-files (claude-mcp-magit--git-lines "diff" "--cached" "--name-only")))
       (unless staged-files
         (error "No files staged for commit"))
-      ;; Store the pending commit
-      (setq claude-mcp-magit--pending-commit
-            (list default-directory message staged-files))
+      ;; Write proposed commit message to .git/CLAUDE_PROPOSED_COMMIT_MSG
+      (claude-mcp-magit--write-proposed-commit message)
       ;; Return info about what's proposed
       `((status . "pending_approval")
         (message . ,message)
         (files . ,staged-files)
         (instructions . "Commit proposed. User should review and approve with claude-mcp-magit-commit-approve or reject with claude-mcp-magit-commit-reject.")))))
 
-(defun claude-mcp-magit-commit-approve ()
+(defun claude-mcp-magit--make-commit-message-hook (message &optional directory)
+  "Return a one-shot hook function that inserts MESSAGE into COMMIT_EDITMSG.
+The hook is scoped to the git-dir of DIRECTORY (defaults to
+`default-directory') so it won't fire for commits in other worktrees.
+The hook removes itself from `git-commit-setup-hook' after it fires."
+  (let* ((target-git-dir (claude-mcp-magit--git-dir directory))
+         (hook-fn nil))
+    (setq hook-fn
+          (lambda ()
+            ;; Only act if we're committing in the right repo
+            (when (string= (claude-mcp-magit--git-dir) target-git-dir)
+              (goto-char (point-min))
+              (insert message)
+              (save-buffer)
+              ;; Remove ourselves from the hook (one-shot)
+              (remove-hook 'git-commit-setup-hook hook-fn))))
+    hook-fn))
+
+(defun claude-mcp-magit-commit-approve (&optional directory)
   "Approve the pending commit and open magit commit buffer for final review.
-This populates COMMIT_EDITMSG with the proposed message for editing."
+Reads the proposed message from .git/CLAUDE_PROPOSED_COMMIT_MSG and
+populates COMMIT_EDITMSG with it for editing.  The file is NOT deleted
+until the commit succeeds (handled by `claude-mcp-magit--post-commit-cleanup').
+DIRECTORY defaults to `default-directory'."
   (interactive)
-  (unless claude-mcp-magit--pending-commit
-    (error "No pending commit to approve"))
-  (let* ((info claude-mcp-magit--pending-commit)
-         (directory (nth 0 info))
-         (proposed-message (nth 1 info))
-         (files (nth 2 info)))
-    ;; Verify files are still staged (need to bind default-directory for verification)
-    (let ((default-directory directory))
-      (let ((currently-staged (claude-mcp-magit--git-lines "diff" "--cached" "--name-only")))
-        (unless (equal (sort (copy-sequence files) #'string<)
-                       (sort (copy-sequence currently-staged) #'string<))
-          (error "Staged files have changed since proposal.  Please re-stage and propose again"))))
-    ;; Clear pending commit
-    (setq claude-mcp-magit--pending-commit nil)
-    ;; Store message and add hook (hook removes itself after running)
-    (setq claude-mcp-magit--pending-message proposed-message)
-    (add-hook 'git-commit-setup-hook #'claude-mcp-magit--insert-pending-message 90)
-    ;; Open the commit buffer for review - must set default-directory globally
-    ;; so it persists for the async magit-commit-create
-    (let ((default-directory directory))
-      (magit-status)
-      (magit-commit-create))))
+  (let* ((default-directory (or (claude-mcp-magit--git-toplevel directory)
+                                (claude-mcp-magit--git-toplevel)
+                                default-directory))
+         (proposed-message (claude-mcp-magit--read-proposed-commit)))
+    (unless proposed-message
+      (error "No pending commit to approve (no CLAUDE_PROPOSED_COMMIT_MSG found)"))
+    (let ((currently-staged (claude-mcp-magit--git-lines "diff" "--cached" "--name-only")))
+      (unless currently-staged
+        (error "No files are currently staged")))
+    ;; Add a one-shot hook that inserts the proposed message into COMMIT_EDITMSG
+    (add-hook 'git-commit-setup-hook
+              (claude-mcp-magit--make-commit-message-hook proposed-message)
+              90)
+    ;; Open magit and start commit
+    (magit-status)
+    (magit-commit-create)))
+
+(defun claude-mcp-magit-commit-prefill (message &optional directory)
+  "Set up a one-shot hook to pre-fill MESSAGE into the next commit in DIRECTORY.
+This is for programmatic use (e.g. the merge workflow) where the caller
+opens the magit commit editor itself.  Unlike `commit-approve', this does
+not read from .git/CLAUDE_PROPOSED_COMMIT_MSG and does not open magit."
+  (add-hook 'git-commit-setup-hook
+            (claude-mcp-magit--make-commit-message-hook message directory)
+            90))
+
+(defun claude-mcp-magit-has-proposed-commit-p (&optional directory)
+  "Return non-nil if DIRECTORY has a pending proposed commit.
+DIRECTORY defaults to `default-directory'."
+  (let ((path (claude-mcp-magit--proposed-commit-path
+               (or directory default-directory))))
+    (and path (file-exists-p path))))
 
 (defun claude-mcp-magit-commit-status ()
   "Check if there's a pending commit proposal.
+Reads from .git/CLAUDE_PROPOSED_COMMIT_MSG in the current directory.
 Returns the proposal details or nil."
-  (when claude-mcp-magit--pending-commit
-    (let* ((info claude-mcp-magit--pending-commit)
-           (directory (nth 0 info))
-           (message (nth 1 info))
-           (files (nth 2 info)))
-      `((status . "pending")
-        (directory . ,directory)
-        (message . ,message)
-        (files . ,files)))))
+  (let* ((default-directory (or claude-session-cwd default-directory))
+         (toplevel (claude-mcp-magit--git-toplevel))
+         (default-directory (or toplevel default-directory))
+         (proposed-message (claude-mcp-magit--read-proposed-commit)))
+    (when proposed-message
+      (let ((staged-files (ignore-errors
+                            (claude-mcp-magit--git-lines "diff" "--cached" "--name-only"))))
+        `((status . "pending")
+          (directory . ,default-directory)
+          (message . ,proposed-message)
+          (files . ,(or staged-files '())))))))
+
+;; Global cleanup hook: remove CLAUDE_PROPOSED_COMMIT_MSG after successful commit
+(defun claude-mcp-magit--post-commit-cleanup ()
+  "Remove the proposed commit file after a successful commit.
+Added to `git-commit-post-finish-hook'.
+`default-directory' is set to the git working tree by `with-editor'."
+  (claude-mcp-magit--clear-proposed-commit))
+
+(add-hook 'git-commit-post-finish-hook #'claude-mcp-magit--post-commit-cleanup)
 
 (provide 'claude-mcp-magit)
 ;;; claude-mcp-magit.el ends here
