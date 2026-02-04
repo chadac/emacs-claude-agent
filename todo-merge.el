@@ -344,7 +344,8 @@ moved forward since the agent's initial rebase."
     (magit-status worktree-path))
 
   ;; Step 4: Ask user to confirm merge after review
-  (when (yes-or-no-p (format "Fast-forward merge '%s' into %s? " branch-name main-branch))
+  (when (let ((use-dialog-box nil) (last-nonmenu-event t))
+          (yes-or-no-p (format "Fast-forward merge '%s' into %s? " branch-name main-branch)))
     ;; Perform ff-merge in the main repo
     (message "Performing fast-forward merge...")
     (org-roam-todo-merge--git-run! project-root
@@ -355,7 +356,8 @@ moved forward since the agent's initial rebase."
 
     ;; Step 5: Cleanup
     (when org-roam-todo-merge-cleanup-after
-      (when (yes-or-no-p "Clean up worktree and mark TODO as done? ")
+      (when (let ((use-dialog-box nil) (last-nonmenu-event t))
+              (yes-or-no-p "Clean up worktree and mark TODO as done? "))
         (org-roam-todo-merge--cleanup todo)))))
 
 ;;;; GitHub PR Workflow
@@ -431,7 +433,8 @@ Fetches, rebases, pushes, opens magit for review, and creates PR."
     (magit-status worktree-path))
 
   ;; Step 5: Create PR
-  (when (yes-or-no-p (format "Create PR for '%s' -> %s? " branch-name main-branch))
+  (when (let ((use-dialog-box nil) (last-nonmenu-event t))
+          (yes-or-no-p (format "Create PR for '%s' -> %s? " branch-name main-branch)))
     (org-roam-todo-merge--create-pr project-root worktree-path
                                     branch-name main-branch
                                     title commit-message)))
@@ -468,7 +471,8 @@ TITLE is the PR title, BODY is the optional PR body (e.g. agent's commit message
             (progn
               (message "PR created: %s" (string-trim output))
               ;; Try to open in browser
-              (when (yes-or-no-p "Open PR in browser? ")
+              (when (let ((use-dialog-box nil) (last-nonmenu-event t))
+                      (yes-or-no-p "Open PR in browser? "))
                 (browse-url (string-trim output))))
           (message "gh pr create output: %s" output)))))
 
