@@ -4,34 +4,24 @@ Functions and variables for programmatic use.
 
 ## Session Management
 
-### claude-start
+### claude-run
 
 Start or switch to a Claude session.
 
 ```elisp
-(claude-start)
+(claude-run)
 ```
 
-Starts a session in the current project directory.
+Starts a session in the current project directory. With a prefix argument, prompts for a session slug.
 
 ---
 
-### claude-start-resume
+### claude-resume
 
 Start session with resume flag.
 
 ```elisp
-(claude-start-resume)
-```
-
----
-
-### claude-start-in-directory
-
-Start session in specific directory.
-
-```elisp
-(claude-start-in-directory "/path/to/project")
+(claude-resume)
 ```
 
 ---
@@ -46,145 +36,131 @@ Kill the active Claude session.
 
 ---
 
-### claude-session-active-p
+### claude-toggle-buffer
 
-Check if a session is active.
-
-```elisp
-(if (claude-session-active-p)
-    (message "Session is running")
-  (message "No active session"))
-```
-
----
-
-### claude-get-buffer
-
-Get the current Claude session buffer.
+Toggle Claude buffer visibility.
 
 ```elisp
-(let ((buf (claude-get-buffer)))
-  (when buf
-    (switch-to-buffer buf)))
+(claude-toggle-buffer)
 ```
 
 ## Sending Input
 
-### claude-send-text
-
-Send text to the Claude session.
-
-```elisp
-(claude-send-text "Your message here")
-```
-
----
-
-### claude-execute-with-context
+### claude-execute-request
 
 Send request with file/line context.
 
 ```elisp
-(claude-execute-with-context "Explain this function")
+(claude-execute-request)
 ```
 
-Uses current buffer, point, and region if active.
+Uses current buffer, point, and region if active to provide context.
 
 ---
 
-### claude-execute-plain
+### claude-ask-without-context
 
-Send request without context.
+Send request without file context.
 
 ```elisp
-(claude-execute-plain "What is a monad?")
+(claude-ask-without-context)
 ```
 
 ---
 
-### claude-add-file
+### claude-add-file-reference
 
 Add a file reference to the conversation.
 
 ```elisp
-(claude-add-file "/path/to/file.py")
+(claude-add-file-reference)
 ```
+
+Prompts for file path interactively.
 
 ---
 
-### claude-add-current-file
+### claude-add-current-file-reference
 
 Add current buffer's file.
 
 ```elisp
-(claude-add-current-file)
+(claude-add-current-file-reference)
 ```
 
 ---
 
 ### claude-add-context
 
-Add file:line reference.
+Add file:line reference at point.
 
 ```elisp
 (claude-add-context)
 ```
 
-Uses current buffer and point.
+Uses current buffer and point position.
 
 ## Quick Responses
 
-### claude-yes
+### claude-send-yes
 
-Send approval.
+Send approval ("Yes").
 
 ```elisp
-(claude-yes)
+(claude-send-yes)
 ```
 
 ---
 
-### claude-no
+### claude-send-no
 
-Send rejection.
+Send rejection ("No").
 
 ```elisp
-(claude-no)
+(claude-send-no)
 ```
 
-## Buffer Operations
+## Quick Actions
 
-### claude-toggle
+### claude-fix-error-at-point
 
-Toggle Claude buffer visibility.
+Send flycheck/flymake error at point to Claude for fixing.
 
 ```elisp
-(claude-toggle)
+(claude-fix-error-at-point)
 ```
 
 ---
 
-### claude-unstick
+### claude-implement-comment
 
-Reset buffer tracking.
+Implement a CLAUDE: comment at point.
 
 ```elisp
-(claude-unstick)
+(claude-implement-comment)
 ```
 
-Fixes scroll and input issues.
+---
+
+### claude-generate-commit-message
+
+Generate a commit message from staged changes.
+
+```elisp
+(claude-generate-commit-message)
+```
 
 ## Oneshot Agents
 
-### claude-oneshot-line
+### claude-oneshot-line-or-region
 
 Start oneshot with line/region scope.
 
 ```elisp
-(claude-oneshot-line)
+(claude-oneshot-line-or-region)
 ```
 
-Prompts for task.
+Prompts for task description.
 
 ---
 
@@ -216,62 +192,17 @@ Start oneshot with project scope.
 (claude-oneshot-project)
 ```
 
----
-
-### claude-oneshot-with-prompt
-
-Start oneshot with predefined prompt.
-
-```elisp
-(claude-oneshot-with-prompt "buffer" "Add docstrings to all functions")
-```
-
-Scopes: "line", "buffer", "directory", "project"
-
 ## Multi-Agent
 
 ### claude-spawn-agent
 
-Spawn a new agent.
+Spawn a new Claude agent in a directory.
 
 ```elisp
 (claude-spawn-agent "/path/to/dir" "agent-name")
 ```
 
-Returns buffer name.
-
----
-
-### claude-list-agents
-
-List all running agents.
-
-```elisp
-(claude-list-agents)
-;; Returns: (("*claude:/project*" . "/project") ...)
-```
-
----
-
-### claude-message-agent
-
-Send message to another agent.
-
-```elisp
-(claude-message-agent "*claude:/other*" "Please update the API")
-```
-
-## Notifications
-
-### claude-setup-bell-handler
-
-Re-setup notification handler.
-
-```elisp
-(claude-setup-bell-handler)
-```
-
-Call if notifications stop working.
+Returns buffer name. Available as `C-c s` in Claude buffers.
 
 ## Variables
 
@@ -320,48 +251,6 @@ Run after session initialization.
               (message "Node project detected"))))
 ```
 
-## MCP Tool Functions
-
-These can be called programmatically:
-
-### claude-mcp-get-buffer-content
-
-```elisp
-(claude-mcp-get-buffer-content "main.py" nil nil nil nil)
-```
-
----
-
-### claude-mcp-list-buffers
-
-```elisp
-(claude-mcp-list-buffers)
-```
-
----
-
-### claude-mcp-buffer-info
-
-```elisp
-(claude-mcp-buffer-info "main.py")
-```
-
----
-
-### claude-mcp-search-buffer
-
-```elisp
-(claude-mcp-search-buffer "main.py" "def " nil 5 nil nil)
-```
-
----
-
-### claude-mcp-edit-buffer
-
-```elisp
-(claude-mcp-edit-buffer "main.py" "old" "new" nil)
-```
-
 ## Tool Registration
 
 ### claude-mcp-deftool
@@ -377,11 +266,18 @@ Define a new MCP tool.
          (arg2 integer "Optional second argument")))
 ```
 
+Key options:
+
+- `:function` — The elisp function to call
+- `:safe` — If `t`, can be auto-approved (read-only operations)
+- `:needs-session-cwd` — If `t`, receives session working directory
+- `:args` — Parameter definitions with types
+
 ---
 
 ### claude-mcp-remove-tool
 
-Remove a tool from registry.
+Remove a tool from the registry.
 
 ```elisp
 (claude-mcp-remove-tool "my_tool")
@@ -391,25 +287,33 @@ Remove a tool from registry.
 
 ### claude-mcp-export-tools
 
-Export tools as JSON.
+Export all registered tools as JSON (used by the Python MCP server).
 
 ```elisp
 (claude-mcp-export-tools)
 ```
 
-Used by MCP server.
+## Transient Menu Extension
 
-## Transient Interface
+### claude-transient-register-agent-item
 
-### claude-transient-menu
-
-Open the transient menu.
+Add a custom item to the agent buffer transient menu.
 
 ```elisp
-(claude-transient-menu)
+(claude-transient-register-agent-item
+ "z" "My Command" #'my-claude-command)
 ```
 
-Bind to your preferred key.
+---
+
+### claude-transient-register-pair-item
+
+Add a custom item to the pair programming transient menu.
+
+```elisp
+(claude-transient-register-pair-item
+ "z" "My Pair Action" #'my-pair-action)
+```
 
 ## Example: Custom Commands
 
@@ -421,7 +325,7 @@ Bind to your preferred key.
   (interactive)
   (let ((errors (flycheck-overlay-errors-in (point-min) (point-max))))
     (when errors
-      (claude-send-text
+      (claude-execute-request
        (format "Fix these errors:\n%s"
                (mapconcat #'flycheck-error-message errors "\n"))))))
 ```
@@ -432,13 +336,7 @@ Bind to your preferred key.
 (defun my/claude-add-docstring ()
   "Ask Claude to add docstring to function at point."
   (interactive)
-  (save-excursion
-    (beginning-of-defun)
-    (let ((start (point)))
-      (end-of-defun)
-      (claude-oneshot-with-prompt
-       "line"
-       "Add a comprehensive docstring to this function"))))
+  (claude-oneshot-line-or-region))
 ```
 
 ### Session with Custom Switches
@@ -448,16 +346,5 @@ Bind to your preferred key.
   "Start Claude with verbose logging."
   (interactive)
   (let ((claude-program-switches '("--verbose")))
-    (claude-start)))
-```
-
-### Batch File Add
-
-```elisp
-(defun my/claude-add-files (files)
-  "Add multiple FILES to Claude conversation."
-  (dolist (file files)
-    (claude-add-file file)))
-
-(my/claude-add-files '("src/main.py" "src/utils.py" "tests/test_main.py"))
+    (claude-run)))
 ```

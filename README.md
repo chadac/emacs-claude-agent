@@ -1,59 +1,60 @@
 # emacs-claude-agent
 
-A Claude/Emacs integration designed for collaborative pair programming.
+An Emacs integration for Claude Code that turns your editor into a collaborative AI programming environment.
 
-emacs-claude-agent provides two core components:
+> **Fair warning:** This project is highly vibe-coded. The code quality is... let's say "enthusiastic rather than disciplined." It works, often surprisingly well, but don't expect clean architecture or comprehensive test coverage. That said, it provides capabilities that no other Emacs+Claude integration currently offers.
 
-1. *claude-agent* — an interactive buffer with Claude that features org-mode-like capabilities; and
-2. *emacs-mcp* — an MCP server enabling agents to interact with the editor and access richer contextual information.
+emacs-claude-agent gives Claude deep access to your Emacs session through [MCP](https://modelcontextprotocol.io/) (Model Context Protocol). Instead of copy-pasting between your editor and a chat window, Claude can directly read your buffers, make targeted edits with visual feedback, run shell commands, interact with Magit, and coordinate multiple agents — all while you keep working.
 
-> *Note:* This project evolved from a fork of [cpoile/claudemacs](https://github.com/cpoile/claudemacs) into its own thing that shares effectively no code; nonetheless, it was still influenced/motivated by claudemacs.
+This project evolved from a fork of [cpoile/claudemacs](https://github.com/cpoile/claudemacs). While it shares very little code with the original at this point, claudemacs provided the initial inspiration and terminal integration approach that made this possible.
 
-## Features
+## What Makes This Different
 
-- **Seamless buffer integration** - Claude reads, modifies, and navigates your buffers through MCP without context loss
-- **Org-mode-like editing** - Natural syntax for formatting, context, and special commands within conversation
-- **Multi-agent coordination** - Spawn parallel agents for complex tasks and communicate between them
-- **Scoped background editing** - Oneshot agents for permission-controlled, targeted edits
-- **Native Emacs prompts** - Choice menus, file pickers, and proposal review interfaces
-- **Git operations** - Stage, diff, and commit directly through Magit
-- **Progress tracking** - Visual indicators for long-running operations
-- **Knowledge base** - Store and retrieve project-specific learnings and patterns
-- **Self-extending** - Claude can define new tools, evaluate elisp, and expand its own capabilities on the fly
-- **Extensible tools** - Create custom MCP tools for project-specific workflows
+Most Claude-in-Emacs integrations give you a chat buffer and maybe some file context. emacs-claude-agent goes further:
+
+- **Claude edits your buffers directly** — through a lock-region workflow that shows you exactly what's being changed, with visual highlighting
+- **Multiple agents at once** — spawn parallel Claude sessions that can message each other and work on different parts of your codebase simultaneously
+- **Oneshot background agents** — quick, scoped edits (line, buffer, directory, or project level) that run in the background without interrupting your flow
+- **Native Emacs UI** — choice menus, file pickers, proposal review, and progress indicators that feel like Emacs, not a web app
+- **Self-extending** — Claude can define new MCP tools on the fly using `eval` and `claude-mcp-deftool`, tailoring its own capabilities to your project
+- **Git integration** — stage, diff, commit through Magit; Claude proposes commits for your review
+- **Knowledge base** — persistent project-specific learnings stored as org-roam nodes
+- **TODO/worktree system** — org-roam based task management with git worktree support for isolated agent work
 
 ## Quick Start
 
 ### Prerequisites
 
-1. Install [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code/overview)
-2. Install the [eat](https://codeberg.org/akib/emacs-eat) package in Emacs
-3. Ensure Emacs server is running (`M-x server-start`)
+- Emacs 28.1+
+- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code/overview)
+- [eat](https://codeberg.org/akib/emacs-eat) terminal emulator package
+- Python 3.12+ with [uv](https://github.com/astral-sh/uv)
+- Emacs server running (`M-x server-start`)
 
 ### Installation
 
 #### Doom Emacs
 
-Add to your `packages.el`:
+In `packages.el`:
 
 ```elisp
 (package! emacs-claude-agent
   :recipe (:host github :repo "chadac/emacs-claude-agent"))
 ```
 
-Then in your `config.el`:
+In `config.el`:
 
 ```elisp
-(use-package! claude
+(use-package! claude-agent
   :config
   (require 'claude-mcp)
   (require 'claude-agent))
 ```
 
-#### use-package with built-in :vc (Emacs 30+)
+#### use-package + :vc (Emacs 30+)
 
 ```elisp
-(use-package claude
+(use-package claude-agent
   :vc (:url "https://github.com/chadac/emacs-claude-agent")
   :config
   (require 'claude-mcp)
@@ -64,297 +65,211 @@ Then in your `config.el`:
 
 ```elisp
 (straight-use-package
- '(claude :type git :host github :repo "chadac/emacs-claude-agent"))
+ '(claude-agent :type git :host github :repo "chadac/emacs-claude-agent"))
 ```
 
-#### Manual Installation
+#### Manual
 
 ```elisp
 (add-to-list 'load-path "/path/to/emacs-claude-agent")
-(require 'claude)
-(require 'claude-mcp)
 (require 'claude-agent)
+(require 'claude-mcp)
 ```
 
-### Basic Setup
+### Setup
 
 ```elisp
-;; Set your preferred keybinding for the transient menu
+;; Bind the transient menu to your preferred key
 (define-key prog-mode-map (kbd "C-c C-e") #'claude-transient-menu)
 
-;; Enable global auto-revert (recommended - Claude modifies files)
+;; Recommended: auto-revert buffers when Claude modifies files on disk
 (global-auto-revert-mode t)
-
-;; Increase terminal scrollback for history searching
-(with-eval-after-load 'eat
-  (setq eat-term-scrollback-size 400000))
 ```
 
-## Core Features
+Then `C-c C-e s` to start a session.
 
-### MCP-Powered Buffer Operations
+## Features
 
-Claude can directly interact with your Emacs buffers through MCP tools:
+### Buffer Operations via MCP
 
-| Tool | Description |
-|------|-------------|
-| `get_buffer_content` | Read buffer contents with line ranges |
-| `edit_buffer` | Modify buffer text directly |
-| `list_buffers` | List all open buffers |
-| `search_buffer` | Search with regex and context lines |
-| `eval` | Execute arbitrary elisp expressions |
+Claude interacts with your Emacs buffers through 40+ MCP tools. The core editing workflow uses region locking for safety:
+
+1. Claude reads a file with `read_file` (sees line numbers + flycheck/flymake diagnostics)
+2. Locks a region with `lock` (highlighted in your buffer, protected from your edits)
+3. Replaces the content with `edit` (auto-saves if buffer was clean)
+
+Other buffer tools include `search_buffer` (regex with context lines), `list_buffers`, `buffer_info`, `get_buffer_content` (with head/tail/range support), and `eval` for arbitrary elisp.
+
+### Oneshot Agents
+
+Quick background edits with permission scoping:
+
+| Keybinding | Scope | What Claude Can Touch |
+|------------|-------|----------------------|
+| `C-c c c` | Line/region | Only the selected line(s) |
+| `C-c c b` | Buffer | Current buffer only |
+| `C-c c d` | Directory | Files in current directory |
+| `C-c c p` | Project | Any file in the project |
+
+Oneshot agents run in the background, show visual highlighting of their target, and auto-terminate when done. Configure the model with `claude-oneshot-model` (default: `"sonnet"`).
 
 ### Multi-Agent System
 
-Spawn and coordinate multiple Claude agents for complex tasks:
+Spawn multiple Claude sessions and coordinate them:
 
 ```
-C-c C-e s    Start a new Claude agent
-C-c C-e S    Spawn agent in another directory
+C-c C-e s    Start a new session
+C-c C-e S    Spawn in another directory
 ```
 
-Agents can communicate via message passing:
+Agents communicate through a message queue system — `spawn_agent`, `message_agent`, `check_messages`, `list_agents`. Useful for divide-and-conquer workflows on large codebases.
 
-- `spawn_agent` - Create new agents in different directories
-- `message_agent` - Send messages between agents
-- `list_agents` - View all running agents
-- `check_messages` - Check message queue
-
-### Oneshot Background Agents
-
-Lightweight agents for quick, targeted edits:
-
-```
-C-c c c    Edit current line/region (most constrained)
-C-c c b    Edit current buffer
-C-c c d    Edit files in current directory
-C-c c p    Edit any file in project (least constrained)
-```
-
-Oneshot agents:
-- Run in the background without taking over your terminal
-- Auto-terminate when done
-- Have permission-scoped editing (can only touch what you specify)
-- Show visual highlighting of their target region
-
-### Interactive Prompts and Proposals
+### Interactive Prompts
 
 Claude can ask for your input through native Emacs interfaces:
 
-- **Choice prompts**: Navigate with j/k, confirm with RET
-- **Multi-select**: Toggle with SPC, select all with 'a'
-- **File/directory pickers**: Quick selection from project files
-- **Proposals**: Review and edit Claude's suggestions before applying
+- **Choice menus** — navigate with j/k, confirm with RET
+- **Multi-select** — toggle items with SPC, select all with 'a'
+- **File/directory pickers** — quick selection from project files
+- **Proposals** — review and edit Claude's suggestions before applying (C-c C-c to accept, C-c C-k to reject)
+- **Confirmations** — simple y/n popups
 
-### Progress Tracking
+### Git Integration
 
-Visual progress indicators for long-running operations:
+Git operations through Magit:
 
-```elisp
-;; Claude uses these automatically
-(mcp__emacs__progress_start "Building project...")
-(mcp__emacs__progress_update "Compiling..." 50)
-(mcp__emacs__progress_stop "Build complete!")
-```
-
-### Magit Integration
-
-Git operations through Emacs's Magit:
-
-| Tool | Description |
-|------|-------------|
-| `magit_status` | View git status |
-| `magit_stage` | Stage files for commit |
-| `magit_diff` | View diffs |
-| `magit_commit_propose` | Propose commits for your approval |
+- `magit_status`, `magit_stage`, `magit_unstage`, `magit_diff`, `magit_log`
+- `magit_commit_propose` — Claude proposes a commit message; you review and sign it
 
 ### Knowledge Base
 
-Store and retrieve learnings about your codebase:
+Store project learnings as org-roam nodes (requires org-roam):
+
+- **Types**: `gotcha`, `architecture`, `pattern`, `reference`
+- **Operations**: `kb_create`, `kb_search`, `kb_get`, `kb_update`, `kb_list`
+- Searchable by text, file, module, or concept
+
+### TODO / Worktree System
+
+Org-roam based task management with git worktree isolation (requires org-roam):
+
+- Create TODOs with `org-roam-todo-capture` (`C-c n t t`)
+- Spawn a worktree + Claude session with `org-roam-todo-create-worktree` (`C-c c w`)
+- Track acceptance criteria and progress
+- Auto-commit and optional auto-push on completion
+
+### Custom Tools
+
+Define project-specific MCP tools in elisp:
 
 ```elisp
-;; Claude can store gotchas, patterns, and architecture notes
-(mcp__emacs__kb_create
-  :title "Database connection gotcha"
-  :kb_type "gotcha"
-  :summary "Always close connections in finally block")
+(claude-mcp-deftool project-test
+  "Run the project test suite."
+  :function (lambda ()
+              (compile "make test"))
+  :safe t
+  :needs-session-cwd t)
 ```
 
-## Usage Examples
+Key options: `:function`, `:safe` (auto-approve), `:needs-session-cwd`, `:args` for typed parameters.
 
-### Basic Pair Programming
+### Self-Extending
 
-```
-C-c C-e s    Start Claude session
-C-c C-e x    Send request with file/region context
-C-c C-e e    Fix error at point (uses flycheck)
-C-c C-e i    Implement comment at point
-```
-
-### Working with Context
-
-```elisp
-;; Add current file to conversation
-C-c C-e F
-
-;; Add specific file reference
-C-c C-e f
-
-;; Send context (file:line or file:line-range)
-C-c C-e a
-```
-
-### Quick Responses
-
-```
-C-c C-e y    Send "Yes" (approve)
-C-c C-e n    Send "No" (reject)
-```
+Claude has full access to `eval` and can define new tools mid-conversation. Need a project-specific command? Claude can write and register it, reload elisp files, inspect Emacs state — whatever the workflow requires.
 
 ## Configuration
 
-### Core Settings
+### Core
 
 ```elisp
-;; Custom Claude executable path
-(setq claude-program "/usr/local/bin/claude")
+(setq claude-program "/usr/local/bin/claude")     ; CLI path
+(setq claude-program-switches '("--verbose"))      ; Extra CLI args
+(setq claude-use-mcp t)                            ; MCP integration (default: t)
+(setq claude-prefer-projectile-root t)             ; Use projectile over git root
+```
 
-;; Command line switches
-(setq claude-program-switches '("--verbose"))
+### Agent Behavior
 
-;; Enable MCP integration (default: t)
-(setq claude-use-mcp t)
+```elisp
+;; Block direct Edit/Write tools (use lock-region workflow instead)
+;; This is the default — Claude edits through Emacs, not around it
+(setq claude-agent-disallowed-tools '("Edit" "Write"))
 
-;; Prefer projectile root over git root
-(setq claude-prefer-projectile-root t)
+;; Auto-reject rules for safety
+(setq claude-agent-auto-reject-rules-extra
+      '((:pattern "Bash(rm -rf:*)" :message "No recursive deletes")))
+
+;; Extra system prompt for project-specific instructions
+(setq claude-agent-extra-system-prompt
+      "Always run tests before committing.")
 ```
 
 ### Window Behavior
 
 ```elisp
-;; Display Claude in a side window
 (add-to-list 'display-buffer-alist
              '("^\\*claude"
                (display-buffer-in-side-window)
                (side . right)
                (window-width . 0.4)))
 
-;; Control buffer switching behavior
 (setq claude-switch-to-buffer-on-create t)
 (setq claude-switch-to-buffer-on-toggle t)
 ```
 
-### System Notifications
+### Notifications
 
 ```elisp
-;; Enable notifications when Claude needs input
-(setq claude-notify-on-await t)
-
-;; Mac notification sound
-(setq claude-notification-sound-mac "Submarine")
-
-;; Linux notification settings
-(setq claude-notification-auto-dismiss-linux t)
-(setq claude-notification-sound-linux "message-new-instant")
+(setq claude-notify-on-await t)                              ; Notify when Claude needs input
+(setq claude-notification-sound-mac "Submarine")             ; macOS sound
+(setq claude-notification-auto-dismiss-linux t)              ; Auto-dismiss on Linux
+(setq claude-notification-sound-linux "message-new-instant") ; Linux sound
 ```
 
-## Defining Custom Tools
+## Key Commands
 
-Custom MCP tools are defined in Elisp using `claude-mcp-deftool`:
-
-```elisp
-(claude-mcp-deftool project-build
-  "Build the project using make."
-  :function #'my-project-build
-  :safe nil
-  :args ((directory string :required "Build directory")))
-
-(defun my-project-build (directory)
-  "Build project in DIRECTORY."
-  (let ((default-directory directory))
-    (compile "make")))
-```
-
-Tools automatically become available to Claude agents. Key options:
-
-- `:function` - The elisp function to call
-- `:safe t` - Mark as safe to run (no need to request permissions)
-- `:needs-session-cwd t` - Bind `default-directory` to session's working directory
-- `:args` - Argument definitions: `(name type [:required] "description")`
-
-See the [Custom Tools Guide](docs/guides/custom-tools.md) for more examples.
-
-## Self-Extending Capabilities
-
-One of the unique advantages of emacs-claude-agent is that Claude has full access to Emacs's introspection and extension capabilities. Through the `eval` MCP tool, Claude can:
-
-- **Define new tools on the fly** - Need a project-specific command? Claude can write and register it using `claude-mcp-deftool`
-- **Inspect and modify Emacs state** - Query variables, check modes, examine buffers
-- **Reload modified code** - After editing elisp files, Claude can reload them to test changes immediately
-- **Extend its own capabilities** - If Claude needs functionality that doesn't exist, it can create it
-
-This makes emacs-claude-agent particularly powerful for:
-
-- **Rapid prototyping** - Try new tools without leaving the conversation
-- **Project-specific automation** - Claude builds exactly the tools your workflow needs
-- **Self-improvement** - Claude can enhance its own integration with your Emacs setup
-
-```elisp
-;; Example: Claude can define a tool mid-conversation
-(claude-mcp-deftool check-package-json
-  "Read and parse the project's package.json."
-  :function (lambda ()
-              (with-temp-buffer
-                (insert-file-contents "package.json")
-                (json-parse-buffer)))
-  :safe t
-  :needs-session-cwd t)
-```
+| Key | Command | Description |
+|-----|---------|-------------|
+| `C-c C-e s` | `claude-run` | Start new session |
+| `C-c C-e r` | `claude-resume` | Resume previous session |
+| `C-c C-e t` | `claude-toggle-buffer` | Show/hide Claude buffer |
+| `C-c C-e k` | `claude-kill` | Kill session |
+| `C-c C-e x` | `claude-execute-request` | Send request with file context |
+| `C-c C-e e` | `claude-fix-error-at-point` | Fix flycheck error at point |
+| `C-c C-e i` | `claude-implement-comment` | Implement CLAUDE: comment |
+| `C-c C-e f` | `claude-add-file-reference` | Add file to conversation |
+| `C-c C-e F` | `claude-add-current-file-reference` | Add current file |
+| `C-c C-e a` | `claude-add-context` | Add context at point/region |
+| `C-c C-e y` | `claude-send-yes` | Send "Yes" |
+| `C-c C-e n` | `claude-send-no` | Send "No" |
+| `C-c c c` | `claude-oneshot-line-or-region` | Oneshot: edit line/region |
+| `C-c c b` | `claude-oneshot-buffer` | Oneshot: edit buffer |
+| `C-c c d` | `claude-oneshot-directory` | Oneshot: edit directory |
+| `C-c c p` | `claude-oneshot-project` | Oneshot: edit project |
 
 ## Documentation
 
-- [Custom Tools Guide](docs/guides/custom-tools.md) - Create project-specific MCP tools with `claude-mcp-deftool`
-- [MCP Overview](MCP-INTEGRATION.md) - Overview of MCP features (buffer ops, multi-agent, etc.)
-- [Full Documentation](docs/) - Comprehensive documentation (can be built with MkDocs)
-
-### Building the Documentation Site
-
-The `docs/` directory contains a full documentation site that can be built with MkDocs:
+Full documentation is available in the `docs/` directory and can be built as a website with MkDocs:
 
 ```bash
-# Install mkdocs and dependencies
 pip install mkdocs mkdocs-material mkdocstrings
-
-# Serve locally
-mkdocs serve
-
-# Build static site
-mkdocs build
+mkdocs serve  # Local dev server at http://localhost:8000
 ```
 
-## History
-
-This project began as a fork of [cpoile/claudemacs](https://github.com/cpoile/claudemacs), which provides a clean terminal-based Claude Code integration for Emacs. emacs-claude-agent extends that foundation with:
-
-- **MCP integration** for direct buffer manipulation
-- **Multi-agent architecture** for parallel operations
-- **Oneshot agents** for quick, scoped edits
-- **Interactive prompts** through native Emacs UI
-- **Knowledge base** for persistent learnings
-
-The original claudemacs philosophy of simplicity remains - we just added superpowers.
+See also:
+- [MCP Integration Overview](MCP-INTEGRATION.md)
+- [Development Guide](CLAUDE.md)
 
 ## Requirements
 
 - Emacs 28.1+
 - [eat](https://codeberg.org/akib/emacs-eat) terminal emulator
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code/overview)
-- Python 3.8+ (for MCP server)
-- [uv](https://github.com/astral-sh/uv) (for Python dependency management)
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit issues and pull requests.
+- Python 3.12+ (for MCP server and agent wrapper)
+- [uv](https://github.com/astral-sh/uv) (Python dependency management)
+- **Optional**: [org-roam](https://www.orgroam.com/) (for knowledge base and TODO system)
+- **Optional**: [magit](https://magit.vc/) (for git integration)
+- **Optional**: [flycheck](https://www.flycheck.org/) or flymake (for error-at-point features)
 
 ## Credits
 
@@ -365,4 +280,4 @@ Contributions are welcome! Please feel free to submit issues and pull requests.
 
 ## License
 
-MIT License. See [LICENSE](LICENSE) file for details.
+MIT License. See [LICENSE](LICENSE) for details.

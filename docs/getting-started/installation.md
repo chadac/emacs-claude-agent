@@ -9,8 +9,8 @@ Before installing emacs-claude-agent, ensure you have:
 1. **Emacs 28.1+** - Required for proper functionality
 2. **[Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code/overview)** - The official Claude terminal client
 3. **[eat](https://codeberg.org/akib/emacs-eat)** - Terminal emulator for Emacs
-4. **Python 3.8+** - Required for the MCP server
-5. **[uv](https://github.com/astral-sh/uv)** - Fast Python package installer (recommended)
+4. **Python 3.12+** - Required for the MCP server
+5. **[uv](https://github.com/astral-sh/uv)** - Fast Python package installer
 6. **Emacs server** - Must be running for MCP integration (`M-x server-start`)
 
 ## Installation Methods

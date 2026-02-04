@@ -5,7 +5,7 @@ Set up your environment for contributing to emacs-claude-agent.
 ## Prerequisites
 
 - Emacs 28.1+
-- Python 3.8+
+- Python 3.12+
 - [uv](https://github.com/astral-sh/uv) (Python package manager)
 - Git
 - Claude Code CLI
@@ -85,10 +85,7 @@ emacs-claude-agent/
 
 2. Make changes
 
-3. Test your changes:
-   ```bash
-   make test
-   ```
+3. Test your changes (see below)
 
 4. Submit PR
 
@@ -97,20 +94,21 @@ emacs-claude-agent/
 #### Run All Tests
 
 ```bash
-make test
+emacs -batch -l ert -l test/claude-test.el -f ert-run-tests-batch-and-exit
 ```
 
 #### Run Specific Tests
 
 ```elisp
-(ert-run-tests-batch-and-exit "claude-")
+;; In Emacs, run tests interactively
+(ert "claude-")
 ```
 
 #### Interactive Testing
 
 ```elisp
 ;; Reload after changes
-(load-file "claude.el")
+(load-file "claude-agent.el")
 (load-file "claude-mcp.el")
 ;; etc.
 ```

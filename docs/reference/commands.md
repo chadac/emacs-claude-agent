@@ -2,112 +2,175 @@
 
 Complete reference for all emacs-claude-agent commands.
 
-## Transient Menu Commands
+## Main Transient Menu (`claude-transient-menu`)
 
-Access via `C-c C-e` (or your configured keybinding).
+Access via `C-c C-e` (or your configured keybinding). This is the top-level menu.
 
 ### Session Management
 
 | Key | Command | Description |
 |-----|---------|-------------|
-| `s` | `claude-start` | Start or switch to Claude session |
-| `r` | `claude-start-resume` | Start with resume flag |
-| `t` | `claude-toggle` | Toggle Claude buffer visibility |
+| `s` | `claude-run` | Start or switch to Claude session |
+| `r` | `claude-resume` | Start with resume flag |
+| `R` | `claude-restart` | Restart current session |
 | `k` | `claude-kill` | Kill active Claude session |
+| `t` | `claude-toggle-buffer` | Toggle Claude buffer visibility |
+| `l` | `claude-list-sessions` | List all sessions |
 
-### Context Actions
-
-| Key | Command | Description |
-|-----|---------|-------------|
-| `x` | `claude-execute-with-context` | Send request with file/line context |
-| `X` | `claude-execute-plain` | Send request without context |
-| `f` | `claude-add-file` | Add file reference (@file) |
-| `F` | `claude-add-current-file` | Add current file reference |
-| `a` | `claude-add-context` | Add file:line reference |
-
-### Quick Actions
+### Actions
 
 | Key | Command | Description |
 |-----|---------|-------------|
-| `e` | `claude-fix-error` | Fix flycheck error at point |
-| `i` | `claude-implement-comment` | Implement comment at point |
-| `y` | `claude-yes` | Send "Yes" (RET) |
-| `n` | `claude-no` | Send "No" (ESC) |
+| `e` | `claude-fix-error-at-point` | Fix flycheck/flymake error at point |
+| `x` | `claude-execute-request` | Send request with file/line context |
+| `X` | `claude-ask-without-context` | Send request without context |
+| `i` | `claude-implement-comment` | Implement CLAUDE: comment at point |
+| `c` | `claude-generate-commit-message` | Generate a commit message |
+| `f` | `claude-add-file-reference` | Add file reference (@file) |
+| `F` | `claude-add-current-file-reference` | Add current file reference |
+| `a` | `claude-add-context` | Add file:line context |
+| `p` | `claude-paste-context-to-shell` | Paste context to shell |
 
-### Maintenance
+### Quick Responses
 
 | Key | Command | Description |
 |-----|---------|-------------|
-| `u` | `claude-unstick` | Reset buffer tracking |
+| `y` | `claude-send-yes` | Send "Yes" |
+| `n` | `claude-send-no` | Send "No" |
 
-## Oneshot Agent Commands
+## Pair Programming Menu (`claude-pair-menu`)
 
-### Default Keybindings
+Accessed via `claude-menu` from non-agent buffers (or bound to your preferred key). This menu provides oneshot agents and pair programming features.
+
+### Oneshot Agents
 
 | Key | Command | Scope |
 |-----|---------|-------|
-| `C-c c c` | `claude-oneshot-line` | Line/region only |
-| `C-c c b` | `claude-oneshot-buffer` | Current buffer |
-| `C-c c d` | `claude-oneshot-directory` | Current directory |
-| `C-c c p` | `claude-oneshot-project` | Entire project |
+| `c` | `claude-transient-oneshot-line-or-region` | Line or active region |
+| `b` | `claude-transient-oneshot-buffer` | Current buffer |
+| `d` | `claude-transient-oneshot-directory` | Current directory |
+| `p` | `claude-transient-oneshot-project` | Entire project |
+| `o` | `claude-transient-oneshot-list` | List active oneshots |
+| `y` | `claude-transient-dismiss-tooltips` | Dismiss oneshot tips |
 
-## Multi-Agent Commands
-
-### From Transient Menu
+### Sessions
 
 | Key | Command | Description |
 |-----|---------|-------------|
-| `S` | `claude-spawn-agent` | Spawn agent in directory |
+| `s` | `claude-transient-start-session` | Start new session |
+| `r` | `claude-transient-resume-session` | Resume previous session |
+| `w` | `claude-transient-switch-session` | Switch between sessions |
+| `l` | `claude-list-sessions` | List all sessions |
 
-### Programmatic
+### Actions
 
-```elisp
-;; Spawn agent programmatically
-(claude-spawn-agent "/path/to/directory" "agent-name")
+| Key | Command | Description |
+|-----|---------|-------------|
+| `x` | `claude-pair-point-action` | Action at point |
+| `t` | `claude-pair-point-action-test` | Generate test for point |
+| `D` | `claude-pair-point-action-doc` | Document at point |
+| `f` | `claude-pair-point-action-fix` | Fix at point |
 
-;; List all agents
-(claude-list-agents)
+### Comments
 
-;; Message another agent
-(claude-message-agent buffer-name message)
-```
+| Key | Command | Description |
+|-----|---------|-------------|
+| `C` | `claude-pair-send-comments` | Send CLAUDE: comments |
+| `P` | (project-wide) | Send all project CLAUDE: comments |
+
+## Agent Buffer Menu (`claude-agent-menu`)
+
+Accessed via `claude-menu` when inside a Claude agent buffer.
+
+### Model & Cost
+
+| Key | Command | Description |
+|-----|---------|-------------|
+| `m` | `claude-agent-set-model` | Change model |
+| `$` | `claude-agent-show-cost` | Show cost/tokens |
+
+### MCP Servers (M prefix)
+
+| Key | Command | Description |
+|-----|---------|-------------|
+| `M l` | `claude-agent-mcp-list` | List MCP servers |
+| `M s` | `claude-agent-show-mcp-status` | Show MCP status |
+| `M a` | `claude-agent-mcp-add` | Add MCP server |
+| `M r` | `claude-agent-mcp-remove` | Remove MCP server |
+
+### Session
+
+| Key | Command | Description |
+|-----|---------|-------------|
+| `c` | `claude-agent-compact` | Compact history |
+| `C` | `claude-agent-clear` | Clear history |
+| `q` | `claude-agent-quit` | Quit session |
+| `k` | `claude-agent-interrupt` | Interrupt current operation |
+
+### View
+
+| Key | Command | Description |
+|-----|---------|-------------|
+| `p` | `claude-agent-toggle-progress` | Toggle progress visibility |
+| `t` | `claude-agent-toggle-todos` | Toggle todos visibility |
+| `w` | `claude-mcp-watch-mode-toggle` | Toggle watch mode |
+
+### Navigation
+
+| Key | Command | Description |
+|-----|---------|-------------|
+| `i` / `RET` | `claude-agent-goto-input` | Jump to input area |
+
+### Git
+
+| Key | Command | Description |
+|-----|---------|-------------|
+| `g` | `claude-mcp-magit-commit-approve` | Approve proposed commit |
+
+## Unified Dispatcher
+
+`claude-menu` automatically selects the right menu based on context:
+
+- In a Claude agent buffer → shows `claude-agent-menu`
+- In any other buffer → shows `claude-pair-menu`
+
+## Buffer-Local Keybindings
+
+In Claude session buffers (`claude-mode`):
+
+| Key | Command | Description |
+|-----|---------|-------------|
+| `C-c t` | `claude-clear-buffer` | Clear/trim buffer |
+| `C-c s` | `claude-spawn-agent` | Spawn new agent |
 
 ## M-x Commands
 
-Commands available via `M-x`:
+All interactive commands available via `M-x`:
 
 | Command | Description |
 |---------|-------------|
 | `claude-transient-menu` | Open main transient menu |
-| `claude-start` | Start Claude session |
-| `claude-start-resume` | Start with resume |
-| `claude-toggle` | Toggle buffer visibility |
+| `claude-menu` | Context-aware transient menu |
+| `claude-run` | Start Claude session |
+| `claude-resume` | Resume previous session |
+| `claude-restart` | Restart session |
 | `claude-kill` | Kill session |
-| `claude-setup-bell-handler` | Re-setup notifications |
-| `claude-oneshot-line` | Oneshot with line scope |
-| `claude-oneshot-buffer` | Oneshot with buffer scope |
-| `claude-oneshot-directory` | Oneshot with directory scope |
-| `claude-oneshot-project` | Oneshot with project scope |
+| `claude-toggle-buffer` | Toggle buffer visibility |
+| `claude-list-sessions` | List all sessions |
+| `claude-execute-request` | Send request with context |
+| `claude-ask-without-context` | Send request without context |
+| `claude-fix-error-at-point` | Fix error at point |
+| `claude-implement-comment` | Implement CLAUDE: comment |
+| `claude-add-file-reference` | Add file reference |
+| `claude-add-current-file-reference` | Add current file |
+| `claude-add-context` | Add file:line context |
+| `claude-send-yes` | Send "Yes" |
+| `claude-send-no` | Send "No" |
+| `claude-oneshot-line-or-region` | Oneshot: line/region scope |
+| `claude-oneshot-buffer` | Oneshot: buffer scope |
+| `claude-oneshot-directory` | Oneshot: directory scope |
+| `claude-oneshot-project` | Oneshot: project scope |
 | `claude-spawn-agent` | Spawn new agent |
-
-## Buffer Commands
-
-In Claude agent buffers:
-
-### Navigation
-
-| Key | Action |
-|-----|--------|
-| `C-c C-e` | Enter Emacs mode (for selection) |
-| `C-c C-j` | Return to semi-char mode |
-| `C-v` | Paste image from clipboard |
-
-### eat-mode Specific
-
-| Key | Action |
-|-----|--------|
-| `C-c C-e` | Toggle between modes |
-| Standard Emacs | Available in Emacs mode |
 
 ## Interactive Prompt Keys
 
@@ -119,7 +182,7 @@ In Claude agent buffers:
 | `k` / `↑` | Move up |
 | `RET` | Select current |
 | `1-9` | Direct select |
-| `o` | Custom input |
+| `o` | Custom input (if enabled) |
 | `q` | Cancel |
 
 ### Multi-Select
@@ -146,13 +209,13 @@ In Claude agent buffers:
 
 | Key | Action |
 |-----|--------|
-| Edit | Modify freely |
-| `C-c C-c` | Accept |
-| `C-c C-k` | Reject |
+| Free editing | Modify the proposal freely |
+| `C-c C-c` | Accept proposal |
+| `C-c C-k` | Reject proposal |
 
 ## Customizing Keybindings
 
-### Main Menu Keybinding
+### Main Menu
 
 ```elisp
 ;; Per-mode (recommended)
@@ -167,7 +230,7 @@ In Claude agent buffers:
 
 ```elisp
 ;; Customize oneshot prefix
-(define-key global-map (kbd "C-c a c") #'claude-oneshot-line)
+(define-key global-map (kbd "C-c a c") #'claude-oneshot-line-or-region)
 (define-key global-map (kbd "C-c a b") #'claude-oneshot-buffer)
 (define-key global-map (kbd "C-c a d") #'claude-oneshot-directory)
 (define-key global-map (kbd "C-c a p") #'claude-oneshot-project)
@@ -176,52 +239,26 @@ In Claude agent buffers:
 ### Input Behavior
 
 ```elisp
-;; Swap RET and M-RET
+;; Swap RET and M-RET (default: nil)
+;; When t: RET creates newline, M-RET submits
 (setq claude-m-return-is-submit t)
 
-;; Enable Shift-Return for newlines
+;; Enable Shift-Return for newlines (default: t)
 (setq claude-shift-return-newline t)
 ```
 
-## Command Functions
+## Extending the Transient Menus
 
-### Starting Sessions
-
-```elisp
-;; Start session in current project
-(claude-start)
-
-;; Start with resume
-(claude-start-resume)
-
-;; Start in specific directory
-(claude-start-in-directory "/path/to/project")
-```
-
-### Sending Input
+You can add custom items to the agent and pair menus:
 
 ```elisp
-;; Send text to Claude
-(claude-send-text "Your message here")
+;; Add to agent menu
+(claude-transient-register-agent-item
+ "z" "My Command" #'my-claude-command)
 
-;; Send with context
-(claude-execute-with-context "Fix this bug")
-
-;; Send file reference
-(claude-add-file "/path/to/file.py")
-```
-
-### Session Management
-
-```elisp
-;; Get current session buffer
-(claude-get-buffer)
-
-;; Check if session is active
-(claude-session-active-p)
-
-;; Kill session
-(claude-kill)
+;; Add to pair menu
+(claude-transient-register-pair-item
+ "z" "My Pair Action" #'my-pair-action)
 ```
 
 ## Hooks
@@ -231,7 +268,4 @@ In Claude agent buffers:
 (add-hook 'claude-startup-hook
           (lambda ()
             (message "Claude session started in %s" claude--cwd)))
-
-;; Custom initialization
-(add-hook 'claude-startup-hook #'my-claude-setup)
 ```
