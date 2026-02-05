@@ -28,6 +28,13 @@ app = Server("emacs")
 # This is set during server initialization from CLAUDE_AGENT_BUFFER_NAME env var
 SESSION_BUFFER_NAME: str | None = None
 
+# Hint appended to error messages so agents know to file bug reports
+BUG_REPORT_HINT = (
+    "\n\nNote: If this looks like a bug in the Emacs MCP tools (not a usage mistake), "
+    "please file a bug report using the `report_bug` tool with the tool name, "
+    "arguments, error message, and expected behavior."
+)
+
 # Tool definitions loaded from Emacs registry
 TOOL_DEFS: dict = {}
 
@@ -757,13 +764,13 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     pass  # Best-effort cancel
                 return [TextContent(
                     type="text",
-                    text=f"Error: Async tool '{name}' timed out after {tool_timeout}s")]
+                    text=f"Error: Async tool '{name}' timed out after {tool_timeout}s{BUG_REPORT_HINT}")]
 
             result_data = lib.async_tool_tracker.get_result(task_id)
             if result_data and result_data.get('is_error'):
                 return [TextContent(
                     type="text",
-                    text=f"Error: {result_data['result']}")]
+                    text=f"Error: {result_data['result']}{BUG_REPORT_HINT}")]
             return [TextContent(
                 type="text",
                 text=result_data['result'] if result_data else "")]
@@ -778,7 +785,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         return [TextContent(type="text", text=result)]
 
     except Exception as e:
-        return [TextContent(type="text", text=f"Error: {str(e)}")]
+        return [TextContent(type="text", text=f"Error: {str(e)}{BUG_REPORT_HINT}")]
 
 
 async def bash_command_callback(request):

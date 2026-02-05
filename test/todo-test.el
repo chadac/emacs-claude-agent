@@ -356,7 +356,8 @@ Do something.
   (should (gethash "todo_acceptance_criteria" claude-mcp-tools))
   (should (gethash "todo_check_acceptance" claude-mcp-tools))
   (should (gethash "todo_update_acceptance" claude-mcp-tools))
-  (should (gethash "todo_complete" claude-mcp-tools)))
+  (should (gethash "todo_complete" claude-mcp-tools))
+  (should (gethash "report_bug" claude-mcp-tools)))
 
 (ert-deftest todo-test-tools-have-descriptions ()
   "Test that TODO tools have descriptions."
@@ -365,11 +366,42 @@ Do something.
   (dolist (tool-name '("todo_current" "todo_list" "todo_create"
                        "todo_add_progress" "todo_update_status"
                        "todo_acceptance_criteria" "todo_check_acceptance"
-                       "todo_update_acceptance" "todo_complete"))
+                       "todo_update_acceptance" "todo_complete"
+                       "report_bug"))
     (let ((tool-def (gethash tool-name claude-mcp-tools)))
       (should tool-def)
       (should (stringp (plist-get tool-def :description)))
       (should (> (length (plist-get tool-def :description)) 0)))))
+
+;;; ============================================================
+;;; Report Bug Tests
+;;; ============================================================
+
+(ert-deftest todo-test-report-bug-requires-args ()
+  "Test that report-bug requires title and description."
+  :tags '(:unit :mcp :todo :report-bug)
+  (when (fboundp 'org-roam-todo-mcp-report-bug)
+    (should-error (org-roam-todo-mcp-report-bug nil "description")
+                  :type 'error)
+    (should-error (org-roam-todo-mcp-report-bug "title" nil)
+                  :type 'error)))
+
+(ert-deftest todo-test-report-bug-tool-has-required-args ()
+  "Test that the report_bug tool has the expected required arguments."
+  :tags '(:unit :mcp :todo :report-bug)
+  (skip-unless (featurep 'todo))
+  (let* ((tool-def (gethash "report_bug" claude-mcp-tools))
+         (args (plist-get tool-def :args)))
+    (should tool-def)
+    ;; Should have title, description, and acceptance-criteria args
+    (should (= 3 (length args)))
+    ;; First two should be required
+    (let ((title-arg (nth 0 args))
+          (desc-arg (nth 1 args)))
+      (should (eq 'title (nth 0 title-arg)))
+      (should (eq :required (nth 2 title-arg)))
+      (should (eq 'description (nth 0 desc-arg)))
+      (should (eq :required (nth 2 desc-arg))))))
 
 (provide 'todo-test)
 ;;; todo-test.el ends here

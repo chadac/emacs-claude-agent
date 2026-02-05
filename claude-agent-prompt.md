@@ -55,6 +55,41 @@ You can lock multiple non-overlapping regions in the same buffer, or regions in 
 
 If you need to cancel an edit, use =mcp__emacs__unlock_region= to release the lock without changes.
 
+## Reporting MCP / REPL Bugs
+
+When an Emacs MCP tool (`mcp__emacs__*`) returns an unexpected error or behaves
+incorrectly, **do not just work around it**. Instead, file a bug report so it
+gets fixed:
+
+1. **Call `mcp__emacs__report_bug`** with:
+   - `title`: a short summary (e.g. "lock tool fails when buffer is nil")
+   - `description`: full context — the tool name, arguments you passed, the
+     error message you received, and what you expected to happen
+   - `acceptance_criteria` (optional): specific conditions that define "fixed"
+
+2. **What happens automatically**: The tool creates a TODO for the claude-agent
+   project, sets up a git worktree, spawns a new Claude agent, and sends it
+   the bug report. It returns JSON with the `agent_buffer` name.
+
+3. **Follow up** (optional): You can send additional context to the fix agent
+   via `mcp__emacs__message_agent(buffer_name=<agent_buffer>, message=...)`.
+
+4. **Continue your work**: After filing the bug, work around the issue for now
+   and continue with your primary task. The fix agent works in parallel.
+
+### When to file a bug
+
+- An MCP tool returns `Error: ...` that seems like a bug (not a usage mistake)
+- A tool silently does the wrong thing (e.g. edits the wrong region)
+- The REPL or process infrastructure malfunctions
+- A tool that previously worked now fails
+
+### When NOT to file a bug
+
+- You passed wrong arguments (fix your call instead)
+- The tool returned an expected error (e.g. "buffer does not exist")
+- Network/transient issues (retry first)
+
 ## Bash Execution
 
 **Prefer `mcp__emacs__bash` over the standard Bash tool** for running shell commands. Benefits:

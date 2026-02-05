@@ -2408,6 +2408,111 @@ Returns JSON with the created TODO's file path and ID."
        (project . ,project-name)
        (status . "draft")))))
 
+(defun org-roam-todo-mcp-report-bug (title description &optional acceptance-criteria)
+  "Report a bug in claude-agent and spawn a worktree agent to fix it.
+TITLE is a short bug title.
+DESCRIPTION is the detailed bug report.
+ACCEPTANCE-CRITERIA is an optional list of criteria strings.
+
+This function:
+1. Creates a TODO in the claude-agent project
+2. Creates a git worktree for the fix
+3. Spawns a Claude agent in the worktree
+4. Sends the bug report to the spawned agent
+5. Returns JSON with the agent buffer name for follow-up messaging."
+  (require 'claude-agent)
+  (unless title (error "title is required"))
+  (unless description (error "description is required"))
+  ;; Resolve canonical project root: if we're in a worktree,
+  ;; git-common-dir points to the main repo's .git directory.
+  ;; We want the parent of that .git dir as the project root.
+  (let* ((pkg-root (or (and (fboundp 'claude--package-root) (claude--package-root))
+                       (error "Cannot determine claude-agent project root")))
+         (project-root
+          (let ((default-directory pkg-root))
+            (let ((common-git (string-trim
+                               (shell-command-to-string
+                                "git rev-parse --git-common-dir 2>/dev/null"))))
+              (if (and common-git (not (string-empty-p common-git))
+                       (not (string-match-p "fatal" common-git)))
+                  (file-name-directory (expand-file-name common-git pkg-root))
+                pkg-root))))
+         (project-name (org-roam-todo--project-name project-root))
+         ;; Prefix title with "bug -" for clarity
+         (full-title (format "bug - %s" title))
+         ;; Create the TODO
+         (todo-json (org-roam-todo-mcp-create project-root full-title description acceptance-criteria "sonnet"))
+         (todo-data (json-read-from-string todo-json))
+         (todo-file (alist-get 'file todo-data))
+         ;; Generate branch and worktree paths
+         (branch-name (org-roam-todo--default-branch-name full-title project-name))
+         (worktree-path (org-roam-todo--worktree-path project-root branch-name)))
+
+    ;; Set TODO properties (worktree info + status) by visiting the file
+    (with-current-buffer (find-file-noselect todo-file)
+      (org-roam-todo--set-property "WORKTREE_BRANCH" branch-name)
+      (org-roam-todo--set-property "WORKTREE_PATH" worktree-path)
+      (org-roam-todo--set-property "STATUS" "active")
+      (save-buffer))
+
+    ;; Create worktree
+    (unless (org-roam-todo--worktree-exists-p worktree-path)
+      (let ((org-roam-todo-worktree-base-branch
+             (org-roam-todo-project-config-get
+              project-name :base-branch org-roam-todo-worktree-base-branch))
+            (org-roam-todo-worktree-fetch-before-create
+             (org-roam-todo-project-config-get
+              project-name :fetch-before-create
+              org-roam-todo-worktree-fetch-before-create)))
+        (org-roam-todo--create-worktree project-root branch-name worktree-path))
+      ;; Write dir-locals for worktree confinement
+      (org-roam-todo--write-worktree-dir-locals worktree-path project-root))
+
+    ;; Pre-trust the worktree so Claude can work without permission prompts
+    (org-roam-todo--pre-trust-worktree worktree-path)
+
+    ;; Spawn agent in the worktree
+    (let* ((reporter-buffer (buffer-name))  ; the calling agent's buffer
+           (expanded-wt (expand-file-name worktree-path))
+           (lock-pattern (format "mcp__emacs__lock(%s*)" expanded-wt))
+           (locks-pattern (format "mcp__emacs__locks(%s*)" expanded-wt))
+           (all-tools (append (org-roam-todo--effective-agent-allowed-tools)
+                              (list lock-pattern locks-pattern)))
+           (buf (claude-agent-run worktree-path nil nil nil "sonnet" all-tools))
+           (buffer-name (buffer-name buf))
+           ;; Build the task content from the TODO
+           (content (with-current-buffer (find-file-noselect todo-file)
+                      (org-roam-todo--get-node-content)))
+           ;; Build a custom message with reporter info
+           (msg (format "[WORKTREE TASK]\n\n%s\n\nWorktree: %s\n\n\
+IMPORTANT: This bug was filed by the agent in buffer `%s`.\n\
+When your fix is ready to test, use `mcp__emacs__message_agent` to message\n\
+that buffer and ask them to verify the fix. For example:\n\
+  mcp__emacs__message_agent(buffer_name=\"%s\", message=\"Fix is ready...\")\n\
+Do NOT call todo_complete until the reporter has confirmed the fix works."
+                        content worktree-path
+                        reporter-buffer reporter-buffer)))
+
+      ;; Queue the custom message for the new agent
+      (with-current-buffer buf
+        (push msg claude-agent--message-queue)
+        (when (and claude-agent--process
+                   (process-live-p claude-agent--process)
+                   (not (claude-agent--is-busy-p)))
+          (claude-agent--send-next-queued))
+        (message "Bug report task queued for %s" buffer-name))
+
+      ;; Return JSON with agent info
+      (json-encode
+       `((status . "ok")
+         (message . ,(format "Bug report filed. TODO created and agent spawned in worktree."))
+         (agent_buffer . ,buffer-name)
+         (reporter_buffer . ,reporter-buffer)
+         (todo_file . ,todo-file)
+         (worktree_path . ,worktree-path)
+         (branch . ,branch-name)
+         (instructions . "The agent is now working on the fix. It will message you back when the fix is ready to test. You can also send follow-up context with message_agent(buffer_name, message)."))))))
+
 (defun org-roam-todo-mcp-complete (&optional summary commit-message unsafe-ignore-unstaged)
   "Mark the current TODO as ready for review.
 SUMMARY is a description of what was accomplished.
@@ -2683,7 +2788,26 @@ files were modified. Review the changes, re-stage them, and call todo_complete a
     :needs-session-cwd t
     :args ((summary string "Brief summary of what was accomplished")
            (commit-message string :required "Proposed commit message for the merge. Write a proper git commit message: short summary line, blank line, then detailed bullet points.")
-           (unsafe-ignore-unstaged boolean "If true, skip the unstaged changes check. Only use this if you intentionally want to leave files unstaged."))))
+           (unsafe-ignore-unstaged boolean "If true, skip the unstaged changes check. Only use this if you intentionally want to leave files unstaged.")))
+
+  (claude-mcp-deftool report-bug
+    "Report a bug in the Emacs MCP tools or REPL infrastructure.
+Creates a TODO for the claude-agent project, sets up a git worktree, spawns
+a new Claude agent to fix the bug, and sends it the bug report.  Returns
+the buffer name of the spawned agent so you can monitor progress via
+message_agent / check_messages.
+
+Use this when an MCP tool (mcp__emacs__*) returns an unexpected error,
+behaves incorrectly, or when the REPL infrastructure malfunctions.
+Include as much context as possible: the tool name, arguments you passed,
+the error message, and what you expected to happen."
+    :function #'org-roam-todo-mcp-report-bug
+    :safe t
+    :needs-session-cwd t
+    :args ((title string :required "Short bug title (e.g. 'lock tool fails on narrowed buffers')")
+           (description string :required "Detailed bug report: what tool failed, the arguments, the error, expected vs actual behavior, and any reproduction steps")
+           (acceptance-criteria array "Optional array of acceptance criteria strings for the fix"))))
+
 ;;;; Global Keybindings
 
 ;; Define prefix keymaps for notes commands
