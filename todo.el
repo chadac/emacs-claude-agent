@@ -47,7 +47,7 @@
 (declare-function magit-status-setup-buffer "magit-status")
 (declare-function magit-get-mode-buffer "magit-mode")
 (declare-function org-roam-todo-merge-run "todo-merge")
-(declare-function org-roam-todo-merge--detect-main-branch "todo-merge")
+(declare-function org-roam-todo-merge--detect-main-branch "todo-merge" (project-root &optional project-name))
 ;;;; Customization
 
 (defgroup org-roam-todo nil
