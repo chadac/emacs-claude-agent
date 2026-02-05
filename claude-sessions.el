@@ -120,9 +120,9 @@ Returns one of: `ready', `thinking', `waiting', or `dead'."
           'dead
         ;; Process is running, check status
         (cond
-         ;; Waiting for permission: input-mode is 'text-with-permission
-         ((and (boundp 'claude-agent--input-mode)
-               (eq claude-agent--input-mode 'text-with-permission))
+         ;; Waiting for permission: permission-data is set
+         ((and (boundp 'claude-agent--permission-data)
+               claude-agent--permission-data)
           'waiting)
          ;; Thinking: claude-agent--thinking-status is set
          ((and (boundp 'claude-agent--thinking-status)

@@ -498,22 +498,46 @@ If the associated TODO is in review status, auto-reverts to active."
   "Face for line numbers in file content display."
   :group 'claude-agent)
 
+(defface claude-agent-header-model-face
+  '((((class color) (background dark))
+     (:foreground "#61afef" :weight bold))
+    (((class color) (background light))
+     (:foreground "#4078f2" :weight bold)))
+  "Face for model name in header line."
+  :group 'claude-agent)
+
+(defface claude-agent-header-cost-face
+  '((((class color) (background dark))
+     (:foreground "#98c379"))
+    (((class color) (background light))
+     (:foreground "#50a14f")))
+  "Face for cost in header line."
+  :group 'claude-agent)
+
+(defface claude-agent-header-session-face
+  '((((class color) (background dark))
+     (:foreground "#5c6370"))
+    (((class color) (background light))
+     (:foreground "#a0a1a7")))
+  "Face for session ID in header line."
+  :group 'claude-agent)
+
 
 ;;;; Buffer-local variables - Section markers
 ;;
-;; Buffer has 3 zones with different update semantics:
+;; Buffer has 2 zones with different update semantics:
 ;;
 ;;   [STATIC]  - Header + completed conversation turns
 ;;               Append-only, never modified after written
 ;;               Ends at `static-end-marker`
 ;;
-;;   [DYNAMIC] - Current in-progress turn + status bar
+;;   [DYNAMIC] - Current in-progress turn + status bar + permission dialog
 ;;               Fully deleted and rebuilt on each update
 ;;               Content stored in variables, rendered fresh each time
 ;;
-;;   [INPUT]   - User typing area
-;;               Preserved across dynamic rebuilds
-;;               Starts at `input-start-marker` (set after each rebuild)
+;; User input is handled in a separate dedicated buffer (*claude-input:*),
+;; shown in a small window below the REPL when the user wants to type.
+;; The REPL buffer itself is fully read-only.
 
 (defvar-local claude-agent--process nil
   "The agent process for this session.")
@@ -522,9 +546,17 @@ If the associated TODO is in review status, auto-reverts to active."
   "Marker for end of static section (start of dynamic section).
 Everything before this is completed content that never changes.")
 
-(defvar-local claude-agent--input-start-marker nil
-  "Marker for start of input section (where user types).
-Set fresh after each dynamic section rebuild.")
+;;;; Buffer-local variables - Input buffer
+
+(defvar-local claude-agent--input-buffer nil
+  "The dedicated input buffer for this Claude session.")
+
+(defvar-local claude-agent--input-window nil
+  "The window displaying the input buffer, or nil if hidden.")
+
+(defvar-local claude-agent--follow-mode t
+  "Non-nil when auto-scrolling to follow new content.
+Set to t when user is at bottom; set to nil when user scrolls up.")
 
 ;;;; Buffer-local variables - State
 
@@ -612,30 +644,8 @@ When a permission_denied event arrives, the tool_use_id is added here.
 When the subsequent tool_result arrives, we check this set to show
 a distinct 🚫 indicator instead of the normal ✗ error icon.")
 
-(defvar-local claude-agent--placeholder-overlay nil
-  "Overlay for the placeholder text in empty input area.")
-
 (defvar-local claude-agent--work-dir nil
   "The working directory for this Claude session.")
-
-(defconst claude-agent--placeholder-text "Enter your message... (C-c C-c to send)"
-  "Placeholder text shown when input area is empty.")
-
-(defface claude-agent-placeholder-face
-  '((((class color) (background dark))
-     (:foreground "#5c6370" :slant italic))
-    (((class color) (background light))
-     (:foreground "#a0a1a7" :slant italic)))
-  "Face for placeholder text in empty input area."
-  :group 'claude-agent)
-
-;;;; Buffer-local variables - Input mode
-
-(defvar-local claude-agent--input-mode 'text
-  "Current input mode: `text' for normal input, `permission' for permission prompt.")
-
-(defvar-local claude-agent--saved-input ""
-  "Saved input text when switching away from text mode.")
 
 ;;;; Buffer-local variables - Message queue
 
@@ -684,14 +694,12 @@ Used by on_start/on_resume hooks to determine if they should fire.")
 
 (defvar claude-agent-mode-map
   (let ((map (make-sparse-keymap)))
-    ;; Standard Emacs-style bindings (work everywhere)
-    (define-key map (kbd "C-c C-c") #'claude-agent-send)
-    (define-key map (kbd "C-<return>") #'claude-agent-send)
+    ;; C-c C-c opens input or sends if input has text
+    (define-key map (kbd "C-c C-c") #'claude-agent-send-or-open-input)
+    (define-key map (kbd "C-<return>") #'claude-agent-send-or-open-input)
     (define-key map (kbd "C-c C-k") #'claude-agent-interrupt)
     (define-key map (kbd "C-c C-q") #'claude-agent-quit)
     (define-key map (kbd "C-c C-d") #'claude-agent-queue-delete)
-    (define-key map (kbd "M-p") #'claude-agent-previous-input)
-    (define-key map (kbd "M-n") #'claude-agent-next-input)
     ;; Transient menu (C-c c for "claude")
     (define-key map (kbd "C-c c") #'claude-menu)
     map)
@@ -699,7 +707,7 @@ Used by on_start/on_resume hooks to determine if they should fire.")
 
 (defvar claude-agent-log-mode-map
   (let ((map (make-sparse-keymap)))
-    ;; Magit-style single-key bindings for the log/read-only area
+    ;; Magit-style single-key bindings (always active in read-only REPL)
     ;; Model
     (define-key map (kbd "m") #'claude-agent-set-model)
     (define-key map (kbd "$") #'claude-agent-show-cost)
@@ -722,21 +730,27 @@ Used by on_start/on_resume hooks to determine if they should fire.")
     ;; Navigation between messages/tool calls
     (define-key map (kbd "{") #'claude-agent-previous-section)
     (define-key map (kbd "}") #'claude-agent-next-section)
+    ;; Follow mode
+    (define-key map (kbd "f") #'claude-agent-toggle-follow)
     ;; Help
     (define-key map (kbd "?") #'claude-menu)
     map)
-  "Keymap for the read-only log area in `claude-agent-mode'.
-These single-key bindings only apply outside the input area.")
+  "Keymap for the read-only REPL buffer.
+Single-key bindings always active since buffer is fully read-only.")
+
+;; Make log-mode-map the parent so single-key bindings always work
+(set-keymap-parent claude-agent-mode-map claude-agent-log-mode-map)
 
 (define-derived-mode claude-agent-mode fundamental-mode "Claude"
-  "Major mode for Claude interaction buffer."
+  "Major mode for Claude interaction buffer.
+The buffer is fully read-only.  User input is handled in a separate
+dedicated input buffer shown in a split window below."
   :group 'claude-agent
   (setq-local truncate-lines nil)
   (setq-local word-wrap t)
-  (setq-local buffer-read-only nil)
+  (setq-local buffer-read-only t)
   (visual-line-mode 1)
   ;; Set up org-mode fontification without org-mode keybindings
-  ;; This gives us org syntax highlighting (bold, italic, code, src blocks)
   (require 'org)
   (org-set-font-lock-defaults)
   (font-lock-mode 1)
@@ -745,49 +759,189 @@ These single-key bindings only apply outside the input area.")
     (flycheck-mode -1))
   (when (bound-and-true-p company-mode)
     (company-mode -1))
-  ;; Ensure our keybindings are set (defvar doesn't reinit on re-eval)
+  ;; Ensure our keybindings are set
   (use-local-map claude-agent-mode-map)
-  ;; Re-define keys to ensure they're set
-  (local-set-key (kbd "C-c C-c") #'claude-agent-send)
-  (local-set-key (kbd "C-<return>") #'claude-agent-send)
-  (local-set-key (kbd "C-c C-k") #'claude-agent-interrupt)
-  (local-set-key (kbd "C-c C-q") #'claude-agent-quit)
-  (local-set-key (kbd "M-p") #'claude-agent-previous-input)
-  (local-set-key (kbd "M-n") #'claude-agent-next-input)
-  (local-set-key (kbd "C-c '") #'claude-agent-show-tool-result)
-  ;; Set up placeholder update hook
+  ;; Set up post-command-hook
   (add-hook 'post-command-hook #'claude-agent--post-command-hook nil t)
-  ;; Set up evil insert state entry hook to move to input area
-  ;; Use after-change-major-mode-hook to ensure evil is loaded
+  ;; Evil: entering insert state opens input window
   (add-hook 'evil-insert-state-entry-hook
             #'claude-agent--on-insert-state-entry nil t)
-  ;; Add C-c c for transient menu (works in all states)
+  ;; Add C-c c for transient menu
   (local-set-key (kbd "C-c c") #'claude-menu)
-  ;; Clean up spinner timer when buffer is killed to prevent orphaned
-  ;; global timers that could stack with new buffers' timers.
-  (add-hook 'kill-buffer-hook #'claude-agent--cleanup-spinner-timer nil t))
+  ;; Clean up on buffer kill
+  (add-hook 'kill-buffer-hook #'claude-agent--cleanup-on-kill nil t))
 
-(defun claude-agent--cleanup-spinner-timer ()
-  "Cancel the spinner timer for the current buffer.
-Added to `kill-buffer-hook' to prevent orphaned global timers."
+(defun claude-agent--cleanup-on-kill ()
+  "Clean up resources when the REPL buffer is killed."
   (when claude-agent--spinner-timer
     (cancel-timer claude-agent--spinner-timer)
-    (setq claude-agent--spinner-timer nil)))
+    (setq claude-agent--spinner-timer nil))
+  ;; Kill input buffer too
+  (when (and claude-agent--input-buffer
+             (buffer-live-p claude-agent--input-buffer))
+    (kill-buffer claude-agent--input-buffer)))
 
 ;;;; Helper functions
 
-(defun claude-agent--in-input-area-p ()
-  "Return t if point is in the input area."
-  (and claude-agent--input-start-marker
-       (>= (point) claude-agent--input-start-marker)))
-
-(defun claude-agent--scroll-to-bottom ()
-  "Scroll window to show maximum content with input area near bottom.
-This eliminates empty space below the input area."
+(defun claude-agent--should-follow-p ()
+  "Return non-nil if the window cursor is in or past the dynamic section.
+Must be called BEFORE buffer modifications to get an accurate read.
+Uses `window-point' (not `point') since process filters run in buffer
+context where `point' may be stale."
   (when-let ((win (get-buffer-window (current-buffer))))
-    (with-selected-window win
-      ;; Recenter with point near the bottom (negative arg = lines from bottom)
-      (recenter -3))))
+    (let ((wp (window-point win))
+          (static-end (and claude-agent--static-end-marker
+                          (marker-position claude-agent--static-end-marker))))
+      ;; Follow if cursor is at or past the start of the dynamic section
+      (and static-end (>= wp static-end)))))
+
+(defun claude-agent--maybe-follow ()
+  "Scroll to bottom if `claude-agent--follow-mode' is active.
+The flag should be set by callers (before buffer changes) via
+`claude-agent--should-follow-p'."
+  (when claude-agent--follow-mode
+    (when-let ((win (get-buffer-window (current-buffer))))
+      (with-selected-window win
+        (goto-char (point-max))
+        (recenter -1)))))
+
+(defun claude-agent--update-follow-mode ()
+  "No-op. Follow mode is determined before render by `should-follow-p'."
+  nil)
+
+(defun claude-agent-toggle-follow ()
+  "Toggle auto-follow mode."
+  (interactive)
+  (setq claude-agent--follow-mode (not claude-agent--follow-mode))
+  (when claude-agent--follow-mode
+    (claude-agent--maybe-follow))
+  (claude-agent--update-header-line)
+  (message "Follow mode %s" (if claude-agent--follow-mode "ON" "OFF")))
+;;;; Input buffer
+
+(defvar claude-agent-input-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-c C-c") #'claude-agent-send)
+    (define-key map (kbd "C-<return>") #'claude-agent-send)
+    (define-key map (kbd "C-c C-k") #'claude-agent-input-dismiss)
+    (define-key map (kbd "M-p") #'claude-agent-previous-input)
+    (define-key map (kbd "M-n") #'claude-agent-next-input)
+    (define-key map (kbd "C-c c") #'claude-menu)
+    map)
+  "Keymap for the Claude input buffer.")
+
+(defvar-local claude-agent--input-parent-buffer nil
+  "The REPL buffer that owns this input buffer.")
+
+(defvar-local claude-agent--input-placeholder-overlay nil
+  "Overlay for placeholder text in the input buffer.")
+
+(define-derived-mode claude-agent-input-mode fundamental-mode "Claude Input"
+  "Major mode for the Claude input buffer."
+  :group 'claude-agent
+  (setq-local truncate-lines nil)
+  (setq-local word-wrap t)
+  (visual-line-mode 1)
+  (when (bound-and-true-p flycheck-mode)
+    (flycheck-mode -1))
+  (when (bound-and-true-p company-mode)
+    (company-mode -1))
+  (use-local-map claude-agent-input-mode-map)
+  (add-hook 'post-command-hook #'claude-agent--input-update-placeholder nil t))
+
+;; Evil integration: start in insert state for input buffer
+(with-eval-after-load 'evil
+  (evil-set-initial-state 'claude-agent-input-mode 'insert))
+
+(defun claude-agent--input-update-placeholder ()
+  "Update placeholder visibility in the input buffer."
+  (when (eq major-mode 'claude-agent-input-mode)
+    (if (string-blank-p (buffer-string))
+        (unless claude-agent--input-placeholder-overlay
+          (let ((ov (make-overlay (point-min) (point-min))))
+            (overlay-put ov 'before-string
+                         (propertize "Enter your message... (C-c C-c to send)"
+                                     'face '(:foreground "#5c6370" :slant italic)))
+            (overlay-put ov 'evaporate nil)
+            (setq claude-agent--input-placeholder-overlay ov)))
+      (when claude-agent--input-placeholder-overlay
+        (delete-overlay claude-agent--input-placeholder-overlay)
+        (setq claude-agent--input-placeholder-overlay nil)))))
+
+(defun claude-agent--get-or-create-input-buffer ()
+  "Get or create the input buffer for this Claude session."
+  (or (and claude-agent--input-buffer
+           (buffer-live-p claude-agent--input-buffer)
+           claude-agent--input-buffer)
+      (let* ((repl-buf (current-buffer))
+             (name (format "*claude-input:%s*"
+                           (replace-regexp-in-string
+                            "^\\*claude:" ""
+                            (replace-regexp-in-string "\\*$" "" (buffer-name)))))
+             (buf (get-buffer-create name)))
+        (with-current-buffer buf
+          (claude-agent-input-mode)
+          (setq claude-agent--input-parent-buffer repl-buf))
+        (setq claude-agent--input-buffer buf)
+        buf)))
+
+(defun claude-agent--show-input-window ()
+  "Show the input buffer in a small window below the REPL.
+If already visible, just select it."
+  (interactive)
+  (claude-agent--in-base-buffer
+   (let* ((input-buf (claude-agent--get-or-create-input-buffer))
+          (repl-win (get-buffer-window (current-buffer)))
+          (existing (get-buffer-window input-buf)))
+     (cond
+      (existing
+       (select-window existing))
+      (repl-win
+       (let ((input-win (split-window repl-win -5 'below)))
+         (set-window-buffer input-win input-buf)
+         (set-window-dedicated-p input-win t)
+         (setq claude-agent--input-window input-win)
+         (select-window input-win)))
+      (t
+       (pop-to-buffer input-buf))))))
+
+(defun claude-agent--close-input-window ()
+  "Close the input window and kill the input buffer.
+Selects the REPL window after closing and ensures evil normal state
+to prevent the insert-state hook from re-opening the window."
+  (when claude-agent--input-buffer
+    (let ((buf claude-agent--input-buffer)
+          (repl-win (get-buffer-window (current-buffer))))
+      ;; Delete the window first
+      (let ((win (get-buffer-window buf)))
+        (when (and win (window-live-p win))
+          (delete-window win)))
+      ;; Kill the buffer
+      (when (buffer-live-p buf)
+        (kill-buffer buf))
+      (setq claude-agent--input-buffer nil)
+      (setq claude-agent--input-window nil)
+      ;; Return focus to REPL
+      (when (and repl-win (window-live-p repl-win))
+        (select-window repl-win)
+        ;; Switch to normal state so the insert-state hook doesn't
+        ;; immediately re-open the input window
+        (when (and (bound-and-true-p evil-mode)
+                   (fboundp 'evil-normal-state))
+          (evil-normal-state))))))
+
+(defun claude-agent--input-window-visible-p ()
+  "Return non-nil if the input window is currently visible."
+  (and claude-agent--input-buffer
+       (buffer-live-p claude-agent--input-buffer)
+       (get-buffer-window claude-agent--input-buffer)))
+
+(defun claude-agent-input-dismiss ()
+  "Close the input window and kill the input buffer."
+  (interactive)
+  (let ((parent (or claude-agent--input-parent-buffer (current-buffer))))
+    (with-current-buffer parent
+      (claude-agent--close-input-window))))
 
 (defun claude-agent--add-tool-tooltip (marker content)
   "Add a tooltip with CONTENT preview to the tool call at MARKER."
@@ -977,14 +1131,10 @@ Like `org-edit-special' (C-c ') for source blocks."
     (message "No tool result found at point")))
 
 (defun claude-agent-goto-input ()
-  "Move point to the input area."
+  "Open the input window for typing a message."
   (interactive)
-  (when claude-agent--input-start-marker
-    (goto-char claude-agent--input-start-marker)
-    ;; Enter insert state if using evil
-    (when (and (bound-and-true-p evil-local-mode)
-               (fboundp 'evil-insert-state))
-      (evil-insert-state))))
+  (claude-agent--in-base-buffer
+   (claude-agent--show-input-window)))
 
 (defun claude-agent--section-header-p ()
   "Return non-nil if current line is a section header (message or tool call)."
@@ -1001,11 +1151,9 @@ Like `org-edit-special' (C-c ') for source blocks."
   (let ((start (point)))
     (forward-line 1)
     (while (and (not (eobp))
-                (not (claude-agent--section-header-p))
-                (< (point) (or claude-agent--input-start-marker (point-max))))
+                (not (claude-agent--section-header-p)))
       (forward-line 1))
-    (if (or (eobp)
-            (>= (point) (or claude-agent--input-start-marker (point-max))))
+    (if (eobp)
         (progn
           (goto-char start)
           (message "No more sections"))
@@ -1028,141 +1176,48 @@ Like `org-edit-special' (C-c ') for source blocks."
           (message "No more sections"))
       (beginning-of-line))))
 
-(defvar-local claude-agent--in-log-area nil
-  "Non-nil when cursor is in the log area (not input area).
-Used to track keymap state changes.")
-
-(defun claude-agent--update-keymap ()
-  "Update the active keymap based on cursor position.
-When in the log area, enable magit-style single-key bindings.
-When in the input area, use normal text input bindings."
-  (let ((in-log (not (claude-agent--in-input-area-p))))
-    (unless (eq in-log claude-agent--in-log-area)
-      (setq claude-agent--in-log-area in-log)
-      (if in-log
-          ;; Entering log area - add log keymap as minor mode map
-          (progn
-            (setq-local minor-mode-overriding-map-alist
-                        (cons (cons 'claude-agent--in-log-area claude-agent-log-mode-map)
-                              (assq-delete-all 'claude-agent--in-log-area
-                                               minor-mode-overriding-map-alist))))
-        ;; Entering input area - remove log keymap
-        (setq-local minor-mode-overriding-map-alist
-                    (assq-delete-all 'claude-agent--in-log-area
-                                     minor-mode-overriding-map-alist))))))
-
 (defmacro claude-agent--in-base-buffer (&rest body)
   "Execute BODY in the base buffer (for polymode compatibility)."
   `(let ((base (or (buffer-base-buffer) (current-buffer))))
      (with-current-buffer base
        ,@body)))
 
-;;;; Placeholder management
-
-(defun claude-agent--input-empty-p ()
-  "Return t if the input area is empty (only whitespace)."
-  (and claude-agent--input-start-marker
-       ;; string-blank-p returns match position (0) for empty, so convert to t
-       (not (null (string-blank-p (buffer-substring-no-properties
-                                   claude-agent--input-start-marker (point-max)))))))
-
-(defun claude-agent--update-placeholder ()
-  "Show or hide placeholder based on input area content."
-  (when (and claude-agent--input-start-marker
-             (marker-position claude-agent--input-start-marker))
-    (if (claude-agent--input-empty-p)
-        ;; Show placeholder at current input-start position
-        (let ((pos (marker-position claude-agent--input-start-marker)))
-          ;; Move existing overlay or create new one
-          (if (and claude-agent--placeholder-overlay
-                   (overlay-buffer claude-agent--placeholder-overlay))
-              ;; Move to new position
-              (move-overlay claude-agent--placeholder-overlay pos pos)
-            ;; Create new overlay
-            (setq claude-agent--placeholder-overlay (make-overlay pos pos))
-            (overlay-put claude-agent--placeholder-overlay 'before-string
-                         (propertize claude-agent--placeholder-text
-                                     'face 'claude-agent-placeholder-face
-                                     'cursor t))
-            (overlay-put claude-agent--placeholder-overlay 'evaporate nil)))
-      ;; Hide placeholder
-      (when (and claude-agent--placeholder-overlay
-                 (overlay-buffer claude-agent--placeholder-overlay))
-        (delete-overlay claude-agent--placeholder-overlay)
-        (setq claude-agent--placeholder-overlay nil)))))
-
-(defun claude-agent--in-insert-state-p ()
-  "Return t if evil-mode is active and in insert state."
-  (and (bound-and-true-p evil-local-mode)
-       (eq evil-state 'insert)))
-
 (defun claude-agent--on-insert-state-entry ()
-  "Hook called when entering evil insert state.
-Moves cursor to input area if currently outside it."
-  (when (and claude-agent--input-start-marker
-             (marker-position claude-agent--input-start-marker)
-             (< (point) claude-agent--input-start-marker))
-    (goto-char claude-agent--input-start-marker)))
+  "Open input window when entering evil insert state."
+  (when (eq major-mode 'claude-agent-mode)
+    (claude-agent--show-input-window)))
 
 (defun claude-agent--post-command-hook ()
-  "Hook run after each command to update placeholder visibility.
-Also constrains cursor to input area when in evil insert state,
-and switches keymaps based on cursor position."
-  (claude-agent--update-placeholder)
-  ;; In insert mode, keep cursor in input area
-  (when (and claude-agent--input-start-marker
-             (marker-position claude-agent--input-start-marker)
-             (claude-agent--in-insert-state-p)
-             (< (point) claude-agent--input-start-marker))
-    (goto-char claude-agent--input-start-marker))
-  ;; If input is empty and we're in the input area, keep cursor at prompt
-  (when (and (claude-agent--input-empty-p)
-             (claude-agent--in-input-area-p)
-             claude-agent--input-start-marker)
-    (goto-char claude-agent--input-start-marker))
-  ;; Switch keymaps based on position (magit-style in log area)
-  (claude-agent--update-keymap)
-  ;; Update tool result popup
+  "Hook run after each command in the Claude buffer."
   (claude-agent--update-tool-popup)
-  ;; Update queue item highlight
-  (claude-agent--update-queue-highlight))
+  (claude-agent--update-queue-highlight)
+  (claude-agent--update-follow-mode))
 
 ;;;; Section management
 ;;
 ;; Two-zone architecture:
 ;; - Static section: Append-only (header + conversation log)
-;; - Dynamic section: Re-rendered from state (status bar + input area)
+;; - Dynamic section: Re-rendered from state (status bar + permission dialog)
 
 (defun claude-agent--init-buffer (session-name)
   "Initialize buffer with section structure for SESSION-NAME."
   (let ((inhibit-read-only t))
     (erase-buffer)
-
-    ;; === HEADER (part of static section) ===
+    ;; Insert header
     (let ((start (point)))
       (insert "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
       (insert (format " Claude Session: %s\n" session-name))
       (insert "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
-      (claude-agent--apply-face start (point) 'claude-agent-header-face)
-      ;; Mark as fontified to prevent org-mode font-lock from interfering
-      (put-text-property start (point) 'fontified t))
-
-    ;; === STATIC END MARKER ===
-    ;; Everything before this is committed content that never changes
+      (add-text-properties start (point)
+                           (list 'face 'claude-agent-header-face
+                                 'fontified t)))
+    ;; Mark end of static section
     (setq claude-agent--static-end-marker (point-marker))
     (set-marker-insertion-type claude-agent--static-end-marker nil)
-
-    ;; === INPUT START MARKER ===
-    ;; Set initially at same position, will be updated by rebuild
-    (setq claude-agent--input-start-marker (point-marker))
-    (set-marker-insertion-type claude-agent--input-start-marker nil)
-
-    ;; Show placeholder and position cursor
-    (claude-agent--update-placeholder)
-    (goto-char claude-agent--input-start-marker)
-
-    ;; Make everything before input read-only
-    (claude-agent--update-read-only)))
+    ;; Initialize header line
+    (claude-agent--update-header-line)
+    ;; Position cursor at end
+    (goto-char (point-max))))
 
 (defun claude-agent--apply-face (start end face)
   "Apply FACE to region from START to END using overlay."
@@ -1183,72 +1238,44 @@ and switches keymaps based on cursor position."
             (overlay-put ov 'evaporate t)
             (overlay-put ov 'claude-agent-styled t)))))))
 
-(defun claude-agent--update-read-only ()
-  "Update read-only text property to cover everything before prompt marker.
-Optimized to only modify the dynamic section, not the entire buffer."
-  ;; Use text properties for read-only (overlays don't enforce read-only)
-  (when (and claude-agent--input-start-marker
-             (> (marker-position claude-agent--input-start-marker) (point-min)))
-    ;; Only remove read-only from the dynamic section (after static-end).
-    ;; The static section already has read-only applied and doesn't change.
-    ;; This is O(dynamic-section-size) instead of O(buffer-size).
-    (when (and claude-agent--static-end-marker
-               (marker-position claude-agent--static-end-marker))
-      (remove-list-of-text-properties
-       claude-agent--static-end-marker (point-max)
-       '(read-only rear-nonsticky)))
-    ;; Apply read-only to everything before prompt, with rear-nonsticky
-    ;; so text inserted at the boundary is NOT read-only.
-    ;; Note: This still applies to the full static section, but add-text-properties
-    ;; is fast when properties already exist (it's a no-op for unchanged regions).
-    (add-text-properties (point-min) claude-agent--input-start-marker
-                         '(read-only t rear-nonsticky (read-only)))))
-
 ;;;; Dynamic section management
 ;;
 ;; Two-zone architecture:
 ;; - Static section: Append-only log content (header + conversation)
-;; - Dynamic section: Re-rendered from state (status bar + input area)
+;; - Dynamic section: Re-rendered from state (status bar + permission dialog)
 ;;
 ;; `append-to-static` appends to the static section directly.
 ;; `render-dynamic-section` clears and re-renders dynamic section from state.
-
-(defun claude-agent--get-input-text ()
-  "Get the current text in the input area."
-  (if (and claude-agent--input-start-marker
-           (marker-position claude-agent--input-start-marker))
-      (buffer-substring-no-properties
-       claude-agent--input-start-marker (point-max))
-    ""))
 
 (defun claude-agent--append-to-static (text)
   "Append TEXT to the static section and re-render dynamic section.
 This is a convenience wrapper for `append-to-log' without styling."
   (claude-agent--append-to-log text nil nil))
 
-(defun claude-agent--render-dynamic-section ()
-  "Render the dynamic section (status bar + input area).
+(defun claude-agent--render-dynamic-section (&optional pre-follow)
+  "Render the dynamic section (status bar + permission dialog).
 Clears everything after static-end-marker and re-renders from state.
-Handles different input modes: text input vs permission prompt."
+The buffer is fully read-only; user input happens in a dedicated input buffer.
+PRE-FOLLOW controls auto-scroll behavior:
+  - non-nil: use as the pre-computed follow decision (caller already
+    checked `should-follow-p' before modifying the buffer)
+  - nil (default): compute follow from current window state before
+    deleting the dynamic section."
   (let* ((inhibit-read-only t)
-         ;; Track where the cursor is so we can restore it
-         (in-input (and (eq claude-agent--input-mode 'text)
-                        claude-agent--input-start-marker
-                        (marker-position claude-agent--input-start-marker)
-                        (>= (point) claude-agent--input-start-marker)))
-         ;; Save cursor offset relative to input-start (if in input area)
-         (cursor-offset (when in-input
-                          (- (point) claude-agent--input-start-marker)))
+         ;; Determine follow BEFORE any buffer modifications.
+         ;; When caller pre-computed follow, use that value directly.
+         (should-follow (or pre-follow
+                            (claude-agent--should-follow-p)))
+         ;; Save absolute cursor position (for restoring if in static section)
+         (saved-point (point))
          ;; Save cursor offset relative to static-end (if in dynamic section)
-         (dynamic-offset (when (and (not in-input)
-                                    claude-agent--static-end-marker
-                                    (marker-position claude-agent--static-end-marker)
-                                    (>= (point) claude-agent--static-end-marker))
-                           (- (point) claude-agent--static-end-marker)))
-         ;; Only capture input if in text mode (permission mode uses saved-input)
-         (input-to-restore (if (eq claude-agent--input-mode 'text)
-                               (claude-agent--get-input-text)
-                             "")))
+         (in-dynamic (and claude-agent--static-end-marker
+                         (marker-position claude-agent--static-end-marker)
+                         (>= (point) claude-agent--static-end-marker)))
+         (dynamic-offset (when in-dynamic
+                           (- (point) claude-agent--static-end-marker))))
+    ;; Set follow mode from pre-computed value
+    (setq claude-agent--follow-mode should-follow)
     ;; Clear queue highlight overlay (will be recreated by post-command-hook)
     (when claude-agent--queue-highlight-overlay
       (delete-overlay claude-agent--queue-highlight-overlay)
@@ -1270,69 +1297,27 @@ Handles different input modes: text input vs permission prompt."
     (when claude-agent--has-conversation
       (claude-agent--insert-status-bar))
 
-    ;; === RENDER INPUT AREA BASED ON MODE ===
-    (pcase claude-agent--input-mode
-      ('text
-       ;; Normal text input mode
-       (setq claude-agent--input-start-marker (point-marker))
-       (set-marker-insertion-type claude-agent--input-start-marker nil)
-       (unless (string-empty-p input-to-restore)
-         (insert input-to-restore))
-       ;; Update read-only and placeholder
-       (claude-agent--update-read-only)
-       (claude-agent--update-placeholder)
-       ;; Restore cursor position
-       (cond
-        ;; Cursor was in input area — restore relative to input-start
-        ((and cursor-offset (>= cursor-offset 0))
-         (goto-char (min (+ claude-agent--input-start-marker cursor-offset)
-                         (point-max))))
-        ;; Cursor was in dynamic section — restore relative to static-end
-        ((and dynamic-offset (>= dynamic-offset 0))
-         (goto-char (min (+ claude-agent--static-end-marker dynamic-offset)
-                         (1- (marker-position claude-agent--input-start-marker)))))
-        ;; Fallback — go to input
-        (t (goto-char claude-agent--input-start-marker)))
-       ;; Scroll to show maximum content - put input near bottom
-       (claude-agent--scroll-to-bottom))
+    ;; === RENDER PERMISSION DIALOG IF ACTIVE ===
+    (when claude-agent--permission-data
+      (claude-agent--render-permission-content))
 
-      ('empty
-       ;; Empty mode - clear input area and switch to text mode
-       ;; This discards any saved input and starts fresh
-       (setq claude-agent--saved-input "")
-       (setq claude-agent--input-mode 'text)
-       (setq claude-agent--input-start-marker (point-marker))
-       (set-marker-insertion-type claude-agent--input-start-marker nil)
-       ;; Update read-only and placeholder (will show placeholder since empty)
-       (claude-agent--update-read-only)
-       (claude-agent--update-placeholder)
-       (goto-char claude-agent--input-start-marker))
+    ;; Restore cursor position
+    (cond
+     ;; Cursor was in dynamic section — restore relative to static-end
+     ((and in-dynamic dynamic-offset (>= dynamic-offset 0))
+      (goto-char (min (+ claude-agent--static-end-marker dynamic-offset)
+                      (point-max))))
+     ;; Cursor was in static section — restore absolute position
+     ((not in-dynamic)
+      (goto-char (min saved-point (point-max))))
+     ;; Fallback
+     (t (goto-char (point-max))))
 
-      ('permission
-       ;; Permission prompt mode - render the permission dialog (legacy, replaces input)
-       (setq claude-agent--input-start-marker (point-marker))
-       (claude-agent--render-permission-content)
-       (claude-agent--update-read-only))
+    ;; Update header line with latest info
+    (claude-agent--update-header-line)
 
-      ('text-with-permission
-       ;; Combined mode: permission dialog ABOVE preserved text input
-       ;; First render the permission dialog
-       (claude-agent--render-permission-content)
-       ;; Add separator before input area
-       (insert "\n")
-       ;; Now render the text input area
-       (setq claude-agent--input-start-marker (point-marker))
-       (set-marker-insertion-type claude-agent--input-start-marker nil)
-       (unless (string-empty-p input-to-restore)
-         (insert input-to-restore))
-       ;; Update read-only and placeholder
-       (claude-agent--update-read-only)
-       (claude-agent--update-placeholder)
-       ;; Restore cursor position within input area
-       (if (and cursor-offset (>= cursor-offset 0))
-           (goto-char (min (+ claude-agent--input-start-marker cursor-offset)
-                           (point-max)))
-         (goto-char claude-agent--input-start-marker))))))
+    ;; Follow mode scroll
+    (claude-agent--maybe-follow)))
 
 ;;;; Status bar rendering
 
@@ -1456,25 +1441,30 @@ Called by `render-dynamic-section'. Assumes point is positioned correctly."
           ;; Tag the whole region with the queue index for cursor-based deletion
           (put-text-property region-start (point) 'claude-queue-index queue-index)
           (setq queue-index (1+ queue-index))))))
-  ;; === Status info line ===
+  ;; Status info (model, cost, session) is shown in header-line-format
+  (insert "\n"))
+
+(defun claude-agent--update-header-line ()
+  "Update the header-line-format with model, cost, and session info."
   (let* ((model (or (plist-get claude-agent--session-info :model) "..."))
          (cost (or (plist-get claude-agent--session-info :cost) 0))
          (session-id (or (plist-get claude-agent--session-info :session-id) "..."))
-         (status-text (format " Model: %s  |  Cost: $%.4f  |  Session: %s "
-                              model cost
-                              (if (> (length session-id) 8)
-                                  (substring session-id 0 8)
-                                session-id)))
-         (bar-length (length status-text))
-         (bar (make-string bar-length ?━))
-         (start (point)))
-    (insert "\n")
-    (insert bar "\n")
-    (insert status-text "\n")
-    (insert bar "\n")
-    (insert "\n")
-    (claude-agent--apply-face start (point) 'claude-agent-header-face)))
-
+         (short-session (if (> (length session-id) 8)
+                            (substring session-id 0 8)
+                          session-id))
+         (thinking-indicator (if claude-agent--thinking-status " ⏳" "")))
+    (setq header-line-format
+          (list
+           (propertize (format " %s " model)
+                       'face 'claude-agent-header-model-face)
+           " │ "
+           (propertize (format "$%.4f" cost)
+                       'face 'claude-agent-header-cost-face)
+           " │ "
+           (propertize (format "%s" short-session)
+                       'face 'claude-agent-header-session-face)
+           thinking-indicator))
+    (force-mode-line-update)))
 (defun claude-agent--spinner-tick (buf)
   "Advance spinner in BUF and update in-place (lightweight).
 BUF is captured at timer creation time so the tick always runs in
@@ -1782,13 +1772,10 @@ The status icon (○) is updated to ✓ or ✗ when tool result arrives.
 TOOL-USE-ID is the unique identifier for this tool invocation."
   (let* ((inhibit-read-only t)
          (tool-lower (claude-agent--format-tool-name tool-name))
-         (saved-input (claude-agent--get-input-text))
-         (cursor-offset (when (and claude-agent--input-start-marker
-                                   (marker-position claude-agent--input-start-marker)
-                                   (>= (point) claude-agent--input-start-marker))
-                          (- (point) claude-agent--input-start-marker)))
          (tool-marker nil)
-         (status-overlay nil))
+         (status-overlay nil)
+         ;; Compute follow BEFORE buffer modifications
+         (should-follow (claude-agent--should-follow-p)))
     ;; Delete dynamic section
     (delete-region claude-agent--static-end-marker (point-max))
     (goto-char claude-agent--static-end-marker)
@@ -1829,16 +1816,9 @@ TOOL-USE-ID is the unique identifier for this tool invocation."
     ;; Update static marker
     (set-marker claude-agent--static-end-marker (point))
 
-    ;; Rebuild dynamic section
-    (when claude-agent--has-conversation
-      (claude-agent--insert-status-bar))
-    (setq claude-agent--input-start-marker (point-marker))
-    (insert saved-input)
-    (claude-agent--update-read-only)
-    (claude-agent--update-placeholder)
-    (goto-char (if (and cursor-offset (>= cursor-offset 0))
-                   (min (+ claude-agent--input-start-marker cursor-offset) (point-max))
-                 claude-agent--input-start-marker))
+    ;; Rebuild dynamic section with pre-computed follow
+    (claude-agent--render-dynamic-section should-follow)
+
     ;; Register in pending-tools hash table if we have a tool-use-id
     (when tool-use-id
       (unless claude-agent--pending-tools
@@ -1889,20 +1869,14 @@ Input format: '     N→content' where N is line number."
   "Insert Read tool CONTENT with formatted line numbers.
 Expects content in the format from Claude's Read tool."
   (let* ((inhibit-read-only t)
-         (saved-input (if (eq claude-agent--input-mode 'text)
-                          (claude-agent--get-input-text)
-                        claude-agent--saved-input))
-         (cursor-offset (when (and (eq claude-agent--input-mode 'text)
-                                   claude-agent--input-start-marker
-                                   (marker-position claude-agent--input-start-marker)
-                                   (>= (point) claude-agent--input-start-marker))
-                          (- (point) claude-agent--input-start-marker)))
          (lines (split-string content "\n"))
          ;; Remove trailing empty lines
          (trimmed-lines (let ((result lines))
                           (while (and result (string-empty-p (car (last result))))
                             (setq result (butlast result)))
-                          result)))
+                          result))
+         ;; Compute follow BEFORE buffer modifications
+         (should-follow (claude-agent--should-follow-p)))
     ;; Delete dynamic section
     (delete-region claude-agent--static-end-marker (point-max))
     (goto-char claude-agent--static-end-marker)
@@ -1920,34 +1894,19 @@ Expects content in the format from Claude's Read tool."
           (insert " " (cdr parsed) "\n"))))
     ;; Update static marker
     (set-marker claude-agent--static-end-marker (point))
-    ;; Rebuild dynamic section
-    (when claude-agent--has-conversation
-      (claude-agent--insert-status-bar))
-    (setq claude-agent--input-start-marker (point-marker))
-    (insert saved-input)
-    (claude-agent--update-read-only)
-    (claude-agent--update-placeholder)
-    (goto-char (if (and cursor-offset (>= cursor-offset 0))
-                   (min (+ claude-agent--input-start-marker cursor-offset) (point-max))
-                 claude-agent--input-start-marker))))
+    ;; Rebuild dynamic section with pre-computed follow
+    (claude-agent--render-dynamic-section should-follow)))
 
 (defun claude-agent--append-to-log (text &optional face virtual-indent)
   "Append TEXT to the static section (conversation log).
 If FACE is non-nil, apply it as an overlay to the inserted text.
-If VIRTUAL-INDENT is non-nil, apply it as line-prefix/wrap-prefix."
-  ;; We need to apply face/indent to the text being inserted.
-  ;; Since append-to-static does complex operations, we'll handle styling here.
-  (let* ((inhibit-read-only t)
-         ;; In permission mode, use saved-input; in text mode, capture current input
-         (saved-input (if (eq claude-agent--input-mode 'text)
-                          (claude-agent--get-input-text)
-                        claude-agent--saved-input))
-         (cursor-offset (when (and (eq claude-agent--input-mode 'text)
-                                   claude-agent--input-start-marker
-                                   (marker-position claude-agent--input-start-marker)
-                                   (>= (point) claude-agent--input-start-marker))
-                          (- (point) claude-agent--input-start-marker))))
-    ;; Delete everything from static-end to end
+If VIRTUAL-INDENT is non-nil, apply it as line-prefix/wrap-prefix.
+After appending, re-renders the dynamic section (status bar + permissions)."
+  (let ((inhibit-read-only t)
+        (saved-point (point))
+        ;; Compute follow BEFORE any buffer modifications
+        (should-follow (claude-agent--should-follow-p)))
+    ;; Delete everything from static-end to end (dynamic section)
     (delete-region claude-agent--static-end-marker (point-max))
     ;; Insert new static content with styling
     (goto-char claude-agent--static-end-marker)
@@ -1963,20 +1922,10 @@ If VIRTUAL-INDENT is non-nil, apply it as line-prefix/wrap-prefix."
       ;; Mark as fontified to prevent org-mode font-lock from interfering
       (put-text-property start (point) 'fontified t))
     (set-marker claude-agent--static-end-marker (point))
-    ;; Insert status bar
-    (when claude-agent--has-conversation
-      (claude-agent--insert-status-bar))
-    ;; Set input marker and restore input
-    (setq claude-agent--input-start-marker (point-marker))
-    (insert saved-input)
-    ;; Finalize
-    (claude-agent--update-read-only)
-    (claude-agent--update-placeholder)
-    ;; Restore cursor
-    (goto-char (if (and cursor-offset (>= cursor-offset 0))
-                   (min (+ claude-agent--input-start-marker cursor-offset) (point-max))
-                 claude-agent--input-start-marker))))
-
+    ;; Restore point before render (so render-dynamic-section sees correct position)
+    (goto-char (min saved-point (point-max)))
+    ;; Re-render dynamic section, passing pre-computed follow decision
+    (claude-agent--render-dynamic-section should-follow)))
 ;;;; Process filter - parsing NDJSON messages
 
 (defun claude-agent--process-filter (proc output)
@@ -2215,43 +2164,33 @@ If VIRTUAL-INDENT is non-nil, apply it as line-prefix/wrap-prefix."
        (claude-agent--set-thinking (format "Editing: %s" (file-name-nondirectory file-path)))
        ;; Format diff content for storage in tool-results
        (let ((diff-content (claude-agent--format-diff-content old-string new-string)))
-         ;; Insert compact summary instead of full diff
-         (let* ((inhibit-read-only t)
-                (saved-input (claude-agent--get-input-text))
-                (cursor-offset (when (and claude-agent--input-start-marker
-                                          (marker-position claude-agent--input-start-marker)
-                                          (>= (point) claude-agent--input-start-marker))
-                                 (- (point) claude-agent--input-start-marker))))
-           (delete-region claude-agent--static-end-marker (point-max))
-           (goto-char claude-agent--static-end-marker)
-           ;; Track marker position before inserting
-           (setq tool-marker (copy-marker (point)))
-           (setq edit-status-overlay
-                 (claude-agent--insert-edit-summary file-path old-string new-string))
-           (set-marker claude-agent--static-end-marker (point))
-           ;; Store in tool-results for popup viewing
-           (push (list tool-marker "Edit" diff-content)
-                 claude-agent--tool-results)
-           ;; Register in pending-tools hash table if we have a tool-use-id
-           (when tool-use-id
-             (unless claude-agent--pending-tools
-               (setq claude-agent--pending-tools (make-hash-table :test 'equal)))
-             (puthash tool-use-id
-                      (list :marker tool-marker
-                            :name "Edit"
-                            :status-overlay edit-status-overlay)
-                      claude-agent--pending-tools))
-           ;; Add tooltip to the summary line
-           (claude-agent--add-tool-tooltip tool-marker diff-content)
-           (when claude-agent--has-conversation
-             (claude-agent--insert-status-bar))
-           (setq claude-agent--input-start-marker (point-marker))
-           (insert saved-input)
-           (claude-agent--update-read-only)
-           (claude-agent--update-placeholder)
-           (goto-char (if (and cursor-offset (>= cursor-offset 0))
-                          (min (+ claude-agent--input-start-marker cursor-offset) (point-max))
-                        claude-agent--input-start-marker))))))
+         ;; Compute follow BEFORE buffer modifications
+         (let ((should-follow (claude-agent--should-follow-p)))
+           ;; Insert compact summary instead of full diff
+           (let ((inhibit-read-only t))
+             (delete-region claude-agent--static-end-marker (point-max))
+             (goto-char claude-agent--static-end-marker)
+             ;; Track marker position before inserting
+             (setq tool-marker (copy-marker (point)))
+             (setq edit-status-overlay
+                   (claude-agent--insert-edit-summary file-path old-string new-string))
+             (set-marker claude-agent--static-end-marker (point))
+             ;; Store in tool-results for popup viewing
+             (push (list tool-marker "Edit" diff-content)
+                   claude-agent--tool-results)
+             ;; Register in pending-tools hash table if we have a tool-use-id
+             (when tool-use-id
+               (unless claude-agent--pending-tools
+                 (setq claude-agent--pending-tools (make-hash-table :test 'equal)))
+               (puthash tool-use-id
+                        (list :marker tool-marker
+                              :name "Edit"
+                              :status-overlay edit-status-overlay)
+                        claude-agent--pending-tools))
+             ;; Add tooltip to the summary line
+             (claude-agent--add-tool-tooltip tool-marker diff-content)
+             ;; Rebuild dynamic section with pre-computed follow
+             (claude-agent--render-dynamic-section should-follow))))))
 
     ;; Write tool (compact display with content stored for popup)
     ("write_tool"
@@ -2451,7 +2390,7 @@ Uses compact inline format when in text-with-permission mode."
            (input-str (claude-agent--format-tool-input tool-name tool-input))
            (sel claude-agent--permission-selection)
            (inhibit-read-only t)
-           (compact (eq claude-agent--input-mode 'text-with-permission))
+           (compact t)  ;; Always use compact inline format
            (overlay-specs nil))
       ;; Helper to insert and record overlay spec
       (cl-flet ((insert-styled (text face)
@@ -2519,8 +2458,7 @@ This is called when the user navigates options."
   (claude-agent--render-dynamic-section))
 
 (defun claude-agent--show-permission-prompt (data)
-  "Show permission prompt for DATA above the input area.
-Saves current input text and shows dialog while preserving input.
+  "Show permission prompt for DATA in the dynamic section.
 If a permission dialog is already showing, queue this request."
   (if claude-agent--permission-data
       ;; Already showing a permission prompt - queue this one
@@ -2530,13 +2468,8 @@ If a permission dialog is already showing, queue this request."
          (format "Awaiting permission... (%d queued)"
                  (length claude-agent--permission-queue))))
     ;; No current permission prompt - show this one
-    ;; Save current input text before switching modes
-    (setq claude-agent--saved-input (claude-agent--get-input-text))
-    ;; Set permission state
     (setq claude-agent--permission-data data)
     (setq claude-agent--permission-selection 0)
-    ;; Switch to combined mode: permission dialog + text input preserved
-    (setq claude-agent--input-mode 'text-with-permission)
     ;; Render the dialog (which now uses render-dynamic-section)
     (claude-agent--render-permission-dialog)
     ;; Set up keyboard navigation
@@ -2549,7 +2482,6 @@ If a permission dialog is already showing, queue this request."
       ;; Show the next permission prompt
       (setq claude-agent--permission-data next-data)
       (setq claude-agent--permission-selection 0)
-      (setq claude-agent--input-mode 'text-with-permission)
       (claude-agent--render-permission-dialog)
       (claude-agent--setup-permission-keymap)
       (when claude-agent--permission-queue
@@ -2658,8 +2590,7 @@ Restores text input mode and any saved input."
             (response-msg `((type . "permission_response")
                             (action . ,action)
                             (pattern . ,pattern)
-                            ,@(when tool-use-id `((tool_use_id . ,tool-use-id)))))
-            (saved-input claude-agent--saved-input))
+                            ,@(when tool-use-id `((tool_use_id . ,tool-use-id))))))
        ;; Clear permission state and disable minor mode in all related buffers
        (setq claude-agent--permission-data nil)
        (setq claude-agent--permission-overlay-specs nil)
@@ -2688,8 +2619,8 @@ Restores text input mode and any saved input."
        (if claude-agent--permission-queue
            ;; Show the next queued permission
            (claude-agent--show-next-queued-permission)
-         ;; No more queued - switch to empty mode and show thinking
-         (setq claude-agent--input-mode 'empty)
+         ;; No more queued - re-render and show thinking
+         (claude-agent--render-dynamic-section)
          (claude-agent--set-thinking "Processing..."))))))
 
 (defun claude-agent-permit-once ()
@@ -2981,42 +2912,49 @@ Move cursor to a queued message in the dynamic section to delete it."
          (message "Deleted: \"%s\"" preview))))))
 
 (defun claude-agent-send ()
-  "Send the current input to Claude, or queue if busy."
+  "Send the content of the input buffer to Claude, or queue if busy.
+Called from the input buffer via `C-c C-c'."
   (interactive)
-  (claude-agent--in-base-buffer
-   (when (and claude-agent--input-start-marker
-              claude-agent--process
-              (process-live-p claude-agent--process))
-     (let* ((input (string-trim (buffer-substring-no-properties
-                                  claude-agent--input-start-marker (point-max)))))
-       ;; Ignore if empty
-       (unless (string-empty-p input)
-         ;; Clear the input area first
-         (let ((inhibit-read-only t))
-           (delete-region claude-agent--input-start-marker (point-max)))
-         ;; Add to history
-         (push input claude-agent--input-history)
-         (setq claude-agent--input-history-index 0)
-         ;; If busy, queue the message; otherwise send directly
-         (if (claude-agent--is-busy-p)
-             (progn
-               (setq claude-agent--message-queue
-                     (append claude-agent--message-queue (list input)))
-               (claude-agent--render-dynamic-section)
-               (message "Message queued (agent is busy)"))
-           ;; Dispatch with hook evaluation
-           (claude-agent--dispatch-user-message input)
-           ;; Re-render dynamic section (input already cleared)
-           (claude-agent--render-dynamic-section)))))))
+  (let* ((input-buf (if (eq major-mode 'claude-agent-input-mode)
+                        (current-buffer)
+                      ;; Called from REPL buffer — find the input buffer
+                      (claude-agent--in-base-buffer claude-agent--input-buffer)))
+         (parent-buf (when input-buf
+                       (buffer-local-value 'claude-agent--input-parent-buffer input-buf))))
+    (when (and input-buf parent-buf (buffer-live-p parent-buf))
+      (let ((input (string-trim
+                    (with-current-buffer input-buf
+                      (buffer-substring-no-properties (point-min) (point-max))))))
+        (unless (string-empty-p input)
+          ;; Close the input window and kill the buffer
+          (with-current-buffer parent-buf
+            (claude-agent--close-input-window))
+          ;; Process the input in the REPL buffer
+          (with-current-buffer parent-buf
+            ;; Add to history
+            (push input claude-agent--input-history)
+            (setq claude-agent--input-history-index 0)
+            ;; If busy, queue the message; otherwise send directly
+            (if (claude-agent--is-busy-p)
+                (progn
+                  (setq claude-agent--message-queue
+                        (append claude-agent--message-queue (list input)))
+                  (claude-agent--render-dynamic-section)
+                  (message "Message queued (agent is busy)"))
+              ;; Dispatch with hook evaluation
+              (claude-agent--dispatch-user-message input)
+              ;; Re-render dynamic section
+              (claude-agent--render-dynamic-section))))))))
 
-(defun claude-agent-send-or-newline ()
-  "Send input if on last line, otherwise insert newline."
+(defun claude-agent-send-or-open-input ()
+  "Open the input window, or send if already in input buffer.
+When called from the REPL buffer, opens the input window.
+When called from the input buffer, sends the message."
   (interactive)
-  (if (claude-agent--in-input-area-p)
-      (if (save-excursion (end-of-line) (eobp))
-          (claude-agent-send)
-        (newline))
-    (newline)))
+  (if (eq major-mode 'claude-agent-input-mode)
+      (claude-agent-send)
+    (claude-agent--in-base-buffer
+     (claude-agent--show-input-window))))
 
 (defun claude-agent-interrupt ()
   "Interrupt the current Claude operation."
@@ -3032,6 +2970,8 @@ Move cursor to a queued message in the dynamic section to delete it."
   (interactive)
   (when (yes-or-no-p "Quit Claude session? ")
     (claude-agent--in-base-buffer
+     ;; Clean up input window/buffer
+     (claude-agent--close-input-window)
      (when (and claude-agent--process
                 (process-live-p claude-agent--process))
        (process-send-string claude-agent--process
@@ -3047,31 +2987,42 @@ MSG should be an alist that will be encoded as JSON."
                           (concat (json-encode msg) "\n")))))
 
 (defun claude-agent-previous-input ()
-  "Recall previous input from history."
+  "Recall previous input from history in the input buffer."
   (interactive)
-  (claude-agent--in-base-buffer
-   (when (and claude-agent--input-history
-              (< claude-agent--input-history-index
-                 (length claude-agent--input-history)))
-     (let ((inhibit-read-only t))
-       (delete-region claude-agent--input-start-marker (point-max))
-       (goto-char claude-agent--input-start-marker)
-       (insert (nth claude-agent--input-history-index
-                    claude-agent--input-history))
-       (cl-incf claude-agent--input-history-index)))))
+  (let ((parent (if (eq major-mode 'claude-agent-input-mode)
+                    claude-agent--input-parent-buffer
+                  (current-buffer))))
+    (when (and parent (buffer-live-p parent))
+      (with-current-buffer parent
+        (when (and claude-agent--input-history
+                   (< claude-agent--input-history-index
+                      (length claude-agent--input-history)))
+          (let ((input-buf (claude-agent--get-or-create-input-buffer)))
+            (with-current-buffer input-buf
+              (erase-buffer)
+              (insert (nth claude-agent--input-history-index
+                           claude-agent--input-history))
+              (claude-agent--input-update-placeholder))
+            (with-current-buffer parent
+              (cl-incf claude-agent--input-history-index))))))))
 
 (defun claude-agent-next-input ()
-  "Recall next input from history."
+  "Recall next input from history in the input buffer."
   (interactive)
-  (claude-agent--in-base-buffer
-   (when (> claude-agent--input-history-index 0)
-     (cl-decf claude-agent--input-history-index)
-     (let ((inhibit-read-only t))
-       (delete-region claude-agent--input-start-marker (point-max))
-       (goto-char claude-agent--input-start-marker)
-       (when (> claude-agent--input-history-index 0)
-         (insert (nth (1- claude-agent--input-history-index)
-                      claude-agent--input-history)))))))
+  (let ((parent (if (eq major-mode 'claude-agent-input-mode)
+                    claude-agent--input-parent-buffer
+                  (current-buffer))))
+    (when (and parent (buffer-live-p parent))
+      (with-current-buffer parent
+        (when (> claude-agent--input-history-index 0)
+          (cl-decf claude-agent--input-history-index)
+          (let ((input-buf (claude-agent--get-or-create-input-buffer)))
+            (with-current-buffer input-buf
+              (erase-buffer)
+              (when (> claude-agent--input-history-index 0)
+                (insert (nth (1- claude-agent--input-history-index)
+                             claude-agent--input-history)))
+              (claude-agent--input-update-placeholder))))))))
 
 ;;;; MCP status functions
 

@@ -806,16 +806,20 @@ If CLEAR-FIRST is non-nil, clear any partial input first."
   (let ((claude-buffer (claude--get-buffer)))
     (with-current-buffer claude-buffer
       (when clear-first
-        ;; Clear input area
-        (let ((inhibit-read-only t))
-          (when (boundp 'claude-agent--input-start-marker)
-            (delete-region claude-agent--input-start-marker (point-max)))))
+        ;; Clear the dedicated input buffer if it exists
+        (when (and (boundp 'claude-agent--input-buffer)
+                   claude-agent--input-buffer
+                   (buffer-live-p claude-agent--input-buffer))
+          (with-current-buffer claude-agent--input-buffer
+            (erase-buffer))))
       (if no-return
-          ;; Insert without sending (add to input area)
-          (progn
-            (goto-char (point-max))
-            (let ((inhibit-read-only t))
-              (insert message)))
+          ;; Insert into the input buffer (for pre-filling)
+          (let ((input-buf (when (boundp 'claude-agent--input-buffer)
+                             (claude-agent--get-or-create-input-buffer))))
+            (when input-buf
+              (with-current-buffer input-buf
+                (goto-char (point-max))
+                (insert message))))
         ;; Send message with [INPUT] framing
         (process-send-string claude-agent--process
                              (format "[INPUT]\n%s\n[/INPUT]\n" message))))
