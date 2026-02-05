@@ -1608,25 +1608,105 @@ but directory is missing, or empty if no worktree."
     (propertize "✗ missing" 'face 'warning))
    (t "")))
 
+;;;; Declarative Column Spec
+;;
+;; The TODO list columns are defined once in `org-roam-todo-list--columns'.
+;; Everything else—the `tabulated-list-format' vector, entry builder, and
+;; sort comparators—is derived from that single spec.
+
+;; Column value functions: each takes a TODO plist and returns a string.
+
+(defun org-roam-todo-list--col-status (todo)
+  "Return formatted status string for TODO."
+  (org-roam-todo--format-status (plist-get todo :status)))
+
+(defun org-roam-todo-list--col-title (todo)
+  "Return formatted title string for TODO."
+  (propertize (or (plist-get todo :title) "Untitled") 'face 'org-roam-todo-title))
+
+(defun org-roam-todo-list--col-claude (todo)
+  "Return Claude agent status string for TODO."
+  (org-roam-todo-list--claude-status todo))
+
+(defun org-roam-todo-list--col-created (todo)
+  "Return created date string for TODO."
+  (or (plist-get todo :created) ""))
+
+(defun org-roam-todo-list--col-project (todo)
+  "Return formatted project string for TODO."
+  (propertize (or (plist-get todo :project) "") 'face 'org-roam-todo-project))
+
+;; Sort functions for custom sort columns.
+
+(defun org-roam-todo-list--sort-status (a b)
+  "Sort comparator for status column values A and B."
+  (< (org-roam-todo--status-sort-key a)
+     (org-roam-todo--status-sort-key b)))
+
+;; The single declarative column spec.
+
+(defconst org-roam-todo-list--columns
+  '((:name "Status"  :width 12 :value org-roam-todo-list--col-status
+     :sort org-roam-todo-list--sort-status)
+    (:name "Title"   :width 50 :value org-roam-todo-list--col-title   :sort t)
+    (:name "Claude"  :width 10 :value org-roam-todo-list--col-claude  :sort t)
+    (:name "Created" :width 12 :value org-roam-todo-list--col-created :sort t)
+    (:name "Project" :width 20 :value org-roam-todo-list--col-project :sort t))
+  "Declarative column spec for the TODO list.
+Each entry is a plist with:
+  :name   — column header string
+  :width  — display width
+  :value  — function (todo-plist) -> string, produces the cell value
+  :sort   — t for lexicographic, nil for no sort, or a comparator function
+            that takes two cell-value strings and returns non-nil if A < B")
+
+;; Infrastructure: derive tabulated-list artifacts from the column spec.
+
+(defun org-roam-todo-list--column-index (name)
+  "Return the positional index of column NAME in the column spec."
+  (cl-position name org-roam-todo-list--columns
+               :test (lambda (n col) (string= n (plist-get col :name)))))
+
+(defun org-roam-todo-list--make-sort-fn (col)
+  "Create a `tabulated-list-mode' sort comparator for COL.
+The returned lambda receives two entries (ID VECTOR) and uses COL's
+:sort function to compare the cell values at the correct index."
+  (let ((sort-fn (plist-get col :sort))
+        (idx (org-roam-todo-list--column-index (plist-get col :name))))
+    (lambda (a b)
+      (funcall sort-fn
+               (aref (cadr a) idx)
+               (aref (cadr b) idx)))))
+
+(defun org-roam-todo-list--build-column-format ()
+  "Build `tabulated-list-format' vector from `org-roam-todo-list--columns'."
+  (vconcat
+   (mapcar
+    (lambda (col)
+      (let ((sort (plist-get col :sort)))
+        (list (plist-get col :name)
+              (plist-get col :width)
+              (cond
+               ((eq sort t) t)
+               ((null sort) nil)
+               (t (org-roam-todo-list--make-sort-fn col))))))
+    org-roam-todo-list--columns)))
+
+(defun org-roam-todo-list--build-entry (todo)
+  "Build a tabulated-list entry vector for TODO from the column spec."
+  (vconcat
+   (mapcar
+    (lambda (col)
+      (funcall (plist-get col :value) todo))
+    org-roam-todo-list--columns)))
+
 (defun org-roam-todo-list--get-entries ()
   "Get tabulated list entries for TODOs.
-Columns: Status, Title, Claude, Project, Worktree, Created."
+Columns are defined by `org-roam-todo-list--columns'."
   (mapcar
    (lambda (todo)
-     (let ((title (plist-get todo :title))
-           (project (plist-get todo :project))
-           (status (plist-get todo :status))
-           (created (plist-get todo :created))
-           (file (plist-get todo :file))
-           (worktree-path (plist-get todo :worktree-path)))
-       (list file
-             (vector
-              (org-roam-todo--format-status status)
-              (propertize (or title "Untitled") 'face 'org-roam-todo-title)
-              (org-roam-todo-list--claude-status todo)
-              (propertize (or project "") 'face 'org-roam-todo-project)
-              (org-roam-todo-list--format-worktree worktree-path)
-              (or created "")))))
+     (list (plist-get todo :file)
+           (org-roam-todo-list--build-entry todo)))
    (org-roam-todo--query-todos org-roam-todo-list--project-filter)))
 
 (defun org-roam-todo-list-refresh ()
@@ -1931,23 +2011,14 @@ and executes the command in the TODO list buffer.  C-g just closes."
     (cancel-timer org-roam-todo-list--refresh-timer)
     (setq org-roam-todo-list--refresh-timer nil)))
 
-(defconst org-roam-todo-list--column-format
-  [("Status" 12 (lambda (a b)
-                  (< (org-roam-todo--status-sort-key (aref (cadr a) 0))
-                     (org-roam-todo--status-sort-key (aref (cadr b) 0)))))
-   ("Title" 50 t)
-   ("Claude" 10 t)
-   ("Created" 12 t)
-   ("Project" 20 t)]
-  "Column format for TODO list buffers.")
-
 (defun org-roam-todo-list--safe-revert ()
   "Revert the current TODO list buffer, re-initializing format if stale.
 Must be called with the TODO list buffer current."
-  (let ((pos (point)))
+  (let ((pos (point))
+        (current-format (org-roam-todo-list--build-column-format)))
     ;; Re-set the format in case columns changed since buffer was created
-    (unless (equal tabulated-list-format org-roam-todo-list--column-format)
-      (setq tabulated-list-format org-roam-todo-list--column-format)
+    (unless (equal tabulated-list-format current-format)
+      (setq tabulated-list-format current-format)
       (tabulated-list-init-header))
     (tabulated-list-revert)
     (goto-char (min pos (point-max)))))
@@ -2039,7 +2110,7 @@ Works directly from the TODO list view without needing to visit the file."
 (define-derived-mode org-roam-todo-list-mode tabulated-list-mode "Org-Roam-TODOs"
   "Major mode for viewing and managing org-roam project TODOs.
 \\{org-roam-todo-list-mode-map}"
-  (setq tabulated-list-format org-roam-todo-list--column-format)
+  (setq tabulated-list-format (org-roam-todo-list--build-column-format))
   (setq tabulated-list-padding 2)
   (setq tabulated-list-sort-key '("Status" . nil))
   (setq tabulated-list-entries #'org-roam-todo-list--get-entries)
