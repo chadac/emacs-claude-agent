@@ -44,6 +44,7 @@
 (declare-function org-roam-todo--branch-exists-p "todo")
 (declare-function org-roam-todo--worktree-exists-p "todo")
 (declare-function org-roam-todo-list-refresh-all "todo")
+(declare-function org-roam-todo-project-config-get "todo")
 ;;;; Customization
 
 (defgroup org-roam-todo-merge nil
@@ -59,6 +60,9 @@ Each entry is (PROJECT-NAME . WORKFLOW) where WORKFLOW is one of:
 
 When nil or no matching entry, defaults to `github-pr'.
 
+Preferred: use `:merge-workflow' in `org-roam-todo-project-config' instead.
+This variable is still consulted as a fallback.
+
 Example:
   \\='((\"claude-agent\" . local-rebase)
     (\"my-oss-project\" . github-pr))"
@@ -68,7 +72,9 @@ Example:
 (defcustom org-roam-todo-merge-workflow 'github-pr
   "Default merge workflow for the current project.
 Can be overridden per-project via `.dir-locals.el'.
-See `org-roam-todo-merge-workflows' for possible values."
+See `org-roam-todo-merge-workflows' for possible values.
+
+Preferred: use `:merge-workflow' in `org-roam-todo-project-config' instead."
   :type '(choice (const :tag "Local rebase + ff-merge" local-rebase)
                  (const :tag "GitHub PR via forge/gh" github-pr)
                  function)
@@ -78,14 +84,18 @@ See `org-roam-todo-merge-workflows' for possible values."
 (defcustom org-roam-todo-merge-main-branch nil
   "Main branch name for merge workflows.
 When nil, auto-detects from `origin/HEAD' or falls back to \"main\".
-Can be set per-project via `.dir-locals.el'."
+Can be set per-project via `.dir-locals.el'.
+
+Preferred: use `:rebase-target' in `org-roam-todo-project-config' instead."
   :type '(choice (const :tag "Auto-detect" nil) string)
   :safe #'stringp
   :group 'org-roam-todo-merge)
 
 (defcustom org-roam-todo-merge-cleanup-after t
   "Whether to clean up worktree and branch after successful merge.
-When non-nil, the worktree is removed and branch deleted after merge."
+When non-nil, the worktree is removed and branch deleted after merge.
+
+Preferred: use `:cleanup-after-merge' in `org-roam-todo-project-config' instead."
   :type 'boolean
   :group 'org-roam-todo-merge)
 
@@ -172,21 +182,27 @@ Handles slow GPG signing by polling for HEAD to change."
     (magit-status worktree-path)
     (magit-commit-create)))
 
-(defun org-roam-todo-merge--detect-main-branch (project-root)
+(defun org-roam-todo-merge--detect-main-branch (project-root &optional project-name)
   "Detect the main branch name for PROJECT-ROOT.
-Checks `org-roam-todo-merge-main-branch', then origin/HEAD, then
-falls back to \"main\"."
-  (or org-roam-todo-merge-main-branch
-      (let ((default-directory project-root))
-        ;; Try to get the default branch from origin/HEAD
-        (let ((origin-head (string-trim
-                            (shell-command-to-string
-                             "git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null"))))
-          (if (and (not (string-empty-p origin-head))
-                   (not (string-match-p "fatal\\|error" origin-head)))
-              ;; origin/HEAD is like "origin/main" - strip the "origin/" prefix
-              (replace-regexp-in-string "^origin/" "" origin-head)
-            "main")))))
+When PROJECT-NAME is non-nil, checks `org-roam-todo-project-config'
+for `:rebase-target' first.  Then checks `org-roam-todo-merge-main-branch',
+then origin/HEAD, then falls back to \"main\"."
+  (or
+   ;; Check unified project config first
+   (when project-name
+     (org-roam-todo-project-config-get project-name :rebase-target))
+   ;; Legacy: per-project or global variable (may be set via .dir-locals.el)
+   org-roam-todo-merge-main-branch
+   ;; Auto-detect from origin/HEAD
+   (let ((default-directory project-root))
+     (let ((origin-head (string-trim
+                         (shell-command-to-string
+                          "git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null"))))
+       (if (and (not (string-empty-p origin-head))
+                (not (string-match-p "fatal\\|error" origin-head)))
+           ;; origin/HEAD is like "origin/main" - strip the "origin/" prefix
+           (replace-regexp-in-string "^origin/" "" origin-head)
+         "main")))))
 
 (defun org-roam-todo-merge--git-run (directory &rest args)
   "Run git with ARGS in DIRECTORY, returning (exit-code . output)."
@@ -206,13 +222,15 @@ Returns output string on success."
 
 (defun org-roam-todo-merge--get-workflow (todo)
   "Get the merge workflow for TODO.
-Checks `org-roam-todo-merge-workflows' alist first, then
-loads .dir-locals.el from the project root to check for
+Checks `org-roam-todo-project-config' for `:merge-workflow' first,
+then `org-roam-todo-merge-workflows' alist, then .dir-locals.el for
 `org-roam-todo-merge-workflow', finally falls back to `github-pr'."
   (let* ((project (plist-get todo :project))
          (project-root (plist-get todo :project-root)))
     (or
-     ;; Check the alist first
+     ;; Check unified project config first
+     (org-roam-todo-project-config-get project :merge-workflow)
+     ;; Check the legacy alist
      (cdr (assoc project org-roam-todo-merge-workflows))
      ;; Check .dir-locals.el in the project root
      (when project-root
@@ -310,7 +328,8 @@ Steps:
 
     ;; Load project-specific settings
     (org-roam-todo-merge--load-project-locals project-root)
-    (let ((main-branch (org-roam-todo-merge--detect-main-branch project-root)))
+    (let ((main-branch (org-roam-todo-merge--detect-main-branch
+                        project-root (plist-get todo :project))))
 
       ;; Step 1: If staged changes, open magit commit editor for user review
       (let ((staged (string-trim (cdr (org-roam-todo-merge--git-run
@@ -360,7 +379,9 @@ moved forward since the agent's initial rebase."
     (org-roam-todo-list-refresh-all)
 
     ;; Step 5: Cleanup
-    (when org-roam-todo-merge-cleanup-after
+    (when (org-roam-todo-project-config-get
+           (plist-get todo :project) :cleanup-after-merge
+           org-roam-todo-merge-cleanup-after)
       (when (let ((use-dialog-box nil) (last-nonmenu-event t))
               (yes-or-no-p "Clean up worktree and mark TODO as done? "))
         (org-roam-todo-merge--cleanup todo)))))
@@ -393,7 +414,8 @@ Steps:
 
     ;; Load project-specific settings
     (org-roam-todo-merge--load-project-locals project-root)
-    (let ((main-branch (org-roam-todo-merge--detect-main-branch project-root)))
+    (let ((main-branch (org-roam-todo-merge--detect-main-branch
+                        project-root (plist-get todo :project))))
 
       ;; Step 1: If staged changes, open magit commit editor for user review
       (let ((staged (string-trim (cdr (org-roam-todo-merge--git-run

@@ -86,15 +86,57 @@ Only has effect when `org-roam-todo-auto-commit' is also non-nil."
   "Prefix for generated branch names.
 Branch names are formatted as {prefix}/{slug}.
 For example, with prefix \"chadac\", a TODO titled \"Add feature\"
-would create branch \"chadac/add_feature\"."
+would create branch \"chadac/add_feature\".
+
+Preferred: use `:branch-prefix' in `org-roam-todo-project-config' instead."
   :type 'string
   :group 'org-roam-todo)
+
+(defcustom org-roam-todo-project-config nil
+  "Per-project configuration alist.
+Each entry is (PROJECT-NAME . PLIST) where PLIST can contain:
+  :merge-workflow      - Symbol: `local-rebase', `github-pr', or a function
+  :rebase-target       - String: branch to rebase onto (e.g. \"main\")
+                         When nil, auto-detects from origin/HEAD or falls back to \"main\"
+  :base-branch         - String: ref for new worktree branches (e.g. \"origin/main\")
+  :branch-prefix       - String: prefix for branch names (overrides global default)
+  :fetch-before-create - Boolean: whether to fetch before creating worktree
+  :cleanup-after-merge - Boolean: whether to clean up worktree after merge
+
+This is the preferred way to configure per-project settings.  The old
+per-variable approach (e.g. `org-roam-todo-merge-workflows',
+`org-roam-todo-worktree-base-branch' via .dir-locals.el) still works
+as a fallback.
+
+Example:
+  \\='((\"claude-agent\" . (:merge-workflow local-rebase
+                         :rebase-target \"main\"))
+    (\"aeonai-agent\" . (:merge-workflow github-pr
+                        :rebase-target \"main\"
+                        :base-branch \"origin/main\")))"
+  :type '(alist :key-type string
+                :value-type (plist :key-type keyword :value-type sexp))
+  :group 'org-roam-todo)
+
+(defun org-roam-todo-project-config-get (project-name key &optional default)
+  "Get config KEY for PROJECT-NAME from `org-roam-todo-project-config'.
+Returns the value associated with KEY in the project's plist, or DEFAULT
+if the project has no entry or the key is not set.
+
+Uses `plist-member' to distinguish between a key set to nil and a key
+that is absent (falling back to DEFAULT only when absent)."
+  (let ((entry (cdr (assoc project-name org-roam-todo-project-config))))
+    (if (and entry (plist-member entry key))
+        (plist-get entry key)
+      default)))
 
 (defcustom org-roam-todo-worktree-base-branch nil
   "Base branch/ref for new worktree branches.
 When non-nil, new branches are created from this ref (e.g. \"origin/main\").
 When nil, branches from the current HEAD.
-Can be set per-project via .dir-locals.el."
+Can be set per-project via .dir-locals.el.
+
+Preferred: use `:base-branch' in `org-roam-todo-project-config' instead."
   :type '(choice (const :tag "Current HEAD" nil) string)
   :group 'org-roam-todo)
 
@@ -102,7 +144,9 @@ Can be set per-project via .dir-locals.el."
   "Whether to run `git fetch' before creating a worktree.
 When non-nil, fetches from the remote before creating the worktree
 to ensure the base branch is up-to-date.
-Can be set per-project via .dir-locals.el."
+Can be set per-project via .dir-locals.el.
+
+Preferred: use `:fetch-before-create' in `org-roam-todo-project-config' instead."
   :type 'boolean
   :group 'org-roam-todo)
 (defcustom org-roam-todo-agent-allowed-tools
@@ -337,10 +381,16 @@ Returns the project root or nil."
          (slug (replace-regexp-in-string "^-\\|-$" "" slug)))
     slug))
 
-(defun org-roam-todo--default-branch-name (title)
-  "Generate default branch name from TITLE."
-  (let ((slug (org-roam-todo--slugify title)))
-    (format "%s/%s" org-roam-todo-branch-prefix slug)))
+(defun org-roam-todo--default-branch-name (title &optional project-name)
+  "Generate default branch name from TITLE.
+When PROJECT-NAME is non-nil, checks `org-roam-todo-project-config'
+for a `:branch-prefix' override before using `org-roam-todo-branch-prefix'."
+  (let* ((prefix (if project-name
+                     (org-roam-todo-project-config-get
+                      project-name :branch-prefix org-roam-todo-branch-prefix)
+                   org-roam-todo-branch-prefix))
+         (slug (org-roam-todo--slugify title)))
+    (format "%s/%s" prefix slug)))
 
 ;;;; Node Property Helpers
 
@@ -609,11 +659,12 @@ its path immediately.  If not, prompts for branch name and creates it.
 Updates the TODO file properties accordingly."
   (let* ((project-root (org-roam-todo--resolve-project-root
                         (plist-get todo :project-root)))
+         (project-name (org-roam-todo--project-name project-root))
          (file (plist-get todo :file))
          (existing-worktree (plist-get todo :worktree-path))
          (title (plist-get todo :title))
          (default-branch (org-roam-todo--default-branch-name
-                          (or title "feature")))
+                          (or title "feature") project-name))
          (branch-name (or (plist-get todo :worktree-branch)
                           (read-string "Branch name: " default-branch)))
          (worktree-path (or existing-worktree
@@ -624,24 +675,34 @@ Updates the TODO file properties accordingly."
     ;; Create worktree if needed
     (unless (org-roam-todo--worktree-exists-p worktree-path)
       (message "Creating worktree at %s..." worktree-path)
+      ;; Resolve settings: project-config > .dir-locals.el > global defcustom
       (let ((org-roam-todo-worktree-base-branch
-             org-roam-todo-worktree-base-branch)
+             (org-roam-todo-project-config-get
+              project-name :base-branch org-roam-todo-worktree-base-branch))
             (org-roam-todo-worktree-fetch-before-create
-             org-roam-todo-worktree-fetch-before-create))
-        (with-temp-buffer
-          (setq default-directory (file-name-as-directory project-root))
-          (hack-dir-local-variables-non-file-buffer)
-          (when (local-variable-p 'org-roam-todo-worktree-base-branch)
-            (setq org-roam-todo-worktree-base-branch
-                  (buffer-local-value
-                   'org-roam-todo-worktree-base-branch
-                   (current-buffer))))
-          (when (local-variable-p
-                 'org-roam-todo-worktree-fetch-before-create)
-            (setq org-roam-todo-worktree-fetch-before-create
-                  (buffer-local-value
-                   'org-roam-todo-worktree-fetch-before-create
-                   (current-buffer)))))
+             (org-roam-todo-project-config-get
+              project-name :fetch-before-create
+              org-roam-todo-worktree-fetch-before-create)))
+        ;; If project-config didn't provide values, check .dir-locals.el
+        (unless (org-roam-todo-project-config-get project-name :base-branch)
+          (with-temp-buffer
+            (setq default-directory (file-name-as-directory project-root))
+            (hack-dir-local-variables-non-file-buffer)
+            (when (local-variable-p 'org-roam-todo-worktree-base-branch)
+              (setq org-roam-todo-worktree-base-branch
+                    (buffer-local-value
+                     'org-roam-todo-worktree-base-branch
+                     (current-buffer))))))
+        (unless (org-roam-todo-project-config-get project-name :fetch-before-create)
+          (with-temp-buffer
+            (setq default-directory (file-name-as-directory project-root))
+            (hack-dir-local-variables-non-file-buffer)
+            (when (local-variable-p
+                   'org-roam-todo-worktree-fetch-before-create)
+              (setq org-roam-todo-worktree-fetch-before-create
+                    (buffer-local-value
+                     'org-roam-todo-worktree-fetch-before-create
+                     (current-buffer))))))
         (org-roam-todo--create-worktree
          project-root branch-name worktree-path))
       ;; Write .dir-locals.el for worktree agent confinement
@@ -910,12 +971,14 @@ If the worktree and session already exist, sends the task to the existing sessio
   (require 'claude-agent)
   (let* ((project-root (org-roam-todo--resolve-project-root
                         (org-roam-todo--get-property "PROJECT_ROOT")))
+         (project-name (org-roam-todo--project-name project-root))
          (existing-worktree (org-roam-todo--get-property "WORKTREE_PATH"))
          (title (save-excursion
                   (goto-char (point-min))
                   (when (re-search-forward "^#\\+title: \\(.+\\)$" nil t)
                     (match-string 1))))
-         (default-branch (org-roam-todo--default-branch-name (or title "feature")))
+         (default-branch (org-roam-todo--default-branch-name
+                          (or title "feature") project-name))
          (branch-name (or (org-roam-todo--get-property "WORKTREE_BRANCH")
                           (read-string "Branch name: " default-branch)))
          (worktree-path (or existing-worktree
@@ -936,19 +999,29 @@ If the worktree and session already exist, sends the task to the existing sessio
     ;; Create worktree if needed
     (unless (org-roam-todo--worktree-exists-p worktree-path)
       (message "Creating worktree at %s..." worktree-path)
-      ;; Load project's .dir-locals.el so per-project defcustoms
-      ;; (e.g. org-roam-todo-worktree-base-branch) take effect
-      (let ((org-roam-todo-worktree-base-branch org-roam-todo-worktree-base-branch)
-            (org-roam-todo-worktree-fetch-before-create org-roam-todo-worktree-fetch-before-create))
-        (with-temp-buffer
-          (setq default-directory (file-name-as-directory project-root))
-          (hack-dir-local-variables-non-file-buffer)
-          (when (local-variable-p 'org-roam-todo-worktree-base-branch)
-            (setq org-roam-todo-worktree-base-branch
-                  (buffer-local-value 'org-roam-todo-worktree-base-branch (current-buffer))))
-          (when (local-variable-p 'org-roam-todo-worktree-fetch-before-create)
-            (setq org-roam-todo-worktree-fetch-before-create
-                  (buffer-local-value 'org-roam-todo-worktree-fetch-before-create (current-buffer)))))
+      ;; Resolve settings: project-config > .dir-locals.el > global defcustom
+      (let ((org-roam-todo-worktree-base-branch
+             (org-roam-todo-project-config-get
+              project-name :base-branch org-roam-todo-worktree-base-branch))
+            (org-roam-todo-worktree-fetch-before-create
+             (org-roam-todo-project-config-get
+              project-name :fetch-before-create
+              org-roam-todo-worktree-fetch-before-create)))
+        ;; If project-config didn't provide values, check .dir-locals.el
+        (unless (org-roam-todo-project-config-get project-name :base-branch)
+          (with-temp-buffer
+            (setq default-directory (file-name-as-directory project-root))
+            (hack-dir-local-variables-non-file-buffer)
+            (when (local-variable-p 'org-roam-todo-worktree-base-branch)
+              (setq org-roam-todo-worktree-base-branch
+                    (buffer-local-value 'org-roam-todo-worktree-base-branch (current-buffer))))))
+        (unless (org-roam-todo-project-config-get project-name :fetch-before-create)
+          (with-temp-buffer
+            (setq default-directory (file-name-as-directory project-root))
+            (hack-dir-local-variables-non-file-buffer)
+            (when (local-variable-p 'org-roam-todo-worktree-fetch-before-create)
+              (setq org-roam-todo-worktree-fetch-before-create
+                    (buffer-local-value 'org-roam-todo-worktree-fetch-before-create (current-buffer))))))
         (org-roam-todo--create-worktree project-root branch-name worktree-path))
       ;; Write .dir-locals.el for worktree agent confinement
       (org-roam-todo--write-worktree-dir-locals worktree-path project-root)
@@ -2385,7 +2458,8 @@ The user will then review the commit and run the merge workflow."
       ;; Rebase onto upstream branch
       (message "[todo-complete] Step 3: Rebasing onto upstream...")
       (let ((main-branch (org-roam-todo-merge--detect-main-branch
-                          (or project-root cwd))))
+                          (or project-root cwd)
+                          (plist-get todo :project))))
         (message "[todo-complete] Rebasing onto %s..." main-branch)
         (let ((result (call-process "git" nil "*org-roam-todo-rebase-output*" nil
                                     "rebase" "--autostash" main-branch)))
