@@ -2,6 +2,7 @@
 
 import asyncio
 import time
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -15,6 +16,19 @@ def agent(tmp_path):
         work_dir=str(tmp_path),
         block_direct_edit=False,
     )
+
+
+@pytest.fixture
+def agent_with_client(tmp_path):
+    """Create a ClaudeAgent with a mock SDK client for testing set_permission_mode."""
+    a = ClaudeAgent(
+        work_dir=str(tmp_path),
+        block_direct_edit=False,
+    )
+    mock_client = MagicMock()
+    mock_client.set_permission_mode = AsyncMock()
+    a._client = mock_client
+    return a
 
 
 @pytest.fixture
@@ -126,4 +140,70 @@ def test_handles_non_dict_tool_response(agent, plans_dir):
     )
 
     assert result == {}
+    assert not plan.exists()
+
+
+# ── Tests for set_permission_mode (the primary fix) ──────────────────
+
+
+def test_calls_set_permission_mode_on_success(agent_with_client, plans_dir):
+    """ExitPlanMode should call set_permission_mode('default') on the SDK client."""
+    result = asyncio.run(
+        agent_with_client._clear_plan_mode_on_exit(
+            _make_hook_input(), None, {"signal": None}
+        )
+    )
+
+    assert result == {}
+    agent_with_client._client.set_permission_mode.assert_awaited_once_with("default")
+
+
+def test_no_set_permission_mode_on_error(agent_with_client, plans_dir):
+    """Should not call set_permission_mode if ExitPlanMode returned an error."""
+    plan = plans_dir / "test-plan.md"
+    plan.write_text("# Test plan")
+
+    result = asyncio.run(
+        agent_with_client._clear_plan_mode_on_exit(
+            _make_hook_input(tool_response={"content": "Error", "is_error": True}),
+            None,
+            {"signal": None},
+        )
+    )
+
+    assert result == {}
+    agent_with_client._client.set_permission_mode.assert_not_awaited()
+    assert plan.exists()
+
+
+def test_no_set_permission_mode_for_other_tools(agent_with_client, plans_dir):
+    """Should not call set_permission_mode for tools other than ExitPlanMode."""
+    result = asyncio.run(
+        agent_with_client._clear_plan_mode_on_exit(
+            _make_hook_input(tool_name="Bash"), None, {"signal": None}
+        )
+    )
+
+    assert result == {}
+    agent_with_client._client.set_permission_mode.assert_not_awaited()
+
+
+def test_handles_set_permission_mode_failure(agent_with_client, plans_dir):
+    """Hook should handle set_permission_mode failure gracefully and still clean up files."""
+    agent_with_client._client.set_permission_mode = AsyncMock(
+        side_effect=Exception("Control request failed")
+    )
+    plan = plans_dir / "test-plan.md"
+    plan.write_text("# Test plan")
+
+    result = asyncio.run(
+        agent_with_client._clear_plan_mode_on_exit(
+            _make_hook_input(), None, {"signal": None}
+        )
+    )
+
+    assert result == {}
+    # set_permission_mode was called (and failed)
+    agent_with_client._client.set_permission_mode.assert_awaited_once_with("default")
+    # Plan file should still be cleaned up even if set_permission_mode fails
     assert not plan.exists()

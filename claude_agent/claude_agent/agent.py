@@ -452,13 +452,14 @@ class ClaudeAgent:
     ) -> HookJSONOutput:
         """Hook to clear plan mode state when ExitPlanMode is called.
 
-        The Claude CLI tracks plan mode via plan files in ~/.claude/plans/.
-        When ExitPlanMode is called, it marks the plan as approved but doesn't
-        remove the plan file. This causes the plan mode system prompt to persist
-        on subsequent turns, giving the agent conflicting instructions.
+        The Claude CLI tracks plan mode in-memory via toolPermissionContext.mode.
+        When ExitPlanMode is called, the CLI shows a confirmation dialog but
+        the plan mode system prompt can persist on subsequent turns if the
+        mode isn't explicitly changed.
 
-        This hook deletes the plan file after ExitPlanMode succeeds, so the
-        CLI won't re-inject the plan mode system prompt.
+        This hook uses the SDK's set_permission_mode control request to tell
+        the CLI to switch from "plan" to "default" mode, and also cleans up
+        any plan files in ~/.claude/plans/.
         """
         tool_name = hook_input.get("tool_name", "")
         if tool_name != "ExitPlanMode":
@@ -476,40 +477,42 @@ class ClaudeAgent:
             })
             return {}
 
-        # Find and delete plan files in ~/.claude/plans/
+        # Primary fix: Tell the CLI to exit plan mode via the SDK control protocol.
+        # The CLI tracks plan mode in-memory (toolPermissionContext.mode), so
+        # we must use set_permission_mode to actually clear it.
+        if self._client:
+            try:
+                await self._client.set_permission_mode("default")
+                self._log_json("PLAN_MODE", {
+                    "action": "set_permission_mode_default",
+                    "status": "success",
+                })
+            except Exception as e:
+                self._log_json("PLAN_MODE", {
+                    "action": "set_permission_mode_failed",
+                    "error": str(e),
+                })
+
+        # Also clean up plan files in ~/.claude/plans/ (belt and suspenders)
         plans_dir = os.path.join(os.path.expanduser("~"), ".claude", "plans")
-        if not os.path.isdir(plans_dir):
-            self._log_json("PLAN_MODE", {
-                "action": "no_plans_dir",
-                "path": plans_dir,
-            })
-            return {}
-
-        # Find the most recently modified plan file (the active one)
-        plan_files = glob.glob(os.path.join(plans_dir, "*.md"))
-        if not plan_files:
-            self._log_json("PLAN_MODE", {
-                "action": "no_plan_files",
-                "path": plans_dir,
-            })
-            return {}
-
-        # Sort by modification time, most recent first
-        plan_files.sort(key=lambda f: os.path.getmtime(f), reverse=True)
-        most_recent = plan_files[0]
-
-        try:
-            os.remove(most_recent)
-            self._log_json("PLAN_MODE", {
-                "action": "deleted_plan_file",
-                "path": most_recent,
-            })
-        except OSError as e:
-            self._log_json("PLAN_MODE", {
-                "action": "failed_to_delete_plan_file",
-                "path": most_recent,
-                "error": str(e),
-            })
+        if os.path.isdir(plans_dir):
+            plan_files = glob.glob(os.path.join(plans_dir, "*.md"))
+            if plan_files:
+                # Sort by modification time, most recent first
+                plan_files.sort(key=lambda f: os.path.getmtime(f), reverse=True)
+                most_recent = plan_files[0]
+                try:
+                    os.remove(most_recent)
+                    self._log_json("PLAN_MODE", {
+                        "action": "deleted_plan_file",
+                        "path": most_recent,
+                    })
+                except OSError as e:
+                    self._log_json("PLAN_MODE", {
+                        "action": "failed_to_delete_plan_file",
+                        "path": most_recent,
+                        "error": str(e),
+                    })
 
         return {}
 
