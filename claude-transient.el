@@ -87,7 +87,7 @@ Each entry is a plist with :key, :description, :command, :group, :if.")
 Each entry is a plist with :key, :description, :command, :group, :if.")
 
 (defvar claude-transient--builtin-agent-keys '("m" "$" "M l" "M s" "M a" "M r"
-                                                "c" "C" "q" "k" "p" "t" "i" "RET" "g")
+                                                "c" "C" "q" "k" "p" "P" "t" "i" "RET" "g" "w")
   "List of built-in keys in the agent menu.")
 
 (defvar claude-transient--builtin-pair-keys '("c" "b" "d" "p" "o" "x" "t" "D" "f" "C" "P" "s" "r" "w" "l")
@@ -170,6 +170,8 @@ Signals an error if KEY is already registered."
 (declare-function claude-agent--format-model-for-display "claude-agent")
 (declare-function claude-agent--current-model "claude-agent")
 (declare-function claude-mcp-magit-commit-approve "claude-mcp")
+(declare-function claude-mcp-proposal-has-pending-p "claude-mcp")
+(declare-function claude-mcp-proposal-review "claude-mcp")
 
 (declare-function claude-pair-point-action "claude-pair")
 (declare-function claude-pair-point-action-test "claude-pair")
@@ -263,7 +265,9 @@ Press 'i' or RET in the log area to jump to input."
    ["Navigation"
     ("i" "Go to input" claude-agent-goto-input)
     ("RET" "Go to input" claude-agent-goto-input)]
-   ["Git"
+   ["Review"
+    ("P" "Review proposal" claude-mcp-proposal-review
+     :if (lambda () (claude-mcp-proposal-has-pending-p)))
     ("g" "Approve commit" claude-mcp-magit-commit-approve
      :if (lambda () (claude-mcp-magit-has-proposed-commit-p)))]])
 

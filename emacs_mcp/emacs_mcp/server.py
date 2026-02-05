@@ -612,6 +612,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             if SESSION_BUFFER_NAME:
                 arguments["from_buffer"] = SESSION_BUFFER_NAME
 
+        # Auto-inject agent_buffer for show_proposal
+        if name == "show_proposal" and "agent_buffer" not in arguments:
+            if SESSION_BUFFER_NAME:
+                arguments["agent_buffer"] = SESSION_BUFFER_NAME
+
         # Extract explicit context parameters first (these are special and not passed to elisp)
         context_buffer = arguments.pop("__buffer", None)
         context_file = arguments.pop("__file", None)

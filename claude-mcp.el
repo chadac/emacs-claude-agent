@@ -2038,65 +2038,49 @@ Blocks until user makes a selection. Returns the selected option or 'cancelled'.
          (options array :required "Array of option strings to present as numbered choices")
          (include-other boolean "If true, user can press 'o' to enter custom response")))
 
-;;;; Proposal Buffer
+;;;; Proposal Review
 ;;
-;; A buffer for reviewing/editing proposals before accepting or rejecting.
+;; Non-blocking proposal system.  When an agent submits a proposal:
+;; 1. Content is saved to a temp .org file
+;; 2. The agent is told to wait for the user's response
+;; 3. The user gets a notification and can view via C-c c P (in agent menu)
+;; 4. On accept/reject, the result is sent as a user message to the agent
 
-(defvar claude-mcp--proposal-result nil
-  "Result of the proposal: 'accepted, 'rejected, or 'cancelled.")
-
-(defvar claude-mcp--proposal-original nil
-  "Original content of the proposal for diff generation.")
-
-(defvar claude-mcp--proposal-title nil
-  "Title of the current proposal.")
+;; Per-agent-buffer proposal state.
+;; Each agent buffer stores its pending proposal as a plist:
+;;   :title      - proposal title
+;;   :file       - path to the temp .org file with the proposal content
+;;   :original   - the original content string (for diff generation)
+;;   :agent-buf  - the agent buffer name that sent the proposal
+(defvar-local claude-mcp--pending-proposal nil
+  "Plist describing the pending proposal for this agent buffer, or nil.")
 
 (defvar claude-mcp-proposal-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "C-c C-c") #'claude-mcp--accept-proposal)
-    (define-key map (kbd "C-c C-k") #'claude-mcp--reject-proposal)
+    (define-key map (kbd "C-c C-c") #'claude-mcp-proposal-accept)
+    (define-key map (kbd "C-c C-k") #'claude-mcp-proposal-reject)
     map)
-  "Keymap for proposal buffer.")
+  "Keymap for proposal review buffer.")
 
-(define-derived-mode claude-mcp-proposal-mode text-mode "Proposal"
+(define-derived-mode claude-mcp-proposal-mode org-mode "Proposal"
   "Mode for reviewing and editing proposals from Claude.
 \\<claude-mcp-proposal-mode-map>
-\\[claude-mcp--accept-proposal] - Accept the proposal (with any edits)
-\\[claude-mcp--reject-proposal] - Reject the proposal"
+\\[claude-mcp-proposal-accept] - Accept the proposal (with any edits)
+\\[claude-mcp-proposal-reject] - Reject the proposal"
   :group 'claude-mcp
   (setq header-line-format
         (propertize " C-c C-c accept | C-c C-k reject | Edit freely "
                     'face 'claude-mcp-proposal-header-face)))
 
-;; Evil emacs state for proposal mode too
+;; Evil emacs state for proposal mode
 (with-eval-after-load 'evil
-  (evil-set-initial-state 'claude-mcp-proposal-mode 'insert))
+  (evil-set-initial-state 'claude-mcp-proposal-mode 'emacs))
 
-(defun claude-mcp--accept-proposal ()
-  "Accept the proposal with any user modifications."
-  (interactive)
-  (let ((content (if claude-mcp--proposal-content-marker
-                     (buffer-substring-no-properties claude-mcp--proposal-content-marker (point-max))
-                   (buffer-substring-no-properties (point-min) (point-max)))))
-    (setq claude-mcp--proposal-result (list 'accepted content)))
-  (quit-window t)
-  (exit-recursive-edit))
-
-(defun claude-mcp--reject-proposal ()
-  "Reject the proposal, returning a diff of any modifications."
-  (interactive)
-  (let* ((modified (if claude-mcp--proposal-content-marker
-                       (buffer-substring-no-properties claude-mcp--proposal-content-marker (point-max))
-                     (buffer-substring-no-properties (point-min) (point-max))))
-         (diff (if (string= modified claude-mcp--proposal-original)
-                   nil
-                 (claude-mcp--generate-diff claude-mcp--proposal-original modified))))
-    (setq claude-mcp--proposal-result (list 'rejected diff))
-    (quit-window t)
-    (exit-recursive-edit)))
+(defvar-local claude-mcp-proposal--agent-buffer nil
+  "The agent buffer name this proposal file belongs to.")
 
 (defun claude-mcp--generate-diff (original modified)
-  "Generate a simple diff between ORIGINAL and MODIFIED text."
+  "Generate a unified diff between ORIGINAL and MODIFIED text."
   (let ((orig-file (make-temp-file "proposal-orig"))
         (mod-file (make-temp-file "proposal-mod")))
     (unwind-protect
@@ -2108,6 +2092,143 @@ Blocks until user makes a selection. Returns the selected option or 'cancelled'.
             (buffer-string)))
       (delete-file orig-file)
       (delete-file mod-file))))
+
+(defun claude-mcp--proposal-cleanup (agent-buf)
+  "Clean up proposal state for AGENT-BUF.
+Deletes the temp file and clears the pending proposal plist."
+  (when (buffer-live-p (get-buffer agent-buf))
+    (with-current-buffer agent-buf
+      (when-let ((file (plist-get claude-mcp--pending-proposal :file)))
+        (when (file-exists-p file)
+          (delete-file file)))
+      (setq claude-mcp--pending-proposal nil))))
+
+(defun claude-mcp--proposal-send-response (agent-buf response)
+  "Send RESPONSE string as a user message to AGENT-BUF."
+  (when (buffer-live-p (get-buffer agent-buf))
+    (with-current-buffer agent-buf
+      (if (claude-agent--is-busy-p)
+          ;; Agent is busy (waiting for our response) -- queue the message
+          (progn
+            (setq claude-agent--message-queue
+                  (append claude-agent--message-queue (list response)))
+            (claude-agent--render-dynamic-section))
+        ;; Agent is idle -- dispatch immediately
+        (claude-agent--dispatch-user-message response)))))
+
+(defun claude-mcp-proposal-accept ()
+  "Accept the proposal, sending the result to the agent.
+If the content was modified, sends the full amended content."
+  (interactive)
+  (let* ((agent-buf claude-mcp-proposal--agent-buffer)
+         (proposal (when (and agent-buf (buffer-live-p (get-buffer agent-buf)))
+                     (buffer-local-value 'claude-mcp--pending-proposal
+                                         (get-buffer agent-buf))))
+         (original (plist-get proposal :original))
+         (modified (buffer-substring-no-properties (point-min) (point-max)))
+         (response (if (string= original modified)
+                       "PROPOSAL ACCEPTED"
+                     (let ((diff (claude-mcp--generate-diff original modified)))
+                       (format "PROPOSAL ACCEPTED WITH AMENDMENTS\n\n%s" diff)))))
+    (claude-mcp--proposal-send-response agent-buf response)
+    (claude-mcp--proposal-cleanup agent-buf)
+    ;; Close the proposal file buffer
+    (set-buffer-modified-p nil)
+    (kill-buffer-and-window)
+    (message "Proposal accepted and sent to agent.")))
+
+(defun claude-mcp-proposal-reject ()
+  "Reject the proposal, sending feedback to the agent.
+If the content was modified, sends a diff as feedback."
+  (interactive)
+  (let* ((agent-buf claude-mcp-proposal--agent-buffer)
+         (proposal (when (and agent-buf (buffer-live-p (get-buffer agent-buf)))
+                     (buffer-local-value 'claude-mcp--pending-proposal
+                                         (get-buffer agent-buf))))
+         (original (plist-get proposal :original))
+         (modified (buffer-substring-no-properties (point-min) (point-max)))
+         (response (if (string= original modified)
+                       "PROPOSAL REJECTED"
+                     (let ((diff (claude-mcp--generate-diff original modified)))
+                       (format "PROPOSAL REJECTED WITH FEEDBACK\n\n%s" diff)))))
+    (claude-mcp--proposal-send-response agent-buf response)
+    (claude-mcp--proposal-cleanup agent-buf)
+    ;; Close the proposal file buffer
+    (set-buffer-modified-p nil)
+    (kill-buffer-and-window)
+    (message "Proposal rejected and sent to agent.")))
+
+(defun claude-mcp-proposal-has-pending-p ()
+  "Return non-nil if the current agent buffer has a pending proposal."
+  (and (boundp 'claude-mcp--pending-proposal)
+       claude-mcp--pending-proposal
+       t))
+
+(defun claude-mcp-proposal-review ()
+  "Open the pending proposal for the current agent buffer for review.
+The proposal is displayed as an org-mode file that can be freely edited."
+  (interactive)
+  (unless claude-mcp--pending-proposal
+    (user-error "No pending proposal for this agent"))
+  (let* ((file (plist-get claude-mcp--pending-proposal :file))
+         (title (plist-get claude-mcp--pending-proposal :title))
+         (agent-buf (buffer-name (current-buffer))))
+    (unless (and file (file-exists-p file))
+      (setq claude-mcp--pending-proposal nil)
+      (user-error "Proposal file no longer exists"))
+    ;; Open the file and set up the proposal mode
+    (find-file-other-window file)
+    (claude-mcp-proposal-mode)
+    (setq-local claude-mcp-proposal--agent-buffer agent-buf)
+    (goto-char (point-min))
+    (message "Review proposal: %s  |  C-c C-c accept  |  C-c C-k reject" title)))
+
+(defun claude-mcp-show-proposal (title content &optional _mode agent-buffer)
+  "Submit a proposal for user review (non-blocking).
+TITLE is a short description.  CONTENT is the proposal body (org-mode).
+The optional MODE argument is kept for backwards compatibility.
+AGENT-BUFFER is the name of the agent buffer (auto-injected by the MCP server).
+
+The proposal is saved to a temporary .org file.  The user is notified
+and can review via the agent transient menu (C-c c P).  When the user
+accepts or rejects, a message is sent back to the agent as user input.
+
+Returns a string telling the agent to wait for the user's response."
+  (let* ((agent-buf-name agent-buffer)
+         (agent-buf (when agent-buf-name (get-buffer agent-buf-name))))
+    (unless agent-buf
+      (error "Cannot determine agent buffer for proposal (agent_buffer not provided)"))
+    ;; Create a temp file with the proposal content
+    (let ((file (make-temp-file "claude-proposal-" nil ".org")))
+      (with-temp-file file
+        (insert content))
+      ;; Store proposal metadata on the agent buffer
+      (with-current-buffer agent-buf
+        ;; Clean up any previous proposal
+        (when claude-mcp--pending-proposal
+          (claude-mcp--proposal-cleanup agent-buf-name))
+        (setq claude-mcp--pending-proposal
+              (list :title title
+                    :file file
+                    :original content
+                    :agent-buf agent-buf-name)))
+      ;; Notify the user
+      (message "Proposal from Claude: \"%s\" -- review with C-c c P in the agent buffer"
+               title)
+      ;; Play sound if enabled
+      (when (bound-and-true-p claude-mcp-attention-sound)
+        (ding t))
+      ;; Desktop notification if available
+      (when (and (bound-and-true-p claude-mcp-attention-notify)
+                 (fboundp 'notifications-notify))
+        (notifications-notify
+         :title "Claude Proposal Ready"
+         :body (format "Proposal: %s" title)
+         :urgency 'normal
+         :app-name "Claude"))
+      ;; Return message telling the agent to wait
+      (format "Proposal \"%s\" has been submitted for user review. The user has been notified. WAIT for the user to accept or reject -- their response will arrive as a user message. Do NOT proceed until you receive a response starting with \"PROPOSAL ACCEPTED\" or \"PROPOSAL REJECTED\"."
+              title))))
 
 (defface claude-mcp-proposal-header-face
   '((((class color) (background dark))
@@ -2212,93 +2333,29 @@ Blocks until user makes a selection. Returns the selected option or 'cancelled'.
      (:foreground "#383a42")))
   "Face for items in file/dir picker dialogs."
   :group 'claude-mcp)
-(defvar-local claude-mcp--proposal-content-marker nil
-  "Marker for the start of the actual proposal content.")
-
-(defun claude-mcp--insert-proposal-header (title)
-  "Insert the proposal header with TITLE and instructions."
-  (let ((inhibit-read-only t))
-    ;; Title
-    (insert (propertize (concat "  " title "\n")
-                        'face 'claude-mcp-proposal-title-face
-                        'read-only t
-                        'front-sticky t
-                        'rear-nonsticky t))
-    ;; Instructions
-    (insert (propertize "  Review and edit this proposal, then:\n"
-                        'face 'claude-mcp-proposal-header-face
-                        'read-only t))
-    (insert (propertize "    C-c C-c  "
-                        'face 'claude-mcp-key-accept-face
-                        'read-only t))
-    (insert (propertize "Accept proposal (with your edits)\n"
-                        'face 'claude-mcp-proposal-header-face
-                        'read-only t))
-    (insert (propertize "    C-c C-k  "
-                        'face 'claude-mcp-key-reject-face
-                        'read-only t))
-    (insert (propertize "Reject proposal (sends your edits as feedback)\n"
-                        'face 'claude-mcp-proposal-header-face
-                        'read-only t))
-    ;; Separator
-    (insert (propertize (concat "  " (make-string 60 ?─) "\n\n")
-                        'face 'claude-mcp-proposal-separator-face
-                        'read-only t
-                        'rear-nonsticky t))))
-
-(defun claude-mcp-show-proposal (title content &optional mode)
-  "Show a proposal buffer with TITLE and CONTENT for user review.
-Optional MODE specifies the major mode for syntax highlighting (e.g., 'python-mode).
-Blocks until user accepts (C-c C-c) or rejects (C-c C-k).
-Returns a list: (status result) where:
-- For accepted: ('accepted final-content)
-- For rejected with edits: ('rejected diff-string)
-- For rejected without edits: ('rejected nil)"
-  (let ((buf (get-buffer-create "*claude-proposal*"))
-        (content-start nil))
-    (setq claude-mcp--proposal-original content)
-    (setq claude-mcp--proposal-result nil)
-    (with-current-buffer buf
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        ;; Insert header with instructions
-        (claude-mcp--insert-proposal-header title)
-        ;; Remember where content starts
-        (setq content-start (point))
-        ;; Insert the actual content
-        (insert content))
-      ;; Apply syntax highlighting mode if specified
-      (when mode
-        (let ((mode-fn (intern mode)))
-          (when (fboundp mode-fn)
-            (funcall mode-fn))))
-      ;; Then enable our mode for keybindings
-      (claude-mcp-proposal-mode)
-      (setq-local claude-mcp--proposal-title title)
-      ;; Set marker after mode is enabled (mode might reset buffer-locals)
-      (setq-local claude-mcp--proposal-content-marker (copy-marker content-start))
-      ;; Go to start of editable content
-      (goto-char content-start))
-    (pop-to-buffer buf '((display-buffer-same-window)))
-    ;; Block until user responds
-    (recursive-edit)
-    ;; Return result
-    (let ((result claude-mcp--proposal-result))
-      (setq claude-mcp--proposal-result nil)
-      (setq claude-mcp--proposal-original nil)
-      (pcase result
-        (`(accepted ,content) (format "ACCEPTED\n%s" content))
-        (`(rejected nil) "REJECTED")
-        (`(rejected ,diff) (format "REJECTED_WITH_CHANGES\n%s" diff))
-        (_ "CANCELLED")))))
-
 (claude-mcp-deftool show-proposal
-  "Show a proposal buffer for user to review, edit, and accept/reject. The user can freely edit the content. Blocks until user presses C-c C-c (accept) or C-c C-k (reject). Returns 'ACCEPTED\\n<content>' if accepted, 'REJECTED' if rejected without changes, or 'REJECTED_WITH_CHANGES\\n<diff>' if rejected after making edits."
+  "Show a proposal for the user to review, edit, and accept/reject.
+Write your proposal content in org-mode format. The content is saved to
+a file and the user is notified to review it at their convenience.
+
+This tool returns IMMEDIATELY. You MUST then STOP and WAIT for the user's
+response, which will arrive as a user message. Do NOT continue working
+until you receive one of:
+- \"PROPOSAL ACCEPTED\" -- user accepted as-is
+- \"PROPOSAL ACCEPTED WITH AMENDMENTS\" -- user accepted with changes (diff follows)
+- \"PROPOSAL REJECTED\" -- user rejected with no feedback
+- \"PROPOSAL REJECTED WITH FEEDBACK\" -- user rejected with changes (diff follows)
+
+Best practices:
+- Always write content in org-mode format (the default)
+- Use clear headings and structure
+- After calling this tool, STOP and WAIT for the user message"
   :function #'claude-mcp-show-proposal
   :safe t
-  :args ((title string :required "Title for the proposal (shown in header)")
-         (content string :required "The proposal content to display")
-         (mode string "Optional major mode for syntax highlighting (e.g., 'python-mode', 'org-mode')")))
+  :args ((title string :required "Title for the proposal (shown in notification)")
+         (content string :required "The proposal content in org-mode format")
+         (mode string "Ignored (kept for backwards compatibility). Proposals always use org-mode.")
+         (agent_buffer string "Auto-injected by the MCP server. Do not set manually.")))
 
 ;;;; Confirmation Prompt
 ;;
