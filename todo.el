@@ -1052,8 +1052,8 @@ that session with `--continue'."
           (org-roam-todo--send-task-to-buffer buffer-name content worktree-path)
           (pop-to-buffer existing-buffer)
           (message "Sent task to existing session: %s" buffer-name))
-<<<<<<< Updated upstream
-      ;; New session - pre-trust and spawn with TODO-specific allowed tools
+      ;; No live buffer - spawn agent (continue if session exists on disk)
+      ;; Pre-trust and spawn with TODO-specific allowed tools
       ;; Add path-scoped mcp__emacs__lock and mcp__emacs__locks for worktree directory
       (org-roam-todo--pre-trust-worktree worktree-path)
       (let* ((expanded-wt (expand-file-name worktree-path))
@@ -1062,17 +1062,8 @@ that session with `--continue'."
              (all-tools (append (org-roam-todo--effective-agent-allowed-tools)
                                 (list lock-pattern locks-pattern)))
              (worktree-model (org-roam-todo--get-property "WORKTREE_MODEL"))
-             (buf (claude-agent-run worktree-path nil nil nil worktree-model all-tools))
-=======
-      ;; No live buffer - spawn agent (continue if session exists on disk)
-      ;; Pre-trust and spawn with TODO-specific allowed tools
-      ;; Add path-scoped mcp__emacs__lock for worktree directory
-      (org-roam-todo--pre-trust-worktree worktree-path)
-      (let* ((lock-pattern (format "mcp__emacs__lock(%s*)" (expand-file-name worktree-path)))
-             (all-tools (append org-roam-todo-agent-allowed-tools (list lock-pattern)))
              ;; Pass session-id as resume-session to restore conversation context
-             (buf (claude-agent-run worktree-path session-id nil nil nil all-tools))
->>>>>>> Stashed changes
+             (buf (claude-agent-run worktree-path session-id nil nil worktree-model all-tools))
              (buffer-name (buffer-name buf)))
         ;; Queue task - will be sent when agent emits "ready"
         (org-roam-todo--send-task-to-buffer buffer-name content worktree-path)
@@ -1822,22 +1813,14 @@ that session with `--resume'."
                      (buffer-name existing-buffer)))
         ;; No live buffer - spawn agent (resume if session exists)
         (org-roam-todo--pre-trust-worktree worktree-path)
-<<<<<<< Updated upstream
         (let* ((expanded-wt (expand-file-name worktree-path))
                (lock-pattern (format "mcp__emacs__lock(%s*)" expanded-wt))
                (locks-pattern (format "mcp__emacs__locks(%s*)" expanded-wt))
                (all-tools (append (org-roam-todo--effective-agent-allowed-tools)
                                   (list lock-pattern locks-pattern)))
                (worktree-model (plist-get todo :worktree-model))
-               (buf (claude-agent-run worktree-path nil nil nil worktree-model
-=======
-        (let* ((lock-pattern (format "mcp__emacs__lock(%s*)"
-                                     (expand-file-name worktree-path)))
-               (all-tools (append org-roam-todo-agent-allowed-tools
-                                  (list lock-pattern)))
                ;; Pass session-id as resume-session to restore conversation context
-               (buf (claude-agent-run worktree-path session-id nil nil nil
->>>>>>> Stashed changes
+               (buf (claude-agent-run worktree-path session-id nil nil worktree-model
                                       all-tools))
                (buffer-name (buffer-name buf)))
           ;; Queue task - will be sent when agent emits "ready"
