@@ -61,7 +61,7 @@ cannot be determined."
 (require 'claude-pair)
 (require 'claude-mcp)
 (require 'claude-sessions)
-(require 'todo)
+
 (require 'claude-agent-repl)
 
 ;; Declare functions from optional packages
