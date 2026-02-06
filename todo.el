@@ -730,6 +730,24 @@ Returns the buffer or nil."
                        expanded-path))))
      (buffer-list))))
 
+(defun org-roam-todo--get-most-recent-session (work-dir)
+  "Return the most recent Claude session ID for WORK-DIR, or nil if none.
+Checks the ~/.claude/projects/ directory for session files.
+Claude encodes directory paths by replacing both / and . with -."
+  (let* ((expanded-dir (directory-file-name (expand-file-name work-dir)))
+         (encoded-dir (replace-regexp-in-string "[/.]" "-" expanded-dir))
+         (sessions-dir (expand-file-name encoded-dir "~/.claude/projects/")))
+    (when (file-directory-p sessions-dir)
+      (let ((files (directory-files sessions-dir t "\\.jsonl$" t)))
+        (when files
+          ;; Sort by modification time, most recent first
+          (setq files (sort files (lambda (a b)
+                                    (time-less-p (file-attribute-modification-time
+                                                  (file-attributes b))
+                                                 (file-attribute-modification-time
+                                                  (file-attributes a))))))
+          ;; Return session ID (filename without .jsonl extension)
+          (file-name-sans-extension (file-name-nondirectory (car files))))))))
 ;;;; TODO Query & Selection
 
 (defconst org-roam-todo-status-order
@@ -964,7 +982,9 @@ and sent automatically when the agent is ready."
 (defun org-roam-todo-create-worktree ()
   "Create a worktree for the current TODO and spawn a Claude session.
 Use this for feature work that benefits from isolation.
-If the worktree and session already exist, sends the task to the existing session."
+If the worktree and session already exist, sends the task to the existing session.
+If no live buffer exists but a previous session exists on disk, continues
+that session with `--continue'."
   (interactive)
   (unless (org-roam-todo--node-p)
     (user-error "Not in an org-roam TODO node"))
@@ -985,15 +1005,9 @@ If the worktree and session already exist, sends the task to the existing sessio
                             (org-roam-todo--worktree-path project-root branch-name)))
          (content (org-roam-todo--get-node-content))
          ;; Check for existing claude-agent buffer for this worktree
-         (expanded-path (expand-file-name worktree-path))
-         (existing-buffer (cl-find-if
-                           (lambda (buf)
-                             (with-current-buffer buf
-                               (and (boundp 'claude-agent--work-dir)
-                                    claude-agent--work-dir
-                                    (string= (expand-file-name claude-agent--work-dir)
-                                             expanded-path))))
-                           (buffer-list))))
+         (existing-buffer (org-roam-todo--find-agent-buffer worktree-path))
+         ;; Check for existing session on disk (returns session ID or nil)
+         (session-id (org-roam-todo--get-most-recent-session worktree-path)))
     (unless project-root
       (user-error "No PROJECT_ROOT property found"))
     ;; Create worktree if needed
@@ -1034,10 +1048,11 @@ If the worktree and session already exist, sends the task to the existing sessio
     ;; Check if session already exists
     (if existing-buffer
         (let ((buffer-name (buffer-name existing-buffer)))
-          ;; Session exists - send task immediately (no delay needed)
+          ;; Live buffer exists - send task immediately (no delay needed)
           (org-roam-todo--send-task-to-buffer buffer-name content worktree-path)
           (pop-to-buffer existing-buffer)
           (message "Sent task to existing session: %s" buffer-name))
+<<<<<<< Updated upstream
       ;; New session - pre-trust and spawn with TODO-specific allowed tools
       ;; Add path-scoped mcp__emacs__lock and mcp__emacs__locks for worktree directory
       (org-roam-todo--pre-trust-worktree worktree-path)
@@ -1048,10 +1063,22 @@ If the worktree and session already exist, sends the task to the existing sessio
                                 (list lock-pattern locks-pattern)))
              (worktree-model (org-roam-todo--get-property "WORKTREE_MODEL"))
              (buf (claude-agent-run worktree-path nil nil nil worktree-model all-tools))
+=======
+      ;; No live buffer - spawn agent (continue if session exists on disk)
+      ;; Pre-trust and spawn with TODO-specific allowed tools
+      ;; Add path-scoped mcp__emacs__lock for worktree directory
+      (org-roam-todo--pre-trust-worktree worktree-path)
+      (let* ((lock-pattern (format "mcp__emacs__lock(%s*)" (expand-file-name worktree-path)))
+             (all-tools (append org-roam-todo-agent-allowed-tools (list lock-pattern)))
+             ;; Pass session-id as resume-session to restore conversation context
+             (buf (claude-agent-run worktree-path session-id nil nil nil all-tools))
+>>>>>>> Stashed changes
              (buffer-name (buffer-name buf)))
         ;; Queue task - will be sent when agent emits "ready"
         (org-roam-todo--send-task-to-buffer buffer-name content worktree-path)
-        (message "Created worktree and spawned Claude session: %s" buffer-name)))))
+        (message "%s Claude session: %s"
+                 (if session-id "Resumed" "Created worktree and spawned")
+                 buffer-name)))))
 ;;;; Select TODO → Create Worktree
 
 ;;;###autoload
@@ -1776,21 +1803,26 @@ If the worktree already exists, opens magit-status directly."
 (defun org-roam-todo-list-spawn-agent ()
   "Create a worktree for the TODO at point (if needed) and spawn an agent.
 If the worktree already exists, reuses it.  If an agent session already
-exists for the worktree, switches to it instead of spawning a new one."
+exists for the worktree, switches to it instead of spawning a new one.
+If no live buffer exists but a previous session exists on disk, resumes
+that session with `--resume'."
   (interactive)
   (require 'claude-agent)
   (when-let ((todo (org-roam-todo-list--todo-at-point)))
     (let* ((worktree-path (org-roam-todo--ensure-worktree-from-plist todo))
            (content (org-roam-todo--get-full-content (plist-get todo :file)))
-           (existing-buffer (org-roam-todo--find-agent-buffer worktree-path)))
+           (existing-buffer (org-roam-todo--find-agent-buffer worktree-path))
+           ;; Get most recent session ID (or nil if no sessions)
+           (session-id (org-roam-todo--get-most-recent-session worktree-path)))
       (if existing-buffer
-          ;; Agent exists - switch to it
+          ;; Agent buffer exists - switch to it
           (progn
             (pop-to-buffer existing-buffer)
             (message "Switched to existing agent: %s"
                      (buffer-name existing-buffer)))
-        ;; Spawn new agent
+        ;; No live buffer - spawn agent (resume if session exists)
         (org-roam-todo--pre-trust-worktree worktree-path)
+<<<<<<< Updated upstream
         (let* ((expanded-wt (expand-file-name worktree-path))
                (lock-pattern (format "mcp__emacs__lock(%s*)" expanded-wt))
                (locks-pattern (format "mcp__emacs__locks(%s*)" expanded-wt))
@@ -1798,12 +1830,22 @@ exists for the worktree, switches to it instead of spawning a new one."
                                   (list lock-pattern locks-pattern)))
                (worktree-model (plist-get todo :worktree-model))
                (buf (claude-agent-run worktree-path nil nil nil worktree-model
+=======
+        (let* ((lock-pattern (format "mcp__emacs__lock(%s*)"
+                                     (expand-file-name worktree-path)))
+               (all-tools (append org-roam-todo-agent-allowed-tools
+                                  (list lock-pattern)))
+               ;; Pass session-id as resume-session to restore conversation context
+               (buf (claude-agent-run worktree-path session-id nil nil nil
+>>>>>>> Stashed changes
                                       all-tools))
                (buffer-name (buffer-name buf)))
           ;; Queue task - will be sent when agent emits "ready"
           (org-roam-todo--send-task-to-buffer
            buffer-name content worktree-path)
-          (message "Spawned agent: %s" buffer-name)))
+          (message "%s agent: %s"
+                   (if session-id "Resumed" "Spawned")
+                   buffer-name)))
       (org-roam-todo-list-refresh))))
 
 (defun org-roam-todo-list-help ()
