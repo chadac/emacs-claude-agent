@@ -3232,11 +3232,11 @@ Optional ADDITIONAL-ALLOWED-TOOLS is a list of extra tools to pre-authorize."
 
 ;;;; Transient Menu
 
-(defvar claude-agent--fallback-models
-  '(("default" . "Default (recommended)")
-    ("sonnet" . "Sonnet")
-    ("haiku" . "Haiku"))
-  "Fallback model choices used before the SDK provides the dynamic list.")
+(defvar claude-agent--model-aliases
+  '("sonnet" "opus" "haiku")
+  "Model aliases accepted by Claude CLI.
+These are resolved by the CLI to the latest version of each model family.
+Users can also enter full model names like 'claude-opus-4-6' directly.")
 
 (defun claude-agent--current-model ()
   "Get the current model from session info."
@@ -3244,44 +3244,24 @@ Optional ADDITIONAL-ALLOWED-TOOLS is a list of extra tools to pre-authorize."
 
 (defun claude-agent--format-model-for-display (model-string)
   "Format MODEL-STRING for display.
-Uses the dynamic model list if available, otherwise extracts key info."
-  (if-let ((models claude-agent--available-models)
-           (match (seq-find (lambda (m)
-                              (equal (cdr (assq 'value m)) model-string))
-                            models)))
-      (cdr (assq 'displayName match))
-    ;; Fallback: extract family name from model string
+Extracts the model family name for a cleaner display."
+  (when model-string
     (cond
      ((string-match "sonnet" model-string) "Sonnet")
      ((string-match "opus" model-string) "Opus")
      ((string-match "haiku" model-string) "Haiku")
      (t model-string))))
 
-(defun claude-agent--model-candidates ()
-  "Return model candidates for completion.
-Uses the dynamic list from the SDK if available, otherwise falls back
-to the hardcoded list.  Each candidate is a string with a text property
-holding the model value to pass to the SDK."
-  (if claude-agent--available-models
-      (mapcar (lambda (m)
-                (let* ((value (cdr (assq 'value m)))
-                       (display-name (cdr (assq 'displayName m)))
-                       (description (cdr (assq 'description m)))
-                       (label (format "%s  (%s)" display-name description)))
-                  (propertize label 'model-value value)))
-              claude-agent--available-models)
-    ;; Fallback before SDK info arrives
-    (mapcar (lambda (pair)
-              (propertize (cdr pair) 'model-value (car pair)))
-            claude-agent--fallback-models)))
 
 (defun claude-agent-set-model (model)
   "Change the model for the current session to MODEL.
-This restarts the session with the new model while preserving the conversation."
+MODEL can be an alias like 'sonnet', 'opus', or 'haiku', or a full
+model name like 'claude-opus-4-6'. The CLI resolves aliases to the
+latest version of each model family."
   (interactive
-   (let* ((candidates (claude-agent--model-candidates))
-          (choice (completing-read "Model: " candidates nil t)))
-     (list (get-text-property 0 'model-value choice))))
+   (list (completing-read "Model (alias or full name): "
+                          claude-agent--model-aliases
+                          nil nil)))  ; Allow free-form input
   (if (and claude-agent--process (process-live-p claude-agent--process))
       (let ((session-id (plist-get claude-agent--session-info :session-id))
             (work-dir claude-agent--work-dir))
