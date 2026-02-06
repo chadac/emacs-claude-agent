@@ -2072,9 +2072,13 @@ Blocks until user makes a selection. Returns the selected option or 'cancelled'.
         (propertize " C-c C-c accept | C-c C-k reject | Edit freely "
                     'face 'claude-mcp-proposal-header-face)))
 
-;; Evil emacs state for proposal mode
+;; Evil normal state for proposal mode -- allows vim navigation while
+;; keeping C-c C-c / C-c C-k working via evil-define-key*.
 (with-eval-after-load 'evil
-  (evil-set-initial-state 'claude-mcp-proposal-mode 'emacs))
+  (evil-set-initial-state 'claude-mcp-proposal-mode 'normal)
+  (evil-define-key* 'normal claude-mcp-proposal-mode-map
+    (kbd "C-c C-c") #'claude-mcp-proposal-accept
+    (kbd "C-c C-k") #'claude-mcp-proposal-reject))
 
 (defvar-local claude-mcp-proposal--agent-buffer nil
   "The agent buffer name this proposal file belongs to.")
@@ -2101,7 +2105,9 @@ Deletes the temp file and clears the pending proposal plist."
       (when-let ((file (plist-get claude-mcp--pending-proposal :file)))
         (when (file-exists-p file)
           (delete-file file)))
-      (setq claude-mcp--pending-proposal nil))))
+      (setq claude-mcp--pending-proposal nil)
+      ;; Re-render status bar to remove proposal indicator
+      (claude-agent--render-dynamic-section))))
 
 (defun claude-mcp--proposal-send-response (agent-buf response)
   "Send RESPONSE string as a user message to AGENT-BUF."
@@ -2120,16 +2126,21 @@ Deletes the temp file and clears the pending proposal plist."
   "Accept the proposal, sending the result to the agent.
 If the content was modified, sends the full amended content."
   (interactive)
+  (unless claude-mcp-proposal--agent-buffer
+    (user-error "No agent buffer associated with this proposal"))
   (let* ((agent-buf claude-mcp-proposal--agent-buffer)
-         (proposal (when (and agent-buf (buffer-live-p (get-buffer agent-buf)))
+         (proposal (when (buffer-live-p (get-buffer agent-buf))
                      (buffer-local-value 'claude-mcp--pending-proposal
                                          (get-buffer agent-buf))))
          (original (plist-get proposal :original))
          (modified (buffer-substring-no-properties (point-min) (point-max)))
-         (response (if (string= original modified)
+         (response (if (and original (string= original modified))
                        "PROPOSAL ACCEPTED"
-                     (let ((diff (claude-mcp--generate-diff original modified)))
-                       (format "PROPOSAL ACCEPTED WITH AMENDMENTS\n\n%s" diff)))))
+                     (if original
+                         (let ((diff (claude-mcp--generate-diff original modified)))
+                           (format "PROPOSAL ACCEPTED WITH AMENDMENTS\n\n%s" diff))
+                       ;; No original to compare -- accept as-is
+                       "PROPOSAL ACCEPTED"))))
     (claude-mcp--proposal-send-response agent-buf response)
     (claude-mcp--proposal-cleanup agent-buf)
     ;; Close the proposal file buffer
@@ -2141,16 +2152,21 @@ If the content was modified, sends the full amended content."
   "Reject the proposal, sending feedback to the agent.
 If the content was modified, sends a diff as feedback."
   (interactive)
+  (unless claude-mcp-proposal--agent-buffer
+    (user-error "No agent buffer associated with this proposal"))
   (let* ((agent-buf claude-mcp-proposal--agent-buffer)
-         (proposal (when (and agent-buf (buffer-live-p (get-buffer agent-buf)))
+         (proposal (when (buffer-live-p (get-buffer agent-buf))
                      (buffer-local-value 'claude-mcp--pending-proposal
                                          (get-buffer agent-buf))))
          (original (plist-get proposal :original))
          (modified (buffer-substring-no-properties (point-min) (point-max)))
-         (response (if (string= original modified)
+         (response (if (and original (string= original modified))
                        "PROPOSAL REJECTED"
-                     (let ((diff (claude-mcp--generate-diff original modified)))
-                       (format "PROPOSAL REJECTED WITH FEEDBACK\n\n%s" diff)))))
+                     (if original
+                         (let ((diff (claude-mcp--generate-diff original modified)))
+                           (format "PROPOSAL REJECTED WITH FEEDBACK\n\n%s" diff))
+                       ;; No original to compare -- reject as-is
+                       "PROPOSAL REJECTED"))))
     (claude-mcp--proposal-send-response agent-buf response)
     (claude-mcp--proposal-cleanup agent-buf)
     ;; Close the proposal file buffer
@@ -2211,7 +2227,9 @@ Returns a string telling the agent to wait for the user's response."
               (list :title title
                     :file file
                     :original content
-                    :agent-buf agent-buf-name)))
+                    :agent-buf agent-buf-name))
+        ;; Re-render status bar to show proposal indicator
+        (claude-agent--render-dynamic-section))
       ;; Notify the user
       (message "Proposal from Claude: \"%s\" -- review with C-c c P in the agent buffer"
                title)

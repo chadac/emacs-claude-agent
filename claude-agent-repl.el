@@ -427,6 +427,14 @@ If the associated TODO is in review status, auto-reverts to active."
   "Face for completed todo items."
   :group 'claude-agent)
 
+(defface claude-agent-proposal-pending-face
+  '((((class color) (background dark))
+     (:foreground "#d19a66" :weight bold))
+    (((class color) (background light))
+     (:foreground "#c18401" :weight bold)))
+  "Face for pending proposal indicator in the status bar."
+  :group 'claude-agent)
+
 (defface claude-agent-error-face
   '((((class color) (background dark))
      (:foreground "#e06c75" :weight bold))
@@ -1421,6 +1429,14 @@ Called by `render-dynamic-section'. Assumes point is positioned correctly."
           (insert (format "  - %s %s\n" checkbox text))
           (claude-agent--apply-face start (point) face)))))
 
+  ;; === Pending proposal indicator ===
+  (when (claude-mcp-proposal-has-pending-p)
+    (let* ((title (plist-get claude-mcp--pending-proposal :title))
+           (start (point)))
+      (insert (format "\n  📋 Proposal waiting for review: %s\n     C-c c P to review  |  C-c C-c accept  |  C-c C-k reject\n"
+                      (or title "untitled")))
+      (claude-agent--apply-face start (point) 'claude-agent-proposal-pending-face)))
+
   ;; === Queued messages (if any) ===
   ;; Rendered like dimmed user messages ("you>" but grayed out).
   ;; Each message region gets a `claude-queue-index' text property so that
@@ -1452,7 +1468,11 @@ Called by `render-dynamic-section'. Assumes point is positioned correctly."
          (short-session (if (> (length session-id) 8)
                             (substring session-id 0 8)
                           session-id))
-         (thinking-indicator (if claude-agent--thinking-status " ⏳" "")))
+         (thinking-indicator (if claude-agent--thinking-status " ⏳" ""))
+         (proposal-indicator (if (claude-mcp-proposal-has-pending-p)
+                                 (propertize " 📋 Proposal"
+                                             'face 'claude-agent-proposal-pending-face)
+                               "")))
     (setq header-line-format
           (list
            (propertize (format " %s " model)
@@ -1463,7 +1483,8 @@ Called by `render-dynamic-section'. Assumes point is positioned correctly."
            " │ "
            (propertize (format "%s" short-session)
                        'face 'claude-agent-header-session-face)
-           thinking-indicator))
+           thinking-indicator
+           proposal-indicator))
     (force-mode-line-update)))
 (defun claude-agent--spinner-tick (buf)
   "Advance spinner in BUF and update in-place (lightweight).
