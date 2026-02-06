@@ -2633,6 +2633,7 @@ The user will then review the commit and run the merge workflow."
                  unstaged-now)))
       ;; Rebase onto upstream branch
       (message "[todo-complete] Step 3: Rebasing onto upstream...")
+      (require 'todo-merge)  ; Lazy load to avoid cyclic dependency
       (let ((main-branch (org-roam-todo-merge--detect-main-branch
                           (or project-root cwd)
                           (plist-get todo :project))))
