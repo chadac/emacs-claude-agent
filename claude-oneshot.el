@@ -28,10 +28,13 @@
 
 (defcustom claude-oneshot-model "sonnet"
   "Default model to use for oneshot agents.
-Haiku is recommended for quick, low-cost operations."
+Any model alias accepted by the Claude SDK (e.g. \"sonnet\", \"haiku\",
+\"opus\") or a full model name (e.g. \"claude-sonnet-4-5-20250929\")."
   :type '(choice (const "haiku")
                  (const "sonnet")
-                 (const "opus"))
+                 (const "opus")
+                 (const "default")
+                 (string :tag "Other model"))
   :group 'claude-oneshot)
 
 (defcustom claude-oneshot-timeout 300

@@ -718,6 +718,17 @@ class ClaudeAgent:
         self._client = ClaudeSDKClient(options=options)
         await self._client.connect()
 
+        # Query available models from the SDK and emit to Emacs
+        try:
+            server_info = await self._client.get_server_info()
+            if server_info and "models" in server_info:
+                self._emit({
+                    "type": "available_models",
+                    "models": server_info["models"],
+                })
+        except Exception as e:
+            self._log_json("WARN", {"msg": "Failed to get server info for models", "error": str(e)})
+
     # ── Retry helpers ──────────────────────────────────────────────────
 
     # Patterns that indicate transient / retryable errors

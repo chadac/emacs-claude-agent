@@ -577,6 +577,11 @@ Set to t when user is at bottom; set to nil when user scrolls up.")
 (defvar-local claude-agent--session-info nil
   "Plist with session info: :model :session-id :cost.")
 
+(defvar-local claude-agent--available-models nil
+  "Available models from the SDK, as a list of alists.
+Each alist has keys: value, displayName, description.
+Populated dynamically from the agent's get_server_info() call.")
+
 (defvar-local claude-agent--mcp-server-status nil
   "List of MCP server status objects from the agent.
 Each element is an alist with keys: name, status.")
@@ -2003,6 +2008,12 @@ After appending, re-renders the dynamic section (status bar + permissions)."
              (plist-put claude-agent--session-info :session-id session-id)))
      (claude-agent--render-dynamic-section))
 
+    ;; Available models - update dynamic model list from SDK
+    ("available_models"
+     (when-let ((models (cdr (assq 'models msg))))
+       (setq claude-agent--available-models
+             (seq-into models 'list))))
+
     ;; Thinking status
     ("thinking"
      (let ((status (cdr (assq 'status msg))))
@@ -3232,32 +3243,56 @@ Optional ADDITIONAL-ALLOWED-TOOLS is a list of extra tools to pre-authorize."
 
 ;;;; Transient Menu
 
-(defvar claude-agent--available-models
-  '(("sonnet" . "claude-sonnet-4-20250514")
-    ("opus" . "claude-opus-4-20250514")
-    ("haiku" . "claude-haiku-3-5-20241022"))
-  "Available Claude models as (alias . full-name) pairs.")
+(defvar claude-agent--fallback-models
+  '(("default" . "Default (recommended)")
+    ("sonnet" . "Sonnet")
+    ("haiku" . "Haiku"))
+  "Fallback model choices used before the SDK provides the dynamic list.")
 
 (defun claude-agent--current-model ()
   "Get the current model from session info."
   (plist-get claude-agent--session-info :model))
 
 (defun claude-agent--format-model-for-display (model-string)
-  "Format MODEL-STRING for display, extracting key info."
-  (cond
-   ((string-match "sonnet" model-string) "Sonnet")
-   ((string-match "opus" model-string) "Opus")
-   ((string-match "haiku" model-string) "Haiku")
-   (t model-string)))
+  "Format MODEL-STRING for display.
+Uses the dynamic model list if available, otherwise extracts key info."
+  (if-let ((models claude-agent--available-models)
+           (match (seq-find (lambda (m)
+                              (equal (cdr (assq 'value m)) model-string))
+                            models)))
+      (cdr (assq 'displayName match))
+    ;; Fallback: extract family name from model string
+    (cond
+     ((string-match "sonnet" model-string) "Sonnet")
+     ((string-match "opus" model-string) "Opus")
+     ((string-match "haiku" model-string) "Haiku")
+     (t model-string))))
+
+(defun claude-agent--model-candidates ()
+  "Return model candidates for completion.
+Uses the dynamic list from the SDK if available, otherwise falls back
+to the hardcoded list.  Each candidate is a string with a text property
+holding the model value to pass to the SDK."
+  (if claude-agent--available-models
+      (mapcar (lambda (m)
+                (let* ((value (cdr (assq 'value m)))
+                       (display-name (cdr (assq 'displayName m)))
+                       (description (cdr (assq 'description m)))
+                       (label (format "%s  (%s)" display-name description)))
+                  (propertize label 'model-value value)))
+              claude-agent--available-models)
+    ;; Fallback before SDK info arrives
+    (mapcar (lambda (pair)
+              (propertize (cdr pair) 'model-value (car pair)))
+            claude-agent--fallback-models)))
 
 (defun claude-agent-set-model (model)
   "Change the model for the current session to MODEL.
-MODEL should be an alias like 'sonnet', 'opus', or 'haiku'.
 This restarts the session with the new model while preserving the conversation."
   (interactive
-   (list (completing-read "Model: "
-                          (mapcar #'car claude-agent--available-models)
-                          nil t)))
+   (let* ((candidates (claude-agent--model-candidates))
+          (choice (completing-read "Model: " candidates nil t)))
+     (list (get-text-property 0 'model-value choice))))
   (if (and claude-agent--process (process-live-p claude-agent--process))
       (let ((session-id (plist-get claude-agent--session-info :session-id))
             (work-dir claude-agent--work-dir))

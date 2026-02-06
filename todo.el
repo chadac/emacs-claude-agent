@@ -24,7 +24,7 @@
 ;;   :PROJECT_NAME: short project name
 ;;   :PROJECT_ROOT: full path to project
 ;;   :STATUS: draft | active | done | rejected
-;;   :WORKTREE_MODEL: opus | sonnet | haiku (model for worktree agent)
+;;   :WORKTREE_MODEL: model alias or full name (e.g. opus, sonnet, haiku, default)
 ;;   :WORKTREE_PATH: (set when worktree is created)
 ;;   :WORKTREE_BRANCH: (set when worktree is created)
 
@@ -2880,7 +2880,7 @@ autonomously implement the task without needing clarification."
            (title string :required "Title of the TODO")
            (description string "Task description - be as detailed as possible with full context, requirements, and constraints")
            (acceptance-criteria array "Array of acceptance criteria strings - be specific and testable")
-           (model string "Worktree model override: 'opus', 'sonnet', or 'haiku'. Defaults to 'sonnet'. Use 'opus' for complex architectural tasks.")))
+           (model string "Worktree model override: any model alias (e.g. 'sonnet', 'opus', 'haiku', 'default') or full model name. Defaults to 'sonnet'. Use 'opus' for complex architectural tasks.")))
 
   (claude-mcp-deftool todo-complete
     "Signal that your work is done and ready for user review. This will:
