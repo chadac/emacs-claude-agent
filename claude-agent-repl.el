@@ -85,12 +85,33 @@ Same format as `claude-agent-auto-reject-rules'."
   :safe #'listp
   :group 'claude-agent)
 
-(defun claude-agent--effective-auto-reject-rules ()
+(defun claude-agent--effective-auto-reject-rules (&optional work-dir)
   "Return the effective auto-reject rules (base + extra).
 Combines `claude-agent-auto-reject-rules' and
-`claude-agent-auto-reject-rules-extra'."
-  (append claude-agent-auto-reject-rules
-          claude-agent-auto-reject-rules-extra))
+`claude-agent-auto-reject-rules-extra'.
+If WORK-DIR is provided, reads dir-locals from that directory
+using `hack-dir-local--get-variables' instead of buffer-local values."
+  (if work-dir
+      ;; Read from the target directory's .dir-locals.el
+      (let ((default-directory (file-name-as-directory (expand-file-name work-dir)))
+            (rules nil))
+        (let ((dir-local-vars (hack-dir-local--get-variables)))
+          ;; dir-local-vars is (dir (var . val) (var . val) ...)
+          (dolist (entry (cdr dir-local-vars))
+            (when (memq (car entry) '(claude-agent-auto-reject-rules
+                                      claude-agent-auto-reject-rules-extra))
+              (let ((rule-val (cdr entry)))
+                ;; rule-val can be a single plist or a list of plists
+                (when rule-val
+                  (if (and (listp rule-val) (keywordp (car rule-val)))
+                      ;; Single plist like (:path-prefix "..." :message "...")
+                      (push rule-val rules)
+                    ;; List of plists
+                    (setq rules (append rules rule-val))))))))
+        rules)
+    ;; Use buffer-local values
+    (append claude-agent-auto-reject-rules
+            claude-agent-auto-reject-rules-extra)))
 
 (defun claude-agent--effective-disallowed-tools ()
   "Return the effective disallowed tools list (base + extra).
@@ -2689,14 +2710,43 @@ Returns the path to the generated config file."
          (server-socket (expand-file-name (or (bound-and-true-p server-name) "server")
                                           (or (bound-and-true-p server-socket-dir)
                                               (expand-file-name "emacs" (temporary-file-directory)))))
+         (expanded-work-dir (expand-file-name work-dir))
+         ;; Collect auto-reject path prefixes from dir-locals for the work-dir
+         ;; These prevent worktree agents from editing main repo files via MCP tools
+         ;; We use hack-dir-local--get-variables to read dir-locals without needing
+         ;; to be in the target buffer (buffer-local vars aren't set at spawn time)
+         (reject-paths (let ((default-directory (file-name-as-directory expanded-work-dir))
+                             (paths nil))
+                         (let ((dir-local-vars (hack-dir-local--get-variables)))
+                           ;; dir-local-vars is (dir (var . val) (var . val) ...)
+                           (dolist (entry (cdr dir-local-vars))
+                             (when (memq (car entry) '(claude-agent-auto-reject-rules
+                                                       claude-agent-auto-reject-rules-extra))
+                               (let ((rules (cdr entry)))
+                                 ;; rules can be a single plist or a list of plists
+                                 (when rules
+                                   (if (and (listp rules) (keywordp (car rules)))
+                                       ;; Single plist like (:path-prefix "..." :message "...")
+                                       (when-let ((prefix (plist-get rules :path-prefix)))
+                                         (push prefix paths))
+                                     ;; List of plists
+                                     (dolist (rule rules)
+                                       (when-let ((prefix (plist-get rule :path-prefix)))
+                                         (push prefix paths)))))))))
+                         (nreverse paths)))
+         (env-alist `((CLAUDE_AGENT_SOCKET . ,server-socket)
+                      (CLAUDE_AGENT_CWD . ,expanded-work-dir)
+                      (CLAUDE_AGENT_BUFFER_NAME . ,buffer-name)))
+         ;; Add auto-reject paths as PATH_SEP-separated env var if any exist
+         (_ (when reject-paths
+              (push `(CLAUDE_AUTO_REJECT_PATHS . ,(mapconcat #'identity reject-paths "\x1f"))
+                    env-alist)))
          (config `((mcpServers
                     . ((emacs
                         . ((command . "uv")
                            (args . ["run" "--directory" ,emacs-mcp-dir
                                     "python" "-m" "emacs_mcp.server"])
-                           (env . ((CLAUDE_AGENT_SOCKET . ,server-socket)
-                                   (CLAUDE_AGENT_CWD . ,(expand-file-name work-dir))
-                                   (CLAUDE_AGENT_BUFFER_NAME . ,buffer-name))))))))))
+                           (env . ,env-alist))))))))
     (with-temp-file config-file
       (insert (json-encode config)))
     config-file))
@@ -2781,17 +2831,26 @@ Optional ADDITIONAL-ALLOWED-TOOLS is a list of extra tools to pre-authorize."
         ;; Store for cleanup
         (with-current-buffer buffer
           (setq-local claude-agent--system-prompt-file prompt-file))))
-    ;; Add safe MCP tools as --allowedTools (pre-authorized, no permission prompts)
-    ;; Also include any additional allowed tools passed by caller
-    (let ((all-allowed-tools
-           (append (when claude-agent-enable-mcp
-                     (claude-mcp-get-safe-tools-for-cli))
-                   additional-allowed-tools)))
-      (when all-allowed-tools
-        (setq args (append args (list "--allowed-tools"
-                                      (mapconcat #'identity all-allowed-tools ","))))))
-    ;; Write auto-reject config if rules exist (base + extra from .dir-locals.el)
-    (let ((effective-reject-rules (claude-agent--effective-auto-reject-rules)))
+    ;; Check for auto-reject rules first (needed for both allowed-tools and env var)
+    (let ((effective-reject-rules (claude-agent--effective-auto-reject-rules work-dir)))
+      ;; Add safe MCP tools as --allowedTools (pre-authorized, no permission prompts)
+      ;; Also include any additional allowed tools passed by caller
+      ;; When auto-reject rules exist, also pre-authorize the MCP edit tools so they
+      ;; bypass Claude Code's permission system and reach the MCP server, where
+      ;; the auto-reject logic can properly reject them with a clear error message.
+      (let ((all-allowed-tools
+             (append (when claude-agent-enable-mcp
+                       (claude-mcp-get-safe-tools-for-cli))
+                     additional-allowed-tools
+                     ;; Pre-authorize MCP edit tools when auto-reject is configured
+                     ;; so they reach the MCP server instead of triggering permission prompts
+                     (when effective-reject-rules
+                       '("mcp__emacs__lock" "mcp__emacs__locks"
+                         "mcp__emacs__edit" "mcp__emacs__edits")))))
+        (when all-allowed-tools
+          (setq args (append args (list "--allowed-tools"
+                                        (mapconcat #'identity all-allowed-tools ","))))))
+      ;; Write auto-reject config if rules exist
       (when effective-reject-rules
         (let ((reject-file (make-temp-file "claude-auto-reject-" nil ".json"))
               (rules (mapcar (lambda (rule)

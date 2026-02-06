@@ -473,9 +473,39 @@ Returns the path to the generated config file."
                     (expand-file-name "emacs_mcp" this-dir)))
          (expanded-work-dir (expand-file-name work-dir))
          (config-file (make-temp-file "claude-mcp-config-" nil ".json"))
+         ;; Collect auto-reject path prefixes from dir-locals for the work-dir
+         ;; These prevent worktree agents from editing main repo files via MCP tools
+         ;; We use hack-dir-local--get-variables to read dir-locals without needing
+         ;; to be in the target buffer
+         (reject-paths (let ((default-directory (file-name-as-directory expanded-work-dir))
+                             (paths nil))
+                         ;; Get dir-local variables for this directory
+                         (let ((dir-local-vars (hack-dir-local--get-variables)))
+                           ;; dir-local-vars is (dir (var . val) (var . val) ...)
+                           ;; Look for claude-agent-auto-reject-rules and claude-agent-auto-reject-rules-extra
+                           (dolist (entry (cdr dir-local-vars))
+                             (when (memq (car entry) '(claude-agent-auto-reject-rules
+                                                       claude-agent-auto-reject-rules-extra))
+                               (let ((rules (cdr entry)))
+                                 ;; rules can be a single plist or a list of plists
+                                 ;; Normalize to list of plists
+                                 (when rules
+                                   (if (and (listp rules) (keywordp (car rules)))
+                                       ;; Single plist like (:path-prefix "..." :message "...")
+                                       (when-let ((prefix (plist-get rules :path-prefix)))
+                                         (push prefix paths))
+                                     ;; List of plists
+                                     (dolist (rule rules)
+                                       (when-let ((prefix (plist-get rule :path-prefix)))
+                                         (push prefix paths)))))))))
+                         (nreverse paths)))
          ;; Build environment with optional additional tools files
          (env-vars `((CLAUDE_AGENT_CWD . ,expanded-work-dir)
                     (CLAUDE_AGENT_BUFFER_NAME . ,buffer-name)))
+         (env-vars (if reject-paths
+                      (append env-vars
+                              `((CLAUDE_AUTO_REJECT_PATHS . ,(mapconcat #'identity reject-paths "\x1f"))))
+                    env-vars))
          (env-vars (if claude-additional-tools-files
                       (append env-vars
                               `((CLAUDE_MCP_ADDITIONAL_TOOLS_FILES . ,(string-join claude-additional-tools-files ":"))))
