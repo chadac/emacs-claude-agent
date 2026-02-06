@@ -7,15 +7,19 @@
 ;; This module provides multi-agent support for Claude, allowing:
 ;; - Spawning multiple Claude agents per project
 ;; - Listing all running agents
-;; - Sending messages between agents
+;; - Sending messages between agents (fire-and-forget or request/reply)
 ;; - Queuing messages for agents that are busy (thinking/waiting for permissions)
 ;;
 ;; Agents are identified by unique buffer names:
 ;; - Primary agent: *claude:<directory>*
 ;; - Additional agents: *claude:<directory>:<agent-name>*
 ;;
+;; Messaging API:
+;; - `send_message': Fire-and-forget message delivery (no reply expected)
+;; - `send_and_wait': Send a message and block until the recipient replies
+;;
 ;; This is the canonical home for all messaging-related functions.
-;; Do NOT define claude-mcp-message-agent, claude-mcp-list-agents,
+;; Do NOT define claude-mcp-send-message, claude-mcp-list-agents,
 ;; or claude-mcp-spawn-agent in other files.
 
 ;;; Code:
@@ -34,9 +38,10 @@
 ;; There are two distinct queue systems that serve different purposes:
 ;;
 ;; 1. `claude-mcp-message-queues' (this file, global hash table):
-;;    The inter-agent INBOX.  Stores messages from other agents so the
-;;    recipient can retrieve them later via the `check_messages' MCP tool.
-;;    This is a persistent record of received messages.
+;;    The inter-agent message store.  Used by `send_and_wait' to
+;;    collect reply messages from a specific sender.  Messages are
+;;    added here so they can be retrieved by the MCP server's async
+;;    polling loop.
 ;;
 ;; 2. `claude-agent--message-queue' (claude-agent-repl.el, buffer-local):
 ;;    The DELIVERY queue.  When a message needs to be sent to the Claude
@@ -44,14 +49,14 @@
 ;;    the message is queued here and automatically delivered when the
 ;;    agent becomes ready.  Messages are in FIFO order.
 ;;
-;; When `claude-mcp-message-agent' sends a message, it adds to BOTH:
-;; - The MCP inbox (so the agent can retrieve it via check_messages)
+;; When `claude-mcp-send-message' sends a message, it adds to BOTH:
+;; - The MCP message store (so send_and_wait can retrieve replies)
 ;; - The repl delivery queue (so it gets delivered to the process)
-;; This dual-queue approach is intentional: the inbox is the persistent
-;; record, the delivery queue handles timing.
+;; This dual-queue approach is intentional: the message store supports
+;; the request/reply pattern, the delivery queue handles timing.
 
 (defvar claude-mcp-message-queues (make-hash-table :test 'equal)
-  "Hash table mapping buffer names to inter-agent message inboxes.
+  "Hash table mapping buffer names to inter-agent message queues.
 Each queue is a list of plists with keys: :message, :sender, :timestamp.
 This is distinct from `claude-agent--message-queue' (the delivery queue);
 see the commentary above for the relationship between the two systems.")
@@ -80,6 +85,30 @@ If CLEAR is non-nil, removes the messages from the queue after retrieving them."
 Returns the count of messages without removing them."
   (length (gethash buffer-name claude-mcp-message-queues '())))
 
+(defun claude-mcp-message-queue-peek-from (buffer-name sender)
+  "Check for messages in BUFFER-NAME's queue from SENDER.
+Returns the first matching message plist, or nil if none found."
+  (let ((queue (gethash buffer-name claude-mcp-message-queues '())))
+    (cl-find-if (lambda (entry)
+                  (string= (plist-get entry :sender) sender))
+                queue)))
+
+(defun claude-mcp-message-queue-pop-from (buffer-name sender)
+  "Remove and return the first message from SENDER in BUFFER-NAME's queue.
+Returns the message plist, or nil if no matching message found."
+  (let* ((queue (gethash buffer-name claude-mcp-message-queues '()))
+         (found nil)
+         (new-queue '()))
+    (dolist (entry queue)
+      (if (and (not found) (string= (plist-get entry :sender) sender))
+          (setq found entry)
+        (push entry new-queue)))
+    (if found
+        (puthash buffer-name (nreverse new-queue) claude-mcp-message-queues)
+      ;; No change needed
+      )
+    found))
+
 (defun claude-mcp-message-queue-clear (buffer-name)
   "Clear all queued messages for BUFFER-NAME."
   (remhash buffer-name claude-mcp-message-queues))
@@ -91,35 +120,6 @@ Intended to be added to `kill-buffer-hook'."
     (claude-mcp-message-queue-clear (buffer-name))))
 
 (add-hook 'kill-buffer-hook #'claude-mcp-message-queue-cleanup)
-
-(defun claude-mcp-message-queue-format (buffer-name)
-  "Format queued messages for BUFFER-NAME as a human-readable string.
-Designed to be shown to Claude AI agents."
-  (let ((queue (gethash buffer-name claude-mcp-message-queues '())))
-    (if (null queue)
-        "No queued messages."
-      (with-temp-buffer
-        (insert (format "You have %d queued message%s:\n\n"
-                       (length queue)
-                       (if (> (length queue) 1) "s" "")))
-        (dolist (entry queue)
-          (let ((message (plist-get entry :message))
-                (sender (plist-get entry :sender))
-                (timestamp (plist-get entry :timestamp)))
-            (insert (format "From: %s\n" sender))
-            (insert (format "Time: %s\n" (format-time-string "%Y-%m-%d %H:%M:%S" timestamp)))
-            (insert (format "---\n"))
-            (insert message)
-            (insert "\n\n")))
-        (insert "IMPORTANT: To respond, use mcp__emacs__message_agent with:\n")
-        (insert "  buffer_name: <sender's buffer name from above>\n")
-        (insert "  message: <your response>\n")
-        (insert "Example: to reply to the first message above, call:\n")
-        (insert (format "  mcp__emacs__message_agent(buffer_name=\"%s\", message=\"...\")\n\n"
-                       (plist-get (car queue) :sender)))
-        (insert "To clear these messages after reading, use:\n")
-        (insert "  mcp__emacs__check_messages with clear=true\n")
-        (buffer-string)))))
 
 ;;;; Agent Management
 
@@ -166,7 +166,7 @@ Designed to be called via MCP by Claude AI."
 
     ;; Send initial prompt if provided
     (when initial-prompt
-      (claude-mcp-message-agent buffer-name initial-prompt))
+      (claude-mcp-send-message buffer-name initial-prompt))
 
     buffer-name))
 
@@ -210,34 +210,33 @@ Designed to be called via MCP by Claude AI."
       ;; Return the first match, or nil
       (car agents))))
 
-;;;; Message Checking
-
-(defun claude-mcp-check-messages (buffer-name &optional clear)
-  "Check queued messages for BUFFER-NAME.
-If CLEAR is non-nil, messages are removed from the queue after retrieval.
-Returns a formatted string with all queued messages and instructions on how to respond.
-Designed to be called via MCP by Claude AI agents to check their inbox."
-  (unless (get-buffer buffer-name)
-    (error "Buffer '%s' does not exist" buffer-name))
-  ;; Format FIRST, then clear -- so we return the messages before removing them
-  (let ((result (claude-mcp-message-queue-format buffer-name)))
-    (when clear
-      (claude-mcp-message-queue-clear buffer-name))
-    result))
-
 ;;;; Message Sending
 
-(defun claude-mcp-message-agent (buffer-name message &optional from-buffer)
+(defun claude-mcp-send-message (buffer-name message &optional from-buffer)
   "Send MESSAGE to the Claude agent in BUFFER-NAME.
 FROM-BUFFER is the sender's buffer name (defaults to \"unknown\").
 The message is:
-1. Added to the recipient's MCP-level message queue (for check_messages retrieval)
+1. Added to the recipient's MCP-level message queue (for send_and_wait reply matching)
 2. Logged to the message board
 3. Delivered to the agent: sent immediately if idle, queued in repl-level queue if busy
 
 When the agent is busy, the message will be automatically delivered when the agent
 becomes ready (via the repl's queue drain mechanism).
 Designed to be called via MCP by Claude AI."
+  (claude-mcp--deliver-message buffer-name message from-buffer nil))
+
+(defun claude-mcp-send-and-wait (buffer-name message &optional from-buffer)
+  "Send MESSAGE to BUFFER-NAME and tag it as expecting a reply.
+FROM-BUFFER is the sender's buffer name.
+Like `claude-mcp-send-message' but appends a reply reminder to the
+delivered message so the recipient knows the sender is waiting.
+The actual waiting/polling is done on the Python MCP server side.
+Returns a confirmation string."
+  (claude-mcp--deliver-message buffer-name message from-buffer t))
+
+(defun claude-mcp--deliver-message (buffer-name message from-buffer expecting-reply-p)
+  "Internal: deliver MESSAGE to BUFFER-NAME from FROM-BUFFER.
+If EXPECTING-REPLY-P is non-nil, append a reply reminder to the message."
   (unless (get-buffer buffer-name)
     (error "Buffer '%s' does not exist" buffer-name))
 
@@ -251,7 +250,7 @@ Designed to be called via MCP by Claude AI."
                    (process-live-p claude-agent--process))
         (error "Buffer '%s' does not have a live Claude agent process" buffer-name)))
 
-    ;; Add to MCP-level message queue (for check_messages retrieval)
+    ;; Add to MCP-level message queue (for send_and_wait reply matching)
     (let ((queue-size (claude-mcp-message-queue-add buffer-name message sender)))
 
       ;; Log to message board
@@ -259,7 +258,11 @@ Designed to be called via MCP by Claude AI."
 
       ;; Deliver the message to the agent's repl queue system directly.
       ;; We never manipulate the buffer -- we go through the queue or dispatch.
-      (let ((formatted-message (format "[From %s]: %s" sender message)))
+      (let ((formatted-message
+             (if expecting-reply-p
+                 (format "[From %s]: %s\n\nNOTE: The sender is waiting for your reply. Respond with:\n  send_message(buffer_name=\"%s\", message=\"...\")\nor:\n  send_and_wait(buffer_name=\"%s\", message=\"...\")"
+                         sender message sender sender)
+               (format "[From %s]: %s" sender message))))
         (with-current-buffer buffer-name
           (if (claude-agent--is-busy-p)
               ;; Agent is busy -- append to repl-level queue (FIFO) for later delivery
@@ -270,8 +273,11 @@ Designed to be called via MCP by Claude AI."
             ;; Agent is idle -- deliver immediately via dispatch
             (claude-agent--dispatch-user-message formatted-message))))
 
-      (format "Message sent to %s from %s (%d message%s in MCP queue)."
+      (format "Message sent to %s from %s (%d message%s in queue)."
               buffer-name sender queue-size (if (> queue-size 1) "s" "")))))
+
+;; Backward compatibility alias
+(defalias 'claude-mcp-message-agent #'claude-mcp-send-message)
 
 ;;;; Message Board (Org-Mode Buffer)
 
@@ -389,7 +395,7 @@ Counts messages by sender/recipient pairs."
 ;;;; Tool Registrations
 
 (claude-mcp-deftool spawn-agent
-  "Spawn a new Claude agent in a directory. Returns the buffer name for monitoring. Note: To send an initial message to the agent after spawning, use message_agent separately (TODO: MCP server will handle this automatically)."
+  "Spawn a new Claude agent in a directory. Returns the buffer name for monitoring."
   :function #'claude-mcp-spawn-agent
   :safe t
   :args ((directory string :required "Directory path where the agent should work (will be expanded)")
@@ -401,20 +407,18 @@ Counts messages by sender/recipient pairs."
   :safe t
   :args ())
 
-(claude-mcp-deftool message-agent
-  "Send a message to another running agent. Messages are queued and can be checked by the recipient using check_messages."
-  :function #'claude-mcp-message-agent
+(claude-mcp-deftool send-message
+  "Send a message to another agent without waiting for a reply (fire-and-forget). The message is delivered immediately if the recipient is idle, or queued for delivery when the recipient becomes ready. Use send_and_wait instead if you need a response."
+  :function #'claude-mcp-send-message
   :safe t
-  :args ((buffer-name string :required "Buffer name of the agent (from list_agents or spawn_agent)")
-         (message string :required "Message to send as user input to the agent")
+  :args ((buffer-name string :required "Buffer name of the recipient agent (from list_agents or spawn_agent)")
+         (message string :required "Message to send to the agent")
          (from-buffer string "Optional sender buffer name (auto-detected if not provided)")))
 
-(claude-mcp-deftool check-messages
-  "Check queued messages for an agent. Returns formatted messages with sender info and instructions on how to respond. Use this to check your inbox."
-  :function #'claude-mcp-check-messages
-  :safe t
-  :args ((buffer-name string :required "Buffer name of the agent to check messages for")
-         (clear boolean "Whether to clear messages after reading (default: false)")))
+;; NOTE: send_and_wait is registered as a native Python tool in server.py
+;; because the async polling loop (waiting for a reply) must run in Python.
+;; The elisp function claude-mcp-send-and-wait handles the message delivery;
+;; Python handles the blocking wait.
 
 (claude-mcp-deftool message-board-summary
   "Get a summary of messages sent between agents. Shows message counts for each sender/recipient pair."

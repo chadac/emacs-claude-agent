@@ -2599,9 +2599,9 @@ This function:
            ;; Build a custom message with reporter info
            (msg (format "[WORKTREE TASK]\n\n%s\n\nWorktree: %s\n\n\
 IMPORTANT: This bug was filed by the agent in buffer `%s`.\n\
-When your fix is ready to test, use `mcp__emacs__message_agent` to message\n\
+When your fix is ready to test, use `mcp__emacs__send_message` to message\n\
 that buffer and ask them to verify the fix. For example:\n\
-  mcp__emacs__message_agent(buffer_name=\"%s\", message=\"Fix is ready...\")\n\
+  mcp__emacs__send_message(buffer_name=\"%s\", message=\"Fix is ready...\")\n\
 Do NOT call todo_complete until the reporter has confirmed the fix works."
                         content worktree-path
                         reporter-buffer reporter-buffer)))
@@ -2624,7 +2624,7 @@ Do NOT call todo_complete until the reporter has confirmed the fix works."
          (todo_file . ,todo-file)
          (worktree_path . ,worktree-path)
          (branch . ,branch-name)
-         (instructions . "The agent is now working on the fix. It will message you back when the fix is ready to test. You can also send follow-up context with message_agent(buffer_name, message)."))))))
+         (instructions . "The agent is now working on the fix. It will message you back when the fix is ready to test. You can also send follow-up context with send_message(buffer_name, message)."))))))
 
 (defun org-roam-todo-mcp-complete (&optional summary commit-message unsafe-ignore-unstaged)
   "Mark the current TODO as ready for review.
@@ -2909,7 +2909,7 @@ files were modified. Review the changes, re-stage them, and call todo_complete a
 Creates a TODO for the claude-agent project, sets up a git worktree, spawns
 a new Claude agent to fix the bug, and sends it the bug report.  Returns
 the buffer name of the spawned agent so you can monitor progress via
-message_agent / check_messages.
+send_message / send_and_wait.
 
 Use this when an MCP tool (mcp__emacs__*) returns an unexpected error,
 behaves incorrectly, or when the REPL infrastructure malfunctions.

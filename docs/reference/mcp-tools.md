@@ -534,9 +534,9 @@ List all running agents.
 
 ---
 
-### message_agent
+### send_message
 
-Send message to another agent.
+Send a message to another agent without waiting for a reply (fire-and-forget). Use `send_and_wait` if you need a response.
 
 **Parameters:**
 
@@ -544,20 +544,21 @@ Send message to another agent.
 |------|------|----------|-------------|
 | `buffer_name` | string | Yes | Target agent buffer |
 | `message` | string | Yes | Message to send |
-| `from_buffer` | string | No | Sender buffer |
+| `from_buffer` | string | No | Sender buffer (auto-detected) |
 
 ---
 
-### check_messages
+### send_and_wait
 
-Check queued messages.
+Send a message to another agent and wait for their reply. The recipient sees a reminder that you are waiting. Blocks until the recipient responds or timeout expires.
 
 **Parameters:**
 
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
-| `buffer_name` | string | Yes | Agent buffer |
-| `clear` | boolean | No | Clear after reading |
+| `buffer_name` | string | Yes | Recipient agent buffer |
+| `message` | string | Yes | Message to send |
+| `timeout` | integer | No | Max seconds to wait (default: 1800) |
 
 ---
 

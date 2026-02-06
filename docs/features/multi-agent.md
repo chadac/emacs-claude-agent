@@ -57,30 +57,26 @@ mcp__emacs__list_agents()
 
 ## Inter-Agent Communication
 
-### Sending Messages
+### Fire-and-Forget Messages
 
 ```python
-# Send a message to another agent
-mcp__emacs__message_agent(
+# Send a message without waiting for a reply
+mcp__emacs__send_message(
     buffer_name="*claudemacs:/project:backend*",
     message="Please update the API endpoint for user auth"
 )
 ```
 
-### Checking Messages
+### Request/Reply Messages
 
 ```python
-# Check your inbox
-mcp__emacs__check_messages(
-    buffer_name="*claudemacs:/project:frontend*"
+# Send a message and wait for the recipient to reply
+reply = mcp__emacs__send_and_wait(
+    buffer_name="*claudemacs:/project:backend*",
+    message="What is the current API schema for user auth?",
+    timeout=300  # Wait up to 5 minutes (default: 30 minutes)
 )
-# Returns formatted messages with sender info
-
-# Clear after reading
-mcp__emacs__check_messages(
-    buffer_name="*claudemacs:/project:frontend*",
-    clear=True
-)
+# Returns the reply message content, or a timeout indicator
 ```
 
 ### Message Board Summary
@@ -190,10 +186,9 @@ C-c C-e k    ; Kill current agent from transient menu
 ## Tips
 
 1. **Name your agents** - Use descriptive names like "backend", "tests", "docs"
-2. **Check messages regularly** - Agents should poll their inbox
+2. **Use `send_and_wait` for coordination** - When you need a response, use `send_and_wait` instead of `send_message`
 3. **Use clear handoffs** - Include context when messaging between agents
 4. **Monitor the board** - Use `message_board_summary` to track coordination
-
 ## Limitations
 
 - Agents share no state beyond explicit messages

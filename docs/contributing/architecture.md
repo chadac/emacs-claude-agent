@@ -214,18 +214,16 @@ claude-mcp--message-queues
 ### Agent Coordination
 
 ```
-Agent A                     Agent B
-   │                           │
-   ├── message_agent(B, msg) ──┤
-   │                           │
-   │                     check_messages()
-   │                           │
-   │                     process message
-   │                           │
-   │◄── message_agent(A, reply)│
-   │                           │
-check_messages()               │
-   │                           │
+Agent A                        Agent B
+   │                              │
+   ├── send_and_wait(B, msg) ─────┤
+   │                              │
+   │   (A is blocked, waiting)    │  process message
+   │                              │
+   │◄── send_message(A, reply) ───┤
+   │                              │
+   │   (A receives reply)         │
+   │                              │
 ```
 
 ## Session State

@@ -122,7 +122,7 @@ C-c C-e s    Start a new session
 C-c C-e S    Spawn in another directory
 ```
 
-Agents communicate through a message queue system — `spawn_agent`, `message_agent`, `check_messages`, `list_agents`. Useful for divide-and-conquer workflows on large codebases.
+Agents communicate through a messaging system — `spawn_agent`, `send_message`, `send_and_wait`, `list_agents`. Useful for divide-and-conquer workflows on large codebases.
 
 ### Interactive Prompts
 

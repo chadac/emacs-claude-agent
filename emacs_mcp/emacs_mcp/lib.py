@@ -1140,6 +1140,7 @@ async def reload_elisp_file(file_paths: list[str] | str) -> str:
 
 
 
-# Agent messaging functions (spawn_agent, list_agents, message_agent,
-# check_messages, message_board_summary) have been moved to elisp deftool
-# registrations in claude-mcp-messaging.el. No Python wrappers needed.
+# Agent messaging functions (spawn_agent, list_agents, send_message,
+# message_board_summary) are registered via elisp deftool in
+# claude-mcp-messaging.el.  send_and_wait is a native Python tool
+# in server.py (async polling loop for reply).

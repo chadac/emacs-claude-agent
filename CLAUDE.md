@@ -90,15 +90,6 @@ claude-mcp.el → claude-agent-repl.el → claude-mcp-process.el → claude-agen
 
 The `claude-restart` command (or `mcp__emacs__restart_session`) kills the current session, reloads elisp, and restarts with `--continue`.
 
-### Running Tests
-
-```bash
-make test          # Unit tests (default)
-make test-unit     # Unit tests only
-make test-all      # Unit + integration + e2e
-make test-tdd      # TDD batch-mode tests
-```
-
 ### Python Development
 
 Both Python packages use `uv` for dependency management:

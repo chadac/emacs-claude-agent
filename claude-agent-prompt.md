@@ -72,7 +72,7 @@ gets fixed:
    the bug report. It returns JSON with the `agent_buffer` name.
 
 3. **Follow up** (optional): You can send additional context to the fix agent
-   via `mcp__emacs__message_agent(buffer_name=<agent_buffer>, message=...)`.
+   via `mcp__emacs__send_message(buffer_name=<agent_buffer>, message=...)`.
 
 4. **Continue your work**: After filing the bug, work around the issue for now
    and continue with your primary task. The fix agent works in parallel.

@@ -163,7 +163,7 @@ This test fails if a core tool is missing test coverage."
   :tags '(:unit :mcp :coverage)
   (let* ((result (claude-mcp-check-test-coverage))
          (tested (plist-get result :tested)))
-    (dolist (tool '("check_messages" "message_board_summary" "list_agents"))
+    (dolist (tool '("send_message" "message_board_summary" "list_agents"))
       (should (member tool tested)))))
 
 (ert-deftest claude-mcp-coverage-test-todo-tools-have-tests ()

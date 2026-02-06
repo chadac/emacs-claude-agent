@@ -6,7 +6,7 @@
 
 ;;; Commentary:
 ;; Unit tests for the multi-agent messaging system in claude-mcp-messaging.el.
-;; Covers: message queue operations, check_messages, message_board_summary,
+;; Covers: message queue operations, queue peek/pop-from, message_board_summary,
 ;; list_agents, and tool registration.
 ;;
 ;; Run with:
@@ -94,62 +94,57 @@
     (claude-mcp-message-queue-clear "*claude:test*")
     (should (= 0 (claude-mcp-message-queue-peek "*claude:test*")))))
 
-(ert-deftest claude-mcp-messaging-test-queue-format-empty ()
-  "Test formatting empty queue."
-  :tags '(:unit :mcp :messaging)
-  (claude-mcp-messaging-test-with-clean-queues
-    (let ((result (claude-mcp-message-queue-format "*claude:test*")))
-      (should (string= "No queued messages." result)))))
-
-(ert-deftest claude-mcp-messaging-test-queue-format-with-messages ()
-  "Test formatting queue with messages."
-  :tags '(:unit :mcp :messaging)
-  (claude-mcp-messaging-test-with-clean-queues
-    (claude-mcp-message-queue-add "*claude:test*" "hello there" "*claude:sender*")
-    (let ((result (claude-mcp-message-queue-format "*claude:test*")))
-      (should (stringp result))
-      (should (string-match-p "1 queued message" result))
-      (should (string-match-p "hello there" result))
-      (should (string-match-p "\\*claude:sender\\*" result))
-      (should (string-match-p "IMPORTANT" result)))))
-
 ;;; ============================================================
-;;; check_messages Tests
+;;; Queue peek-from / pop-from Tests (for send_and_wait support)
 ;;; ============================================================
 
-(ert-deftest claude-mcp-messaging-test-check-messages-happy-path ()
-  "Test checking messages for a buffer."
+(ert-deftest claude-mcp-messaging-test-queue-peek-from ()
+  "Test peeking at messages from a specific sender."
   :tags '(:unit :mcp :messaging)
   (claude-mcp-messaging-test-with-clean-queues
-    (let ((buf (get-buffer-create " *test-check-msg*")))
-      (unwind-protect
-          (progn
-            (claude-mcp-message-queue-add (buffer-name buf) "test message" "*claude:sender*")
-            (let ((result (claude-mcp-check-messages (buffer-name buf))))
-              (should (stringp result))
-              (should (string-match-p "test message" result))))
-        (kill-buffer buf)))))
+    ;; Empty queue returns nil
+    (should-not (claude-mcp-message-queue-peek-from "*claude:test*" "*claude:sender*"))
+    ;; Add messages from different senders
+    (claude-mcp-message-queue-add "*claude:test*" "from-a" "*claude:a*")
+    (claude-mcp-message-queue-add "*claude:test*" "from-b" "*claude:b*")
+    ;; Peek for specific sender
+    (let ((msg (claude-mcp-message-queue-peek-from "*claude:test*" "*claude:b*")))
+      (should msg)
+      (should (string= "from-b" (plist-get msg :message)))
+      (should (string= "*claude:b*" (plist-get msg :sender))))
+    ;; Peek for non-existent sender returns nil
+    (should-not (claude-mcp-message-queue-peek-from "*claude:test*" "*claude:c*"))
+    ;; Peek doesn't remove the message
+    (should (= 2 (claude-mcp-message-queue-peek "*claude:test*")))))
 
-(ert-deftest claude-mcp-messaging-test-check-messages-with-clear ()
-  "Test checking messages with clear flag."
+(ert-deftest claude-mcp-messaging-test-queue-pop-from ()
+  "Test popping a message from a specific sender."
   :tags '(:unit :mcp :messaging)
   (claude-mcp-messaging-test-with-clean-queues
-    (let ((buf (get-buffer-create " *test-check-clear*")))
-      (unwind-protect
-          (progn
-            (claude-mcp-message-queue-add (buffer-name buf) "msg1" "*claude:s*")
-            ;; Check with clear
-            (claude-mcp-check-messages (buffer-name buf) t)
-            ;; Queue should be empty now
-            (let ((result (claude-mcp-check-messages (buffer-name buf))))
-              (should (string-match-p "No queued messages" result))))
-        (kill-buffer buf)))))
-
-(ert-deftest claude-mcp-messaging-test-check-messages-nonexistent-buffer ()
-  "Test checking messages for nonexistent buffer errors."
-  :tags '(:unit :mcp :messaging)
-  (should-error (claude-mcp-check-messages "nonexistent-xyz")
-                :type 'error))
+    ;; Empty queue returns nil
+    (should-not (claude-mcp-message-queue-pop-from "*claude:test*" "*claude:sender*"))
+    ;; Add messages from different senders
+    (claude-mcp-message-queue-add "*claude:test*" "from-a" "*claude:a*")
+    (claude-mcp-message-queue-add "*claude:test*" "from-b" "*claude:b*")
+    (claude-mcp-message-queue-add "*claude:test*" "from-a-2" "*claude:a*")
+    ;; Pop from sender b
+    (let ((msg (claude-mcp-message-queue-pop-from "*claude:test*" "*claude:b*")))
+      (should msg)
+      (should (string= "from-b" (plist-get msg :message))))
+    ;; Only 2 messages remain
+    (should (= 2 (claude-mcp-message-queue-peek "*claude:test*")))
+    ;; Pop from sender a gets the first one
+    (let ((msg (claude-mcp-message-queue-pop-from "*claude:test*" "*claude:a*")))
+      (should msg)
+      (should (string= "from-a" (plist-get msg :message))))
+    ;; One message remains (from-a-2)
+    (should (= 1 (claude-mcp-message-queue-peek "*claude:test*")))
+    ;; Pop the last one
+    (let ((msg (claude-mcp-message-queue-pop-from "*claude:test*" "*claude:a*")))
+      (should msg)
+      (should (string= "from-a-2" (plist-get msg :message))))
+    ;; Queue is empty
+    (should (= 0 (claude-mcp-message-queue-peek "*claude:test*")))))
 
 ;;; ============================================================
 ;;; Message Board Tests
@@ -227,6 +222,16 @@
       (should (stringp result)))))
 
 ;;; ============================================================
+;;; Backward Compatibility Tests
+;;; ============================================================
+
+(ert-deftest claude-mcp-messaging-test-message-agent-alias ()
+  "Test that claude-mcp-message-agent is an alias for claude-mcp-send-message."
+  :tags '(:unit :mcp :messaging)
+  (should (eq (symbol-function 'claude-mcp-message-agent)
+              (symbol-function 'claude-mcp-send-message))))
+
+;;; ============================================================
 ;;; Tool Registration Tests
 ;;; ============================================================
 
@@ -235,19 +240,31 @@
   :tags '(:unit :mcp :messaging :registration)
   (should (gethash "spawn_agent" claude-mcp-tools))
   (should (gethash "list_agents" claude-mcp-tools))
-  (should (gethash "message_agent" claude-mcp-tools))
-  (should (gethash "check_messages" claude-mcp-tools))
-  (should (gethash "message_board_summary" claude-mcp-tools)))
+  (should (gethash "send_message" claude-mcp-tools))
+  (should (gethash "message_board_summary" claude-mcp-tools))
+  ;; check_messages and message_agent should NOT be registered
+  (should-not (gethash "check_messages" claude-mcp-tools))
+  (should-not (gethash "message_agent" claude-mcp-tools))
+  ;; send_and_wait is a native Python tool, not in the elisp registry
+  (should-not (gethash "send_and_wait" claude-mcp-tools)))
 
 (ert-deftest claude-mcp-messaging-test-tools-have-descriptions ()
   "Test that messaging tools have descriptions."
   :tags '(:unit :mcp :messaging :registration)
-  (dolist (tool-name '("spawn_agent" "list_agents" "message_agent"
-                       "check_messages" "message_board_summary"))
+  (dolist (tool-name '("spawn_agent" "list_agents" "send_message"
+                       "message_board_summary"))
     (let ((tool-def (gethash tool-name claude-mcp-tools)))
       (should tool-def)
       (should (stringp (plist-get tool-def :description)))
       (should (> (length (plist-get tool-def :description)) 0)))))
+
+(ert-deftest claude-mcp-messaging-test-send-message-description ()
+  "Test that send_message description mentions send_and_wait."
+  :tags '(:unit :mcp :messaging :registration)
+  (let* ((tool-def (gethash "send_message" claude-mcp-tools))
+         (desc (plist-get tool-def :description)))
+    (should (string-match-p "send_and_wait" desc))
+    (should (string-match-p "fire-and-forget\\|without waiting" desc))))
 
 (provide 'claude-mcp-messaging-test)
 ;;; claude-mcp-messaging-test.el ends here

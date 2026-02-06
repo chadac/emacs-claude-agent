@@ -34,9 +34,9 @@ Tools for working with Emacs buffers:
 ### 3. Multi-Agent System
 
 - `spawn_agent`: Create new Claude agents in different directories
-- `message_agent`: Send messages between agents
+- `send_message`: Send a fire-and-forget message to another agent
+- `send_and_wait`: Send a message and wait for a reply
 - `list_agents`: See all running agents
-- `check_messages`: Check queued messages for an agent
 
 ### 4. Project Notes (Org-Mode)
 

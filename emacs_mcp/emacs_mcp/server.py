@@ -9,6 +9,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 import uuid
 from pathlib import Path
 
@@ -84,9 +85,19 @@ NATIVE_TOOLS: dict = {
             "file_paths": {"type": "array", "description": "Array of file paths to reload in order (use when loading multiple files)", "required": False},
         },
     },
-    # Agent messaging tools (spawn_agent, list_agents, message_agent,
-    # check_messages, message_board_summary) are now registered via
-    # claude-mcp-deftool in claude-mcp-messaging.el
+    # Agent messaging tools: spawn_agent, list_agents, send_message,
+    # message_board_summary are registered via claude-mcp-deftool in
+    # claude-mcp-messaging.el.  send_and_wait lives here because the
+    # async polling loop (waiting for a reply) must run in Python.
+    "send_and_wait": {
+        "description": "Send a message to another agent and wait for their reply. The recipient will see a reminder that you are waiting. Blocks until the recipient sends a message back to you (via send_message or send_and_wait), or until the timeout expires. Returns the reply message content on success, or a timeout indicator. Use this when you need a response from another agent.",
+        "safe": True,
+        "args": {
+            "buffer_name": {"type": "string", "description": "Buffer name of the recipient agent", "required": True},
+            "message": {"type": "string", "description": "Message to send to the agent", "required": True},
+            "timeout": {"type": "integer", "description": "Max seconds to wait for reply (default: 1800 = 30 minutes)"},
+        },
+    },
     "whoami": {
         "description": "Get the buffer name/identity of the current claudemacs session. Use this to identify yourself when sending messages or logging actions.",
         "safe": True,
@@ -570,8 +581,8 @@ async def handle_native_tool(name: str, arguments: dict) -> str:
         result = await lib.reload_elisp_file(file_paths)
         return result
 
-    # spawn_agent, list_agents, message_agent, check_messages,
-    # message_board_summary are now handled via deftool (elisp side)
+    elif name == "send_and_wait":
+        return await handle_send_and_wait(arguments)
 
     elif name == "whoami":
         if not SESSION_BUFFER_NAME:
@@ -580,6 +591,86 @@ async def handle_native_tool(name: str, arguments: dict) -> str:
 
     else:
         raise ValueError(f"Unknown native tool: {name}")
+
+
+async def handle_send_and_wait(arguments: dict) -> str:
+    """Handle send_and_wait: send message then poll for reply.
+
+    1. Call elisp claude-mcp-send-and-wait to deliver the message
+       (with reply reminder for recipient)
+    2. Poll the sender's MCP message queue for a reply from the recipient
+    3. Return the reply content, or timeout indicator
+    """
+    recipient = arguments["buffer_name"]
+    message = arguments["message"]
+    timeout = float(arguments.get("timeout", 1800))
+
+    # Determine sender (this agent's buffer name)
+    sender = SESSION_BUFFER_NAME
+    if not sender:
+        raise ValueError(
+            "Buffer name not configured - CLAUDE_AGENT_BUFFER_NAME "
+            "environment variable is not set. Cannot use send_and_wait "
+            "without a session identity."
+        )
+
+    escaped_recipient = escape_elisp_string(recipient)
+    escaped_message = escape_elisp_string(message)
+    escaped_sender = escape_elisp_string(sender)
+
+    # Step 1: Deliver the message via elisp (with reply reminder)
+    elisp_expr = (
+        f'(claude-mcp-send-and-wait '
+        f'"{escaped_recipient}" '
+        f'"{escaped_message}" '
+        f'"{escaped_sender}")'
+    )
+    delivery_result = await lib.call_emacs_async(elisp_expr, timeout=10)
+    if delivery_result.startswith('"') and delivery_result.endswith('"'):
+        delivery_result = lib.unescape_elisp_string(delivery_result)
+
+    # Step 2: Poll the sender's queue for a reply from the recipient
+    # Use the same async polling pattern as watch_for_pattern
+    start_time = time.time()
+    poll_interval = 1.0  # Check every second
+
+    escaped_sender_for_peek = escape_elisp_string(sender)
+    escaped_recipient_for_peek = escape_elisp_string(recipient)
+
+    while (time.time() - start_time) < timeout:
+        # Ask Emacs if there's a message from the recipient in the sender's queue
+        peek_elisp = (
+            f'(let ((msg (claude-mcp-message-queue-peek-from '
+            f'"{escaped_sender_for_peek}" '
+            f'"{escaped_recipient_for_peek}")))'
+            f'  (if msg "found" "nil"))'
+        )
+        peek_result = await lib.call_emacs_async(peek_elisp, timeout=5)
+        if peek_result.startswith('"') and peek_result.endswith('"'):
+            peek_result = lib.unescape_elisp_string(peek_result)
+
+        if peek_result == "found":
+            # Pop the reply message from the queue and return it
+            pop_elisp = (
+                f'(let ((msg (claude-mcp-message-queue-pop-from '
+                f'"{escaped_sender_for_peek}" '
+                f'"{escaped_recipient_for_peek}")))'
+                f'  (if msg (plist-get msg :message) ""))'
+            )
+            pop_result = await lib.call_emacs_async(pop_elisp, timeout=5)
+            if pop_result.startswith('"') and pop_result.endswith('"'):
+                pop_result = lib.unescape_elisp_string(pop_result)
+            return f"[Reply from {recipient}]: {pop_result}"
+
+        await asyncio.sleep(poll_interval)
+
+    # Timeout
+    return (
+        f"TIMEOUT: No reply received from {recipient} within "
+        f"{int(timeout)} seconds. The message was delivered successfully, "
+        f"but the recipient did not respond in time. You can try again "
+        f"with send_and_wait, or use send_message for fire-and-forget."
+    )
 
 
 @app.call_tool()
@@ -607,8 +698,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             if SESSION_BUFFER_NAME:
                 arguments["agent_name"] = SESSION_BUFFER_NAME
 
-        # Auto-inject from_buffer for message_agent if not provided
-        if name == "message_agent" and not arguments.get("from_buffer"):
+        # Auto-inject from_buffer for send_message if not provided
+        if name == "send_message" and not arguments.get("from_buffer"):
             if SESSION_BUFFER_NAME:
                 arguments["from_buffer"] = SESSION_BUFFER_NAME
 

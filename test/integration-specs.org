@@ -120,20 +120,19 @@ A test runner agent will:
 
 * Messaging Tools
 
-** message_agent: send message between agents
+** send_message: fire-and-forget message between agents
 - Note: Requires two running agent sessions
-- Agent A calls message_agent targeting Agent B with "Hello from A"
-- Agent B calls check_messages
+- Agent A calls send_message targeting Agent B with "Hello from A"
 - Verify: Agent B receives the message from Agent A
 - Verify: message contains sender identity
 
-** check_messages: returns formatted messages
-- Queue a message manually for the current agent
-- Call check_messages
-- Verify: result contains the queued message
-- Call check_messages with clear=true
-- Call check_messages again
-- Verify: queue is now empty
+** send_and_wait: request/reply between agents
+- Note: Requires two running agent sessions
+- Agent A calls send_and_wait targeting Agent B with "What is your status?"
+- Verify: Agent B receives the message with a reply reminder
+- Agent B calls send_message targeting Agent A with "All good"
+- Verify: Agent A receives the reply content
+- Verify: send_and_wait returns timeout indicator if no reply within timeout
 
 ** message_board_summary: shows overview
 - Log several messages between different agents
