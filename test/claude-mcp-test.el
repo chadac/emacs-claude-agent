@@ -204,6 +204,27 @@ Cleans up the buffer after BODY completes."
     (should-error (claude-mcp-write-region (buffer-name) "new" nil nil)
                   :type 'error)))
 
+(ert-deftest claude-mcp-test-write-region-auto-detect-buffer ()
+  "Test that edit auto-detects buffer when only one buffer has a lock."
+  :tags '(:unit :mcp :edit)
+  (claude-mcp-test-with-named-buffer " *test-edit-autodetect*" "line1\nline2\n"
+    (claude-mcp-lock-region (buffer-name) 1 1 "TestAgent")
+    ;; Call write-region with nil buffer-name - should auto-detect
+    (let ((result (claude-mcp-write-region nil "auto-detected" nil nil)))
+      (should (stringp result))
+      (should (string-match-p "Replaced" result)))
+    ;; Verify content changed
+    (let ((content (buffer-substring-no-properties (point-min) (point-max))))
+      (should (string-match-p "auto-detected" content)))))
+
+(ert-deftest claude-mcp-test-write-region-no-buffer-no-lock-error ()
+  "Test that editing without buffer_name/file_path and no locks gives helpful error."
+  :tags '(:unit :mcp :edit)
+  (claude-mcp-test-with-named-buffer " *test-edit-noargs*" "line1\n"
+    ;; No lock, no buffer specified - should error with helpful message
+    (let ((err (should-error (claude-mcp-write-region nil "new" nil nil)
+                             :type 'error)))
+      (should (string-match-p "auto-detect" (error-message-string err))))))
 (ert-deftest claude-mcp-test-write-region-multiline-expansion ()
   "Test editing a single line to multiple lines."
   :tags '(:unit :mcp :edit)
@@ -526,6 +547,72 @@ Cleans up the buffer after BODY completes."
     (should (plist-get lock-def :description))
     (should (plist-get lock-def :function))
     (should (plist-get lock-def :args))))
+
+;;; ============================================================
+;;; Large Buffer Performance Tests
+;;; ============================================================
+
+(ert-deftest claude-mcp-test-lock-edit-large-buffer ()
+  "Test that lock and edit work correctly on large buffers (3000+ lines)."
+  :tags '(:unit :mcp :performance)
+  (claude-mcp-test-with-named-buffer " *test-large*"
+      ;; Generate a buffer with 5000 lines
+      (mapconcat (lambda (n) (format "line %d: content here" n))
+                 (number-sequence 1 5000)
+                 "\n")
+    ;; Lock a region near the end of the buffer
+    (let ((result (claude-mcp-lock-region (buffer-name) 4990 4995 "TestAgent")))
+      (should (stringp result))
+      (should (string-match-p "Locked" result))
+      (should (string-match-p "lines 4990-4995" result)))
+    ;; Edit the locked region
+    (let ((result (claude-mcp-write-region (buffer-name) "replaced line 1\nreplaced line 2" nil nil)))
+      (should (stringp result))
+      (should (string-match-p "Replaced" result)))
+    ;; Verify the content was changed
+    (goto-char (point-min))
+    (forward-line 4989)  ; Go to line 4990
+    (should (looking-at "replaced line 1"))))
+
+(ert-deftest claude-mcp-test-multiple-locks-large-buffer ()
+  "Test multiple locks and edits on a large buffer."
+  :tags '(:unit :mcp :performance)
+  (claude-mcp-test-with-named-buffer " *test-large-multi*"
+      ;; Generate a buffer with 3000 lines
+      (mapconcat (lambda (n) (format "line %d" n))
+                 (number-sequence 1 3000)
+                 "\n")
+    ;; Lock multiple regions (spread throughout the buffer)
+    (claude-mcp-lock-region (buffer-name) 100 105 "TestAgent")
+    (claude-mcp-lock-region (buffer-name) 1500 1505 "TestAgent")
+    (claude-mcp-lock-region (buffer-name) 2900 2905 "TestAgent")
+    (should (= 3 (hash-table-count claude-mcp--locked-regions)))
+    ;; Get lock IDs in order
+    (let ((lock-ids nil))
+      (maphash (lambda (id _) (push id lock-ids)) claude-mcp--locked-regions)
+      ;; Edit the first lock (should work without performance issues)
+      (let ((first-id (car (sort lock-ids #'string<))))
+        (claude-mcp-write-region (buffer-name) "edited region" nil first-id))
+      ;; Two locks should remain
+      (should (= 2 (hash-table-count claude-mcp--locked-regions))))))
+
+(ert-deftest claude-mcp-test-lock-edit-performance-timing ()
+  "Test that lock and edit complete in reasonable time on large buffers.
+This test ensures operations complete within 2 seconds even on 5000 line buffers."
+  :tags '(:unit :mcp :performance)
+  (claude-mcp-test-with-named-buffer " *test-perf*"
+      ;; Generate a buffer with 5000 lines
+      (mapconcat (lambda (n) (format "line %d: some content to make lines longer" n))
+                 (number-sequence 1 5000)
+                 "\n")
+    (let ((start-time (float-time)))
+      ;; Lock a region at the end
+      (claude-mcp-lock-region (buffer-name) 4500 4510 "TestAgent")
+      ;; Edit it
+      (claude-mcp-write-region (buffer-name) "new content" nil nil)
+      (let ((elapsed (- (float-time) start-time)))
+        ;; Should complete in under 2 seconds (generous limit)
+        (should (< elapsed 2.0))))))
 
 (provide 'claude-mcp-test)
 ;;; claude-mcp-test.el ends here

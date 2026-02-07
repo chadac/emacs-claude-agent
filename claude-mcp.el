@@ -887,15 +887,36 @@ LOCK-ID specifies which lock to unlock; if nil and only one lock exists, uses th
          (file-path string "Path to file - used to find buffer if buffer-name doesn't match")
          (lock-id string "Lock ID to unlock (from lock response). Optional if only one lock exists.")))
 
+(defun claude-mcp--find-buffer-with-lock ()
+  "Find a buffer that has an active lock, if there's exactly one.
+Returns the buffer or nil if zero or multiple buffers have locks."
+  (let ((buffers-with-locks nil))
+    (dolist (buf (buffer-list))
+      (with-current-buffer buf
+        (when (and (boundp 'claude-mcp--locked-regions)
+                   claude-mcp--locked-regions
+                   (> (hash-table-count claude-mcp--locked-regions) 0))
+          (push buf buffers-with-locks))))
+    (when (= (length buffers-with-locks) 1)
+      (car buffers-with-locks))))
+
 (defun claude-mcp-write-region (buffer-name content &optional file-path lock-id)
   "Replace a locked region in BUFFER-NAME with CONTENT.
 The lock must have been acquired with lock-region first.
 If the buffer was unmodified before locking, it will be auto-saved after writing.
 FILE-PATH can be provided to find the buffer by file path.
-LOCK-ID specifies which lock to edit; if nil and only one lock exists, uses that."
-  (let ((buf (claude-mcp--get-buffer buffer-name file-path)))
+LOCK-ID specifies which lock to edit; if nil and only one lock exists, uses that.
+
+If neither BUFFER-NAME nor FILE-PATH is provided, attempts to auto-detect
+the buffer if exactly one buffer has an active lock."
+  (let ((buf (or (claude-mcp--get-buffer buffer-name file-path)
+                 ;; Auto-detect buffer if neither specified
+                 (and (not buffer-name) (not file-path)
+                      (claude-mcp--find-buffer-with-lock)))))
     (unless buf
-      (error "Buffer '%s' does not exist" (or buffer-name file-path)))
+      (if (and (not buffer-name) (not file-path))
+          (error "No buffer_name or file_path provided, and could not auto-detect buffer (either no locks exist or multiple buffers have locks)")
+        (error "Buffer '%s' does not exist" (or buffer-name file-path))))
     (with-current-buffer buf
       (claude-mcp--ensure-locked-regions)
       (let ((resolved-id (claude-mcp--resolve-lock-id lock-id)))
