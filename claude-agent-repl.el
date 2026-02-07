@@ -22,6 +22,7 @@
 (require 'transient)
 (require 'claude-mcp)
 (require 'claude-transient)
+(require 'claude-agent-permissions)
 
 ;; Declare function from claude-agent.el (can't require due to circular dependency)
 (declare-function claude--package-root "claude-agent")
@@ -940,6 +941,13 @@ to prevent the insert-state hook from re-opening the window."
                 (seq "No " (or "files" "matches") " found")))
         content)))
 
+(defun claude-agent--tool-result-is-permission-denied-p (content)
+  "Check if tool result CONTENT indicates permission was denied by Claude SDK.
+Only matches the specific SDK error message, not general permission errors."
+  (and content
+       (string-match-p
+        (rx "Permission denied by user for tool")
+        content)))
 (defun claude-agent--update-tool-status (overlay status)
   "Update the tool status OVERLAY to show STATUS.
 STATUS should be `success', `error', or `denied'."
@@ -956,7 +964,7 @@ STATUS should be `success', `error', or `denied'."
            (move-overlay overlay start (point))
            (overlay-put overlay 'face 'claude-agent-tool-status-success-face))
           ('denied
-           (insert "🚫 ")
+           (insert "⊘ ")
            (move-overlay overlay start (point))
            (overlay-put overlay 'face 'claude-agent-tool-status-denied-face))
           ('error
@@ -2109,8 +2117,11 @@ After appending, re-renders the dynamic section (status bar + permissions)."
             (tool-marker (plist-get tool-info :marker))
             (tool-name (plist-get tool-info :name))
             (status-overlay (plist-get tool-info :status-overlay))
-            (is-denied (and tool-use-id claude-agent--denied-tools
-                            (gethash tool-use-id claude-agent--denied-tools))))
+            (is-denied (or (and tool-use-id claude-agent--denied-tools
+                               (gethash tool-use-id claude-agent--denied-tools))
+                          ;; Also check content for permission denied message
+                          ;; (fallback when tool_use_id doesn't match)
+                          (claude-agent--tool-result-is-permission-denied-p content))))
        (when (and tool-marker content)
          (push (list tool-marker tool-name content)
                claude-agent--tool-results)
@@ -2443,21 +2454,64 @@ This is called when the user navigates options."
 
 (defun claude-agent--show-permission-prompt (data)
   "Show permission prompt for DATA in the dynamic section.
+First checks the permission policy system for auto-allow/deny rules.
+If no policy matches, shows the interactive permission dialog.
 If a permission dialog is already showing, queue this request."
-  (if claude-agent--permission-data
-      ;; Already showing a permission prompt - queue this one
-      (progn
-        (push data claude-agent--permission-queue)
-        (claude-agent--set-thinking
-         (format "Awaiting permission... (%d queued)"
-                 (length claude-agent--permission-queue))))
-    ;; No current permission prompt - show this one
-    (setq claude-agent--permission-data data)
-    (setq claude-agent--permission-selection 0)
-    ;; Render the dialog (which now uses render-dynamic-section)
-    (claude-agent--render-permission-dialog)
-    ;; Set up keyboard navigation
-    (claude-agent--setup-permission-keymap)))
+  (let* ((tool-name (cdr (assq 'tool_name data)))
+         (tool-input (cdr (assq 'tool_input data)))
+         (tool-use-id (cdr (assq 'tool_use_id data)))
+         ;; Check the permission policy system first
+         (decision (claude-agent-permission-handle-request tool-name tool-input)))
+    (pcase decision
+      ;; Auto-allow: send permission response immediately
+      (`(:allow . ,props)
+       (let* ((scope (plist-get props :scope))
+              (pattern (plist-get props :pattern))
+              (action (claude-agent-permission-scope-to-action scope))
+              (response-msg `((type . "permission_response")
+                              (action . ,action)
+                              (pattern . ,pattern)
+                              ,@(when tool-use-id `((tool_use_id . ,tool-use-id))))))
+         (when (and claude-agent--process
+                    (process-live-p claude-agent--process))
+           (process-send-string claude-agent--process
+                                (concat (json-encode response-msg) "\n")))
+         (claude-agent--set-thinking "Processing...")))
+
+      ;; Auto-deny: send deny response immediately
+      (`(:deny . ,props)
+       (let* ((message (plist-get props :message))
+              (response-msg `((type . "permission_response")
+                              (action . "deny")
+                              (message . ,message)
+                              ,@(when tool-use-id `((tool_use_id . ,tool-use-id))))))
+         ;; Track this tool_use_id as denied so tool_result shows 🚫 icon
+         (when tool-use-id
+           (unless claude-agent--denied-tools
+             (setq claude-agent--denied-tools (make-hash-table :test 'equal)))
+           (puthash tool-use-id t claude-agent--denied-tools))
+         (when (and claude-agent--process
+                    (process-live-p claude-agent--process))
+           (process-send-string claude-agent--process
+                                (concat (json-encode response-msg) "\n")))
+         (claude-agent--set-thinking "Processing...")))
+
+      ;; No policy match - show interactive UI
+      (_
+       (if claude-agent--permission-data
+           ;; Already showing a permission prompt - queue this one
+           (progn
+             (push data claude-agent--permission-queue)
+             (claude-agent--set-thinking
+              (format "Awaiting permission... (%d queued)"
+                      (length claude-agent--permission-queue))))
+         ;; No current permission prompt - show this one
+         (setq claude-agent--permission-data data)
+         (setq claude-agent--permission-selection 0)
+         ;; Render the dialog (which now uses render-dynamic-section)
+         (claude-agent--render-permission-dialog)
+         ;; Set up keyboard navigation
+         (claude-agent--setup-permission-keymap))))))
 
 (defun claude-agent--show-next-queued-permission ()
   "Show the next queued permission request, if any."
