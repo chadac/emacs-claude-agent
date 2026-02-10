@@ -630,6 +630,159 @@ Used by system message hooks to determine when to fire.")
   "Whether this session was resumed from a previous session.
 Used by on_start/on_resume hooks to determine if they should fire.")
 
+;;;; Buffer-local variables - Agent state hooks
+
+(defvar-local claude-agent--assistant-message-count 0
+  "Number of assistant messages sent in this session.
+Used by `claude-agent-message-sent-hook' to provide the message number.")
+
+(defvar claude-agent-ready-hook nil
+  "Hook run when agent becomes ready (idle).
+Called with one argument: the agent buffer.
+This is a buffer-local hook - set with `add-hook' using LOCAL argument.
+
+Example:
+  (add-hook \\='claude-agent-ready-hook
+            (lambda (buf)
+              (message \"Agent in %s is ready!\" (buffer-name buf)))
+            nil t)  ; buffer-local")
+(make-variable-buffer-local 'claude-agent-ready-hook)
+
+(defvar claude-agent-message-sent-hook nil
+  "Hook run after agent sends a message.
+Called with two arguments:
+  1. The agent buffer
+  2. The message number (1-indexed count of assistant messages)
+This is a buffer-local hook.
+
+Example:
+  (add-hook \\='claude-agent-message-sent-hook
+            (lambda (buf msg-num)
+              (when (zerop (mod msg-num 10))
+                (message \"Agent has sent %d messages\" msg-num)))
+            nil t)  ; buffer-local")
+(make-variable-buffer-local 'claude-agent-message-sent-hook)
+
+(defvar claude-agent-tool-invoke-hook nil
+  "Hook run when agent invokes a tool.
+Called with two arguments:
+  1. The agent buffer
+  2. A plist with keys:
+     - :tool-name   - Name of the tool being invoked
+     - :tool-use-id - Unique ID for this invocation
+     - :parameters  - Alist of tool parameters
+     - :deny-fn     - Function to call to deny permission (takes optional reason)
+
+To deny the tool invocation, call the :deny-fn function.
+If no hook function denies, the tool proceeds to normal permission handling.
+
+This is a buffer-local hook and runs BEFORE the permission policy system.
+
+Example:
+  ;; Deny edits to certain files
+  (add-hook \\='claude-agent-tool-invoke-hook
+            (lambda (buf info)
+              (when (and (string= (plist-get info :tool-name) \"Edit\")
+                         (string-match-p \"CHANGELOG\"
+                                         (or (cdr (assq \\='file_path
+                                                        (plist-get info :parameters)))
+                                             \"\")))
+                (funcall (plist-get info :deny-fn)
+                         \"CHANGELOG is managed separately\")))
+            nil t)  ; buffer-local")
+(make-variable-buffer-local 'claude-agent-tool-invoke-hook)
+
+(defvar claude-agent-busy-hook nil
+  "Hook run when agent becomes busy (starts thinking).
+Called with two arguments:
+  1. The agent buffer
+  2. The thinking status string (e.g., \"Thinking...\", \"Awaiting permission...\")
+This is a buffer-local hook.
+
+Example:
+  (add-hook \\='claude-agent-busy-hook
+            (lambda (buf status)
+              (message \"Agent in %s is now: %s\" (buffer-name buf) status))
+            nil t)  ; buffer-local")
+(make-variable-buffer-local 'claude-agent-busy-hook)
+
+(defvar claude-agent-state-change-hook nil
+  "Hook run when agent state changes between busy and ready.
+Called with three arguments:
+  1. The agent buffer
+  2. The new state symbol: \\='busy or \\='ready
+  3. Context plist with additional information:
+     - For \\='busy: (:status \"status string\")
+     - For \\='ready: no additional context
+This is a buffer-local hook.
+
+Example:
+  (add-hook \\='claude-agent-state-change-hook
+            (lambda (buf state context)
+              (pcase state
+                (\\='busy (message \"Agent busy: %s\"
+                                 (plist-get context :status)))
+                (\\='ready (message \"Agent ready\"))))
+            nil t)  ; buffer-local")
+(make-variable-buffer-local 'claude-agent-state-change-hook)
+
+(defvar claude-agent-permission-requested-hook nil
+  "Hook run when agent requests permission for a tool.
+Called with two arguments:
+  1. The agent buffer
+  2. A plist with keys:
+     - :tool-name   - Name of the tool
+     - :tool-use-id - Unique ID for this invocation
+     - :parameters  - Alist of tool parameters
+This is a buffer-local hook and runs AFTER the tool-invoke-hook.
+
+Example:
+  (add-hook \\='claude-agent-permission-requested-hook
+            (lambda (buf info)
+              (message \"Permission requested for %s\"
+                       (plist-get info :tool-name)))
+            nil t)  ; buffer-local")
+(make-variable-buffer-local 'claude-agent-permission-requested-hook)
+
+(defvar claude-agent-permission-response-hook nil
+  "Hook run when a permission decision is made.
+Called with three arguments:
+  1. The agent buffer
+  2. The decision symbol: \\='allow, \\='deny, or \\='prompt
+  3. A plist with keys:
+     - :tool-name   - Name of the tool
+     - :tool-use-id - Unique ID for this invocation
+     - :reason      - Reason for the decision (for deny)
+     - :scope       - Permission scope (for allow)
+This is a buffer-local hook.
+
+Example:
+  (add-hook \\='claude-agent-permission-response-hook
+            (lambda (buf decision info)
+              (when (eq decision \\='deny)
+                (message \"Denied %s: %s\"
+                         (plist-get info :tool-name)
+                         (plist-get info :reason))))
+            nil t)  ; buffer-local")
+(make-variable-buffer-local 'claude-agent-permission-response-hook)
+
+(defvar claude-agent-error-hook nil
+  "Hook run when an error occurs in the agent.
+Called with two arguments:
+  1. The agent buffer
+  2. A plist with keys:
+     - :error-type - Type of error (e.g., \"api_error\", \"session_error\")
+     - :message    - Error message
+     - :details    - Optional additional error details
+This is a buffer-local hook.
+
+Example:
+  (add-hook \\='claude-agent-error-hook
+            (lambda (buf error-info)
+              (message \"Agent error: %s\"
+                       (plist-get error-info :message)))
+            nil t)  ; buffer-local")
+(make-variable-buffer-local 'claude-agent-error-hook)
 (defface claude-agent-queued-face
   '((((class color) (background dark))
      (:foreground "#5c6370" :slant italic))
@@ -1507,29 +1660,42 @@ the correct buffer context, even when the user has switched away."
 
 (defun claude-agent--set-thinking (status)
   "Set thinking STATUS, or clear if nil."
-  ;; Cancel existing timer
-  (when claude-agent--spinner-timer
-    (cancel-timer claude-agent--spinner-timer)
-    (setq claude-agent--spinner-timer nil))
+  (let ((was-busy claude-agent--thinking-status)
+        (buf (current-buffer)))
+    ;; Cancel existing timer
+    (when claude-agent--spinner-timer
+      (cancel-timer claude-agent--spinner-timer)
+      (setq claude-agent--spinner-timer nil))
 
-  (setq claude-agent--thinking-status status)
+    (setq claude-agent--thinking-status status)
 
-  (if status
-      (progn
-        ;; Start timing if not already
-        (unless claude-agent--thinking-start-time
-          (setq claude-agent--thinking-start-time (current-time)))
-        ;; Start spinner timer, passing current buffer so the tick
-        ;; always runs in the correct context (run-with-timer is global,
-        ;; but our state variables are buffer-local).
-        (let ((buf (current-buffer)))
+    (if status
+        (progn
+          ;; Becoming busy
+          (unless was-busy
+            ;; First transition to busy - fire busy and state-change hooks
+            (run-hook-with-args 'claude-agent-busy-hook buf status)
+            (run-hook-with-args 'claude-agent-state-change-hook
+                                buf 'busy (list :status status)))
+          ;; Start timing if not already
+          (unless claude-agent--thinking-start-time
+            (setq claude-agent--thinking-start-time (current-time)))
+          ;; Start spinner timer, passing current buffer so the tick
+          ;; always runs in the correct context (run-with-timer is global,
+          ;; but our state variables are buffer-local).
           (setq claude-agent--spinner-timer
-                (run-with-timer 0.1 0.1 #'claude-agent--spinner-tick buf))))
-    ;; Clear timing when done
-    (setq claude-agent--thinking-start-time nil))
+                (run-with-timer 0.1 0.1 #'claude-agent--spinner-tick buf)))
+      ;; Becoming ready
+      (when was-busy
+        ;; Transition from busy to ready - fire state-change hook
+        ;; Note: ready-hook is fired separately in dispatch-message
+        (run-hook-with-args 'claude-agent-state-change-hook
+                            buf 'ready nil))
+      ;; Clear timing when done
+      (setq claude-agent--thinking-start-time nil))
 
-  ;; Rebuild dynamic section (handles cursor positioning)
-  (claude-agent--render-dynamic-section))
+    ;; Rebuild dynamic section (handles cursor positioning)
+    (claude-agent--render-dynamic-section)))
 
 ;;;; Content helpers
 
@@ -1948,9 +2114,10 @@ After appending, re-renders the dynamic section (status bar + permissions)."
 (defun claude-agent--dispatch-message (msg-type msg)
   "Dispatch message MSG based on MSG-TYPE."
   (pcase msg-type
-    ;; Ready - clear thinking, send queued messages
+    ;; Ready - clear thinking, send queued messages, fire ready hook
     ("ready"
      (claude-agent--set-thinking nil)
+     (run-hook-with-args 'claude-agent-ready-hook (current-buffer))
      (when claude-agent--message-queue
        (claude-agent--send-next-queued)))
 
@@ -2080,9 +2247,13 @@ After appending, re-renders the dynamic section (status bar + permissions)."
      (let ((text (cdr (assq 'text msg))))
        (claude-agent--append-to-log (concat text "\n") nil "  ")))
 
-    ;; Assistant message end
+    ;; Assistant message end - increment count and fire hook
     ("assistant_end"
-     (setq claude-agent--parse-state nil))
+     (setq claude-agent--parse-state nil)
+     (cl-incf claude-agent--assistant-message-count)
+     (run-hook-with-args 'claude-agent-message-sent-hook
+                         (current-buffer)
+                         claude-agent--assistant-message-count))
 
     ;; System message start
     ("system_start"
@@ -2233,7 +2404,14 @@ After appending, re-renders the dynamic section (status bar + permissions)."
     ;; Error
     ("error"
      (let ((message-text (cdr (assq 'message msg)))
-           (traceback (cdr (assq 'traceback msg))))
+           (traceback (cdr (assq 'traceback msg)))
+           (error-type (cdr (assq 'error_type msg))))
+       ;; Fire error hook
+       (run-hook-with-args 'claude-agent-error-hook
+                           (current-buffer)
+                           (list :error-type (or error-type "unknown")
+                                 :message message-text
+                                 :details traceback))
        (claude-agent--append-to-log
         (format "\n⚠ Error: %s\n" message-text)
         'claude-agent-error-face)
@@ -2454,64 +2632,132 @@ This is called when the user navigates options."
 
 (defun claude-agent--show-permission-prompt (data)
   "Show permission prompt for DATA in the dynamic section.
-First checks the permission policy system for auto-allow/deny rules.
+First runs `claude-agent-tool-invoke-hook' which can deny the request.
+Then checks the permission policy system for auto-allow/deny rules.
 If no policy matches, shows the interactive permission dialog.
 If a permission dialog is already showing, queue this request."
   (let* ((tool-name (cdr (assq 'tool_name data)))
          (tool-input (cdr (assq 'tool_input data)))
          (tool-use-id (cdr (assq 'tool_use_id data)))
-         ;; Check the permission policy system first
-         (decision (claude-agent-permission-handle-request tool-name tool-input)))
-    (pcase decision
-      ;; Auto-allow: send permission response immediately
-      (`(:allow . ,props)
-       (let* ((scope (plist-get props :scope))
-              (pattern (plist-get props :pattern))
-              (action (claude-agent-permission-scope-to-action scope))
-              (response-msg `((type . "permission_response")
-                              (action . ,action)
-                              (pattern . ,pattern)
-                              ,@(when tool-use-id `((tool_use_id . ,tool-use-id))))))
-         (when (and claude-agent--process
-                    (process-live-p claude-agent--process))
-           (process-send-string claude-agent--process
-                                (concat (json-encode response-msg) "\n")))
-         (claude-agent--set-thinking "Processing...")))
+         ;; Variables for hook-based denial
+         (hook-denied nil)
+         (hook-deny-reason nil)
+         (deny-fn (lambda (&optional reason)
+                    (setq hook-denied t
+                          hook-deny-reason reason))))
+    ;; Run tool-invoke-hook first, allowing hooks to deny
+    (run-hook-with-args 'claude-agent-tool-invoke-hook
+                        (current-buffer)
+                        (list :tool-name tool-name
+                              :tool-use-id tool-use-id
+                              :parameters tool-input
+                              :deny-fn deny-fn))
+    ;; Fire permission-requested hook
+    (run-hook-with-args 'claude-agent-permission-requested-hook
+                        (current-buffer)
+                        (list :tool-name tool-name
+                              :tool-use-id tool-use-id
+                              :parameters tool-input))
+    (cond
+     ;; Hook denied - send deny response immediately
+     (hook-denied
+      (let* ((message (or hook-deny-reason "Denied by tool-invoke-hook"))
+             (response-msg `((type . "permission_response")
+                             (action . "deny")
+                             (message . ,message)
+                             ,@(when tool-use-id `((tool_use_id . ,tool-use-id))))))
+        ;; Fire permission-response hook
+        (run-hook-with-args 'claude-agent-permission-response-hook
+                            (current-buffer)
+                            'deny
+                            (list :tool-name tool-name
+                                  :tool-use-id tool-use-id
+                                  :reason message))
+        ;; Track this tool_use_id as denied so tool_result shows 🚫 icon
+        (when tool-use-id
+          (unless claude-agent--denied-tools
+            (setq claude-agent--denied-tools (make-hash-table :test 'equal)))
+          (puthash tool-use-id t claude-agent--denied-tools))
+        (when (and claude-agent--process
+                   (process-live-p claude-agent--process))
+          (process-send-string claude-agent--process
+                               (concat (json-encode response-msg) "\n")))
+        (claude-agent--set-thinking "Processing...")))
 
-      ;; Auto-deny: send deny response immediately
-      (`(:deny . ,props)
-       (let* ((message (plist-get props :message))
-              (response-msg `((type . "permission_response")
-                              (action . "deny")
-                              (message . ,message)
-                              ,@(when tool-use-id `((tool_use_id . ,tool-use-id))))))
-         ;; Track this tool_use_id as denied so tool_result shows 🚫 icon
-         (when tool-use-id
-           (unless claude-agent--denied-tools
-             (setq claude-agent--denied-tools (make-hash-table :test 'equal)))
-           (puthash tool-use-id t claude-agent--denied-tools))
-         (when (and claude-agent--process
-                    (process-live-p claude-agent--process))
-           (process-send-string claude-agent--process
-                                (concat (json-encode response-msg) "\n")))
-         (claude-agent--set-thinking "Processing...")))
+     ;; Hook didn't deny - proceed with permission policy evaluation
+     (t
+      (let ((decision (claude-agent-permission-handle-request tool-name tool-input)))
+        (pcase decision
+          ;; Auto-allow: send permission response immediately
+          (`(:allow . ,props)
+           (let* ((scope (plist-get props :scope))
+                  (pattern (plist-get props :pattern))
+                  (action (claude-agent-permission-scope-to-action scope))
+                  (response-msg `((type . "permission_response")
+                                  (action . ,action)
+                                  (pattern . ,pattern)
+                                  ,@(when tool-use-id `((tool_use_id . ,tool-use-id))))))
+             ;; Fire permission-response hook
+             (run-hook-with-args 'claude-agent-permission-response-hook
+                                 (current-buffer)
+                                 'allow
+                                 (list :tool-name tool-name
+                                       :tool-use-id tool-use-id
+                                       :scope scope
+                                       :pattern pattern))
+             (when (and claude-agent--process
+                        (process-live-p claude-agent--process))
+               (process-send-string claude-agent--process
+                                    (concat (json-encode response-msg) "\n")))
+             (claude-agent--set-thinking "Processing...")))
 
-      ;; No policy match - show interactive UI
-      (_
-       (if claude-agent--permission-data
-           ;; Already showing a permission prompt - queue this one
-           (progn
-             (push data claude-agent--permission-queue)
-             (claude-agent--set-thinking
-              (format "Awaiting permission... (%d queued)"
-                      (length claude-agent--permission-queue))))
-         ;; No current permission prompt - show this one
-         (setq claude-agent--permission-data data)
-         (setq claude-agent--permission-selection 0)
-         ;; Render the dialog (which now uses render-dynamic-section)
-         (claude-agent--render-permission-dialog)
-         ;; Set up keyboard navigation
-         (claude-agent--setup-permission-keymap))))))
+          ;; Auto-deny: send deny response immediately
+          (`(:deny . ,props)
+           (let* ((message (plist-get props :message))
+                  (response-msg `((type . "permission_response")
+                                  (action . "deny")
+                                  (message . ,message)
+                                  ,@(when tool-use-id `((tool_use_id . ,tool-use-id))))))
+             ;; Fire permission-response hook
+             (run-hook-with-args 'claude-agent-permission-response-hook
+                                 (current-buffer)
+                                 'deny
+                                 (list :tool-name tool-name
+                                       :tool-use-id tool-use-id
+                                       :reason message))
+             ;; Track this tool_use_id as denied so tool_result shows 🚫 icon
+             (when tool-use-id
+               (unless claude-agent--denied-tools
+                 (setq claude-agent--denied-tools (make-hash-table :test 'equal)))
+               (puthash tool-use-id t claude-agent--denied-tools))
+             (when (and claude-agent--process
+                        (process-live-p claude-agent--process))
+               (process-send-string claude-agent--process
+                                    (concat (json-encode response-msg) "\n")))
+             (claude-agent--set-thinking "Processing...")))
+
+          ;; No policy match - show interactive UI
+          (_
+           ;; Fire permission-response hook with 'prompt decision
+           (run-hook-with-args 'claude-agent-permission-response-hook
+                               (current-buffer)
+                               'prompt
+                               (list :tool-name tool-name
+                                     :tool-use-id tool-use-id))
+           (if claude-agent--permission-data
+               ;; Already showing a permission prompt - queue this one
+               (progn
+                 (push data claude-agent--permission-queue)
+                 (claude-agent--set-thinking
+                  (format "Awaiting permission... (%d queued)"
+                          (length claude-agent--permission-queue))))
+             ;; No current permission prompt - show this one
+             (setq claude-agent--permission-data data)
+             (setq claude-agent--permission-selection 0)
+             ;; Render the dialog (which now uses render-dynamic-section)
+             (claude-agent--render-permission-dialog)
+             ;; Set up keyboard navigation
+             (claude-agent--setup-permission-keymap)))))))))
 
 (defun claude-agent--show-next-queued-permission ()
   "Show the next queued permission request, if any."
