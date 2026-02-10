@@ -756,172 +756,409 @@ Returns the lock ID if overlap found, nil otherwise."
                      (delete-overlay overlay)))
                  ov)))
 
+(defun claude-mcp--validate-line-args (start-line end-line total-lines tool-name)
+  "Validate START-LINE and END-LINE against TOTAL-LINES.
+TOOL-NAME is used for error messages. Returns nil on success, signals error otherwise."
+  ;; Type validation with helpful messages
+  (unless (integerp start-line)
+    (error "%s: start_line must be an integer, got %s (%s). Example: start_line: 1"
+           tool-name (type-of start-line) start-line))
+  (unless (integerp end-line)
+    (error "%s: end_line must be an integer, got %s (%s). Example: end_line: 10"
+           tool-name (type-of end-line) end-line))
+  ;; Range validation
+  (when (< start-line 1)
+    (error "%s: start_line must be >= 1, got %d. Line numbers are 1-indexed."
+           tool-name start-line))
+  (when (> end-line total-lines)
+    (error "%s: end_line %d exceeds buffer's line count of %d. Use read_file first to check the file length."
+           tool-name end-line total-lines))
+  (when (> start-line end-line)
+    (error "%s: start_line (%d) must be <= end_line (%d). The range is inclusive."
+           tool-name start-line end-line))
+  nil)
+
+(defun claude-mcp--lock-region-impl (buf start-line end-line agent-name source-desc)
+  "Internal implementation for locking a region in BUF.
+START-LINE and END-LINE define the region (1-indexed, inclusive).
+AGENT-NAME identifies the lock owner.
+SOURCE-DESC is a string like 'file.el' or 'buffer *scratch*' for error messages.
+Returns the lock result string."
+  (with-current-buffer buf
+    (claude-mcp--ensure-locked-regions)
+    ;; Handle empty buffer - insert a newline so we have line 1
+    (when (= (buffer-size) 0)
+      (insert "\n")
+      (goto-char (point-min)))
+    ;; Validate line numbers
+    (let ((total-lines (count-lines (point-min) (point-max))))
+      (claude-mcp--validate-line-args start-line end-line total-lines "lock"))
+    ;; Calculate positions
+    (let* ((start-pos (claude-mcp--line-to-pos start-line))
+           (end-pos (claude-mcp--line-end-pos end-line))
+           ;; Check for overlapping locks
+           (overlap (claude-mcp--check-region-overlap start-pos end-pos)))
+      (when overlap
+        (error "lock: Region overlaps with existing lock %s. Call unlock first if you need to re-lock." overlap))
+      (let* ((was-modified (buffer-modified-p))
+             (lock-id (claude-mcp--generate-lock-id start-line end-line))
+             (agent-buffer (or agent-name "Claude"))
+             ;; Truncate based on window width - leave room for " 🔒 Locked by " prefix and padding
+             (max-name-len (max 20 (- (window-body-width) 18)))
+             (agent-display (if (> (length agent-buffer) max-name-len)
+                                (concat (substring agent-buffer 0 (- max-name-len 4)) "...*")
+                              agent-buffer))
+             ;; Create overlay for visual feedback
+             (ov (make-overlay start-pos end-pos))
+             ;; Create label showing which agent owns the lock
+             (label (propertize (format " 🔒 Locked by %s " agent-display)
+                                'face '(:background "#61afef"
+                                        :foreground "#282c34"
+                                        :weight bold
+                                        :height 0.85))))
+        ;; Configure overlay
+        (overlay-put ov 'face 'claude-mcp-locked-region-face)
+        (overlay-put ov 'claude-mcp-lock lock-id)
+        (overlay-put ov 'before-string (concat label "\n"))
+        (overlay-put ov 'help-echo (format "Locked by %s (ID: %s)" agent-buffer lock-id))
+        (overlay-put ov 'modification-hooks
+                     (list (lambda (ov after-p beg end &optional len)
+                             (unless after-p
+                               (let* ((lock-id (overlay-get ov 'claude-mcp-lock))
+                                      (lock-info (and claude-mcp--locked-regions
+                                                      (gethash lock-id claude-mcp--locked-regions))))
+                                 (when (and lock-info
+                                            (not (plist-get lock-info :claude-is-writing)))
+                                   (error "This region is locked by Claude (ID: %s)" lock-id)))))))
+        ;; Store lock info
+        (puthash lock-id
+                 (list :start-line start-line
+                       :end-line end-line
+                       :start-pos start-pos
+                       :end-pos end-pos
+                       :overlay ov
+                       :was-modified was-modified
+                       :claude-is-writing nil
+                       :agent-buffer agent-buffer
+                       :source source-desc)
+                 claude-mcp--locked-regions)
+        ;; Return confirmation with lock ID
+        (let ((content (buffer-substring-no-properties start-pos end-pos)))
+          (format "Locked %s lines %d-%d (ID: %s)\n\nLocked content:\n%s"
+                  source-desc start-line end-line lock-id content))))))
+
+;;; lock_file - Lock a region in a file (by file path)
+(defun claude-mcp-lock-file (file-path start-line end-line &optional agent-name)
+  "Lock a region in FILE-PATH from START-LINE to END-LINE (inclusive, 1-indexed).
+The file is opened if not already open. A new file is created if it doesn't exist.
+AGENT-NAME optionally identifies which agent owns the lock.
+Returns lock ID and confirmation, or error if region overlaps existing lock.
+
+Usage:
+  lock_file(file_path=\"/path/to/file.py\", start_line=10, end_line=20)
+
+Then call edit() to replace the locked region with new content."
+  ;; Validate file_path
+  (unless (stringp file-path)
+    (error "lock_file: file_path must be a string, got %s (%s). Example: file_path: \"/path/to/file.py\""
+           (type-of file-path) file-path))
+  (when (string-empty-p file-path)
+    (error "lock_file: file_path cannot be empty. Provide the full path to the file."))
+  (let* ((expanded (expand-file-name file-path))
+         (buf (claude-mcp--get-buffer nil expanded t)))  ; t = create if needed
+    (unless buf
+      (error "lock_file: Could not open or create file '%s'" file-path))
+    (claude-mcp--lock-region-impl buf start-line end-line agent-name file-path)))
+
+(claude-mcp-deftool lock_file
+  "Lock a region of a FILE for editing. Opens the file if not already open.
+Use this to lock a section of a file before editing it with the edit tool.
+
+Workflow:
+1. Call lock_file(file_path=\"/path/to/file\", start_line=N, end_line=M)
+2. Call edit(content=\"new content\") to replace the locked region
+3. The lock is automatically released after edit
+
+The locked region is highlighted in the editor and protected from user edits."
+  :function #'claude-mcp-lock-file
+  :inject-agent-name t
+  :args ((file-path string :required "Absolute path to the file to lock")
+         (start-line integer :required "First line to lock (1-indexed)")
+         (end-line integer :required "Last line to lock (1-indexed, inclusive)")
+         (agent-name string "Name of the agent owning the lock (auto-set by MCP server)")))
+
+;;; lock_buffer - Lock a region in a buffer (by buffer name)
+(defun claude-mcp-lock-buffer (buffer-name start-line end-line &optional agent-name)
+  "Lock a region in BUFFER-NAME from START-LINE to END-LINE (inclusive, 1-indexed).
+The buffer must already exist.
+AGENT-NAME optionally identifies which agent owns the lock.
+Returns lock ID and confirmation, or error if region overlaps existing lock.
+
+Usage:
+  lock_buffer(buffer_name=\"*scratch*\", start_line=1, end_line=5)
+
+Then call edit() to replace the locked region with new content."
+  ;; Validate buffer_name
+  (unless (stringp buffer-name)
+    (error "lock_buffer: buffer_name must be a string, got %s (%s). Example: buffer_name: \"*scratch*\""
+           (type-of buffer-name) buffer-name))
+  (when (string-empty-p buffer-name)
+    (error "lock_buffer: buffer_name cannot be empty. Use list_buffers to see available buffers."))
+  (let ((buf (get-buffer buffer-name)))
+    (unless buf
+      (error "lock_buffer: Buffer '%s' does not exist. Use list_buffers to see available buffers, or use lock_file to open a file." buffer-name))
+    (claude-mcp--lock-region-impl buf start-line end-line agent-name (format "buffer %s" buffer-name))))
+
+(claude-mcp-deftool lock_buffer
+  "Lock a region of a BUFFER for editing. The buffer must already be open.
+Use this to lock a section of an existing buffer before editing it with the edit tool.
+
+For files, prefer lock_file instead - it will open the file automatically.
+
+Workflow:
+1. Call lock_buffer(buffer_name=\"*scratch*\", start_line=N, end_line=M)
+2. Call edit(content=\"new content\") to replace the locked region
+3. The lock is automatically released after edit
+
+The locked region is highlighted in the editor and protected from user edits."
+  :function #'claude-mcp-lock-buffer
+  :inject-agent-name t
+  :args ((buffer-name string :required "Name of the buffer to lock (e.g., \"*scratch*\", \"main.py\")")
+         (start-line integer :required "First line to lock (1-indexed)")
+         (end-line integer :required "Last line to lock (1-indexed, inclusive)")
+         (agent-name string "Name of the agent owning the lock (auto-set by MCP server)")))
+
+;;; Legacy lock - kept for backward compatibility
 (defun claude-mcp-lock-region (buffer-name start-line end-line &optional agent-name file-path)
   "Lock a region in BUFFER-NAME from START-LINE to END-LINE (inclusive, 1-indexed).
 The region is highlighted and made read-only to the user.
 AGENT-NAME optionally identifies which agent owns the lock.
 FILE-PATH can be provided to auto-open or create the file if the buffer doesn't exist.
-Returns lock ID and confirmation, or error if region overlaps existing lock."
+Returns lock ID and confirmation, or error if region overlaps existing lock.
+
+DEPRECATED: Use lock_file or lock_buffer instead for clearer intent."
   (let ((buf (claude-mcp--get-buffer buffer-name file-path t)))  ; t = create if needed
     (unless buf
-      (error "Buffer '%s' does not exist (and no file_path provided to open it)" buffer-name))
-    (with-current-buffer buf
-      (claude-mcp--ensure-locked-regions)
-      ;; Handle empty buffer - insert a newline so we have line 1
-      (when (= (buffer-size) 0)
-        (insert "\n")
-        (goto-char (point-min)))
-      ;; Validate line numbers
-      (let ((total-lines (count-lines (point-min) (point-max))))
-        (when (< start-line 1)
-          (error "Start_line must be >= 1, got %d" start-line))
-        (when (> end-line total-lines)
-          (error "End_line %d exceeds buffer line count %d" end-line total-lines))
-        (when (> start-line end-line)
-          (error "Start_line %d must be <= end_line %d" start-line end-line)))
-      ;; Calculate positions
-      (let* ((start-pos (claude-mcp--line-to-pos start-line))
-             (end-pos (claude-mcp--line-end-pos end-line))
-             ;; Check for overlapping locks
-             (overlap (claude-mcp--check-region-overlap start-pos end-pos)))
-        (when overlap
-          (error "Region overlaps with existing lock %s" overlap))
-        (let* ((was-modified (buffer-modified-p))
-               (lock-id (claude-mcp--generate-lock-id start-line end-line))
-               (agent-buffer (or agent-name "Claude"))
-               ;; Truncate based on window width - leave room for " 🔒 Locked by " prefix and padding
-               (max-name-len (max 20 (- (window-body-width) 18)))
-               (agent-display (if (> (length agent-buffer) max-name-len)
-                                  (concat (substring agent-buffer 0 (- max-name-len 4)) "...*")
-                                agent-buffer))
-               ;; Create overlay for visual feedback
-               (ov (make-overlay start-pos end-pos))
-               ;; Create label showing which agent owns the lock
-               (label (propertize (format " 🔒 Locked by %s " agent-display)
-                                  'face 'claude-mcp-lock-label-face)))
-          ;; Configure overlay
-          (overlay-put ov 'face 'claude-mcp-locked-region-face)
-          (overlay-put ov 'claude-mcp-lock lock-id)
-          (overlay-put ov 'before-string (concat label "\n"))
-          (overlay-put ov 'help-echo (format "Locked by %s (ID: %s)" agent-buffer lock-id))
-          (overlay-put ov 'modification-hooks
-                       (list (lambda (ov after-p beg end &optional len)
-                               (unless after-p
-                                 (let* ((lock-id (overlay-get ov 'claude-mcp-lock))
-                                        (lock-info (and claude-mcp--locked-regions
-                                                        (gethash lock-id claude-mcp--locked-regions))))
-                                   (when (and lock-info
-                                              (not (plist-get lock-info :claude-is-writing)))
-                                     (error "This region is locked by Claude (ID: %s)" lock-id)))))))
-          ;; Store lock info
-          (puthash lock-id
-                   (list :start-line start-line
-                         :end-line end-line
-                         :start-pos start-pos
-                         :end-pos end-pos
-                         :overlay ov
-                         :was-modified was-modified
-                         :claude-is-writing nil
-                         :agent-buffer agent-buffer)
-                   claude-mcp--locked-regions)
-          ;; Return confirmation with lock ID
-          (let ((content (buffer-substring-no-properties start-pos end-pos)))
-            (format "Locked %s lines %d-%d (ID: %s)\n\nLocked content:\n%s"
-                    (buffer-name buf) start-line end-line lock-id content)))))))
+      (error "lock: Buffer '%s' does not exist and no file_path provided.
+
+HINT: Use one of these instead:
+  - lock_file(file_path=\"/path/to/file\", start_line=N, end_line=M) for files
+  - lock_buffer(buffer_name=\"*scratch*\", start_line=N, end_line=M) for existing buffers"
+             buffer-name))
+    (let ((source-desc (or file-path (buffer-name buf))))
+      (claude-mcp--lock-region-impl buf start-line end-line agent-name source-desc))))
 
 (claude-mcp-deftool lock
   "Lock a region of a buffer for editing. The region is highlighted and protected from user edits.
 Use this before edit to safely edit a portion of a buffer.
 The lock is based on line numbers (1-indexed, inclusive).
-If the buffer doesn't exist, provide file_path to auto-open it."
+If the buffer doesn't exist, provide file_path to auto-open it.
+
+PREFER using lock_file or lock_buffer instead for clearer intent."
   :function #'claude-mcp-lock-region
+  :inject-agent-name t
   :args ((buffer-name string "Name of the buffer (optional if file_path provided)")
          (start-line integer :required "First line to lock (1-indexed)")
          (end-line integer :required "Last line to lock (1-indexed, inclusive)")
          (agent-name string "Name of the agent owning the lock (auto-set by MCP server)")
          (file-path string "Path to file - if provided and buffer doesn't exist, opens the file")))
+;;; Global Lock Resolution
+;;;
+;;; These functions find locks across ALL buffers, enabling simpler edit/unlock
+;;; calls when there's only one lock in the entire session.
 
-(defun claude-mcp--resolve-lock-id (lock-id)
-  "Resolve LOCK-ID: if provided use it, otherwise auto-resolve when only 1 lock exists.
+(defun claude-mcp--get-all-locks ()
+  "Get all locks across all buffers.
+Returns a list of (buffer lock-id lock-info) tuples."
+  (let ((all-locks '()))
+    (dolist (buf (buffer-list))
+      (with-current-buffer buf
+        (when (and (boundp 'claude-mcp--locked-regions)
+                   claude-mcp--locked-regions)
+          (maphash
+           (lambda (id info)
+             (push (list buf id info) all-locks))
+           claude-mcp--locked-regions))))
+    all-locks))
+
+(defun claude-mcp--find-lock-globally (lock-id)
+  "Find a lock by LOCK-ID across all buffers.
+Returns (buffer lock-id lock-info) or nil if not found."
+  (catch 'found
+    (dolist (buf (buffer-list))
+      (with-current-buffer buf
+        (when (and (boundp 'claude-mcp--locked-regions)
+                   claude-mcp--locked-regions)
+          (let ((info (gethash lock-id claude-mcp--locked-regions)))
+            (when info
+              (throw 'found (list buf lock-id info)))))))
+    nil))
+
+(defun claude-mcp--resolve-lock-globally (&optional lock-id)
+  "Resolve a lock, searching across ALL buffers if needed.
+If LOCK-ID is provided, find that specific lock.
+If LOCK-ID is nil and exactly one lock exists globally, return it.
+Returns (buffer lock-id lock-info) or signals an error."
+  (if lock-id
+      ;; Find specific lock
+      (let ((result (claude-mcp--find-lock-globally lock-id)))
+        (unless result
+          (error "edit: Lock ID '%s' not found. Check that you called lock_file or lock_buffer first." lock-id))
+        result)
+    ;; Auto-resolve: find the single lock
+    (let ((all-locks (claude-mcp--get-all-locks)))
+      (cond
+       ((null all-locks)
+        (error "edit: No locks found. You must call lock_file or lock_buffer before edit.
+
+Example workflow:
+  1. lock_file(file_path=\"/path/to/file.py\", start_line=10, end_line=20)
+  2. edit(content=\"new content here\")"))
+       ((= (length all-locks) 1)
+        (car all-locks))
+       (t
+        (let ((lock-summary
+               (mapconcat
+                (lambda (lock)
+                  (let* ((buf (car lock))
+                         (id (cadr lock))
+                         (info (caddr lock)))
+                    (format "  - %s (lines %d-%d in %s)"
+                            id
+                            (plist-get info :start-line)
+                            (plist-get info :end-line)
+                            (buffer-name buf))))
+                all-locks
+                "\n")))
+          (error "edit: Multiple locks exist (%d total). Specify lock_id to identify which one.
+
+Active locks:
+%s
+
+Example: edit(content=\"...\", lock_id=\"L10-20#1\")"
+                 (length all-locks)
+                 lock-summary)))))))
+
+(defun claude-mcp--resolve-lock-in-buffer (lock-id)
+  "Resolve LOCK-ID within the current buffer only.
+If LOCK-ID is nil and exactly one lock exists in the buffer, return it.
 Returns the resolved lock ID or signals an error."
+  (claude-mcp--ensure-locked-regions)
   (if lock-id
       (progn
         (unless (gethash lock-id claude-mcp--locked-regions)
-          (error "Lock ID '%s' not found in buffer" lock-id))
+          (error "Lock ID '%s' not found in buffer '%s'" lock-id (buffer-name)))
         lock-id)
-    ;; No lock-id provided - auto-resolve if only one lock
+    ;; No lock-id provided - auto-resolve if only one lock in this buffer
     (let ((count (hash-table-count claude-mcp--locked-regions)))
       (cond
-       ((= count 0) (error "Buffer has no locked regions"))
+       ((= count 0)
+        (error "Buffer '%s' has no locked regions" (buffer-name)))
        ((= count 1)
         (let (resolved-id)
           (maphash (lambda (id _) (setq resolved-id id)) claude-mcp--locked-regions)
           resolved-id))
-       (t (error "Buffer has %d locks - specify lock_id to identify which lock to use" count))))))
+       (t
+        (error "Buffer '%s' has %d locks - specify lock_id to identify which one" (buffer-name) count))))))
 
-(defun claude-mcp-unlock-region (buffer-name &optional file-path lock-id)
-  "Unlock a locked region in BUFFER-NAME without making changes.
+;;; Unlock function
+
+(defun claude-mcp-unlock-region (&optional buffer-name file-path lock-id)
+  "Unlock a locked region without making changes.
 Use this to cancel an edit operation.
-FILE-PATH can be provided to find the buffer by file path.
-LOCK-ID specifies which lock to unlock; if nil and only one lock exists, uses that."
-  (let ((buf (claude-mcp--get-buffer buffer-name file-path)))
-    (unless buf
-      (error "Buffer '%s' does not exist" (or buffer-name file-path)))
-    (with-current-buffer buf
-      (claude-mcp--ensure-locked-regions)
-      (let* ((resolved-id (claude-mcp--resolve-lock-id lock-id))
-             (lock-info (gethash resolved-id claude-mcp--locked-regions))
-             (start-line (plist-get lock-info :start-line))
-             (end-line (plist-get lock-info :end-line))
-             (ov (plist-get lock-info :overlay)))
-        (when (overlayp ov)
-          (delete-overlay ov))
-        (remhash resolved-id claude-mcp--locked-regions)
-        (format "Unlocked %s lines %d-%d (ID: %s, no changes made)"
-                (buffer-name buf) start-line end-line resolved-id)))))
+
+If only one lock exists globally, no arguments are needed.
+Otherwise, provide LOCK-ID to specify which lock, or BUFFER-NAME/FILE-PATH to find the buffer."
+  ;; Validate types
+  (when (and buffer-name (not (stringp buffer-name)))
+    (error "unlock: buffer_name must be a string, got %s" (type-of buffer-name)))
+  (when (and file-path (not (stringp file-path)))
+    (error "unlock: file_path must be a string, got %s" (type-of file-path)))
+  (when (and lock-id (not (stringp lock-id)))
+    (error "unlock: lock_id must be a string, got %s" (type-of lock-id)))
+
+  ;; If we have a specific buffer/file, use buffer-local resolution
+  (if (or buffer-name file-path)
+      (let ((buf (claude-mcp--get-buffer buffer-name file-path)))
+        (unless buf
+          (error "unlock: Buffer '%s' does not exist" (or buffer-name file-path)))
+        (with-current-buffer buf
+          (let* ((resolved-id (claude-mcp--resolve-lock-in-buffer lock-id))
+                 (lock-info (gethash resolved-id claude-mcp--locked-regions))
+                 (start-line (plist-get lock-info :start-line))
+                 (end-line (plist-get lock-info :end-line))
+                 (ov (plist-get lock-info :overlay)))
+            (when (overlayp ov)
+              (delete-overlay ov))
+            (remhash resolved-id claude-mcp--locked-regions)
+            (format "Unlocked %s lines %d-%d (ID: %s, no changes made)"
+                    (buffer-name buf) start-line end-line resolved-id))))
+    ;; No buffer specified - use global resolution
+    (let* ((lock-result (claude-mcp--resolve-lock-globally lock-id))
+           (buf (car lock-result))
+           (resolved-id (cadr lock-result))
+           (lock-info (caddr lock-result))
+           (start-line (plist-get lock-info :start-line))
+           (end-line (plist-get lock-info :end-line)))
+      (with-current-buffer buf
+        (let ((ov (plist-get lock-info :overlay)))
+          (when (overlayp ov)
+            (delete-overlay ov))
+          (remhash resolved-id claude-mcp--locked-regions)
+          (format "Unlocked %s lines %d-%d (ID: %s, no changes made)"
+                  (buffer-name buf) start-line end-line resolved-id))))))
 
 (claude-mcp-deftool unlock
-  "Unlock a previously locked region without making changes. Use this to cancel an edit."
+  "Unlock a previously locked region without making changes. Use this to cancel an edit.
+
+If only one lock exists, no arguments are needed.
+If multiple locks exist, provide lock_id to specify which one."
   :function #'claude-mcp-unlock-region
   :safe t
-  :args ((buffer-name string "Name of the buffer (optional if file_path provided)")
-         (file-path string "Path to file - used to find buffer if buffer-name doesn't match")
-         (lock-id string "Lock ID to unlock (from lock response). Optional if only one lock exists.")))
+  :args ((buffer-name string "Name of the buffer (usually not needed)")
+         (file-path string "Path to file (usually not needed)")
+         (lock-id string "Lock ID to unlock. Optional if only one lock exists.")))
 
-(defun claude-mcp--find-buffer-with-lock ()
-  "Find a buffer that has an active lock, if there's exactly one.
-Returns the buffer or nil if zero or multiple buffers have locks."
-  (let ((buffers-with-locks nil))
-    (dolist (buf (buffer-list))
-      (with-current-buffer buf
-        (when (and (boundp 'claude-mcp--locked-regions)
-                   claude-mcp--locked-regions
-                   (> (hash-table-count claude-mcp--locked-regions) 0))
-          (push buf buffers-with-locks))))
-    (when (= (length buffers-with-locks) 1)
-      (car buffers-with-locks))))
+;;; Edit function - replaces locked region content
 
-(defun claude-mcp-write-region (buffer-name content &optional file-path lock-id)
-  "Replace a locked region in BUFFER-NAME with CONTENT.
-The lock must have been acquired with lock-region first.
+(defun claude-mcp-write-region (content &optional buffer-name file-path lock-id)
+  "Replace a locked region with CONTENT.
+The lock must have been acquired with lock_file or lock_buffer first.
 If the buffer was unmodified before locking, it will be auto-saved after writing.
-FILE-PATH can be provided to find the buffer by file path.
-LOCK-ID specifies which lock to edit; if nil and only one lock exists, uses that.
 
-If neither BUFFER-NAME nor FILE-PATH is provided, attempts to auto-detect
-the buffer if exactly one buffer has an active lock."
-  (let ((buf (or (claude-mcp--get-buffer buffer-name file-path)
-                 ;; Auto-detect buffer if neither specified
-                 (and (not buffer-name) (not file-path)
-                      (claude-mcp--find-buffer-with-lock)))))
-    (unless buf
-      (if (and (not buffer-name) (not file-path))
-          (error "No buffer_name or file_path provided, and could not auto-detect buffer (either no locks exist or multiple buffers have locks)")
-        (error "Buffer '%s' does not exist" (or buffer-name file-path))))
-    (with-current-buffer buf
-      (claude-mcp--ensure-locked-regions)
-      (let ((resolved-id (claude-mcp--resolve-lock-id lock-id)))
-        (claude-mcp--write-region-by-id buf resolved-id content)))))
+If only one lock exists globally, only CONTENT is needed.
+Otherwise, provide LOCK-ID to specify which lock."
+  ;; Validate content (required)
+  (unless content
+    (error "edit: content is required. Provide the new text to replace the locked region.
+
+Example: edit(content=\"def new_function():\\n    pass\")"))
+  (unless (stringp content)
+    (error "edit: content must be a string, got %s (%s)"
+           (type-of content) content))
+
+  ;; Validate optional args
+  (when (and buffer-name (not (stringp buffer-name)))
+    (error "edit: buffer_name must be a string, got %s" (type-of buffer-name)))
+  (when (and file-path (not (stringp file-path)))
+    (error "edit: file_path must be a string, got %s" (type-of file-path)))
+  (when (and lock-id (not (stringp lock-id)))
+    (error "edit: lock_id must be a string, got %s" (type-of lock-id)))
+
+  ;; If we have a specific buffer/file, use buffer-local resolution
+  (if (or buffer-name file-path)
+      (let ((buf (claude-mcp--get-buffer buffer-name file-path)))
+        (unless buf
+          (error "edit: Buffer '%s' does not exist" (or buffer-name file-path)))
+        (with-current-buffer buf
+          (claude-mcp--ensure-locked-regions)
+          (let ((resolved-id (claude-mcp--resolve-lock-in-buffer lock-id)))
+            (claude-mcp--write-region-by-id buf resolved-id content))))
+    ;; No buffer specified - use global resolution
+    (let* ((lock-result (claude-mcp--resolve-lock-globally lock-id))
+           (buf (car lock-result))
+           (resolved-id (cadr lock-result)))
+      (claude-mcp--write-region-by-id buf resolved-id content))))
 
 (defun claude-mcp--refresh-lock-positions ()
   "Refresh stored positions of all locks from their overlays.
@@ -954,6 +1191,7 @@ BUF should be a buffer object."
            (end-pos (plist-get lock-info :end-pos))
            (ov (plist-get lock-info :overlay))
            (was-modified (plist-get lock-info :was-modified))
+           (source (plist-get lock-info :source))
            (old-content (buffer-substring-no-properties start-pos end-pos))
            (inhibit-read-only t))
       ;; Mark that Claude is writing (allows modification hooks to pass)
@@ -979,31 +1217,42 @@ BUF should be a buffer object."
       ;; Refresh positions of remaining locks (overlays tracked the shift)
       (claude-mcp--refresh-lock-positions)
       ;; Auto-save if buffer was originally unmodified
-      (when (and (not was-modified) (buffer-file-name))
-        (save-buffer))
-      ;; Build diff output
-      (let* ((old-lines (split-string old-content "\n"))
-             (new-lines (split-string content "\n"))
-             (diff-output (concat
-                           (mapconcat (lambda (l) (concat "- " l)) old-lines "\n")
-                           "\n"
-                           (mapconcat (lambda (l) (concat "+ " l)) new-lines "\n"))))
-        (format "Replaced %s lines %d-%d (ID: %s)%s\n\n%s"
-                (buffer-name buf) start-line end-line lock-id
-                (if (and (not was-modified) (buffer-file-name))
-                    " (auto-saved)"
-                  "")
-                diff-output)))))
+      (let ((did-save nil))
+        (when (and (not was-modified) (buffer-file-name))
+          (save-buffer)
+          (setq did-save t))
+        ;; Build diff output
+        (let* ((old-lines (split-string old-content "\n"))
+               (new-lines (split-string content "\n"))
+               (diff-output (concat
+                             (mapconcat (lambda (l) (concat "- " l)) old-lines "\n")
+                             "\n"
+                             (mapconcat (lambda (l) (concat "+ " l)) new-lines "\n")))
+               (source-name (or source (buffer-name buf)))
+               (save-status (cond
+                             (did-save " (auto-saved)")
+                             ((not (buffer-file-name)) "")
+                             (t "\n\nNOTE: File was NOT auto-saved because it had unsaved changes when locked. Use save_buffer to save explicitly."))))
+          (format "Replaced %s lines %d-%d (ID: %s)%s\n\n%s"
+                  source-name start-line end-line lock-id
+                  save-status
+                  diff-output))))))
 
 (claude-mcp-deftool edit
-  "Replace the locked region with new content. Requires a prior lock call.
-If the buffer was unmodified before locking, it will be auto-saved after writing."
+  "Replace the locked region with new content. Requires a prior lock_file or lock_buffer call.
+
+SIMPLE USAGE: If only one lock exists, just provide content:
+  edit(content=\"new code here\")
+
+The lock is automatically found and the content is replaced.
+If the file was unmodified before locking, it will be auto-saved after editing.
+If the file had unsaved changes when locked, you must call save_buffer explicitly."
   :function #'claude-mcp-write-region
   :safe t
-  :args ((buffer-name string "Name of the buffer (optional if file_path provided)")
-         (content string :required "New content to replace the locked region")
-         (file-path string "Path to file - used to find buffer if buffer-name doesn't match")
-         (lock-id string "Lock ID to edit (from lock response). Optional if only one lock exists.")))
+  :args ((content string :required "New content to replace the locked region")
+         (buffer-name string "Name of the buffer (usually not needed)")
+         (file-path string "Path to file (usually not needed)")
+         (lock-id string "Lock ID to edit. Optional if only one lock exists.")))
 
 ;;;; Batch Lock/Edit/Unlock Operations
 ;;
@@ -1806,6 +2055,40 @@ Designed to be called via MCP by Claude AI."
   :function #'claude-mcp-buffer-info
   :safe t
   :args ((buffer-name string :required "Name of the buffer")))
+
+(defun claude-mcp-save-buffer (&optional buffer-name file-path)
+  "Save a buffer to disk.
+If BUFFER-NAME is provided, save that buffer.
+If FILE-PATH is provided, find the buffer visiting that file and save it.
+If neither is provided, returns an error.
+Returns confirmation message on success."
+  ;; Validate args
+  (when (and buffer-name (not (stringp buffer-name)))
+    (error "save_buffer: buffer_name must be a string, got %s" (type-of buffer-name)))
+  (when (and file-path (not (stringp file-path)))
+    (error "save_buffer: file_path must be a string, got %s" (type-of file-path)))
+  (unless (or buffer-name file-path)
+    (error "save_buffer: Must provide either buffer_name or file_path"))
+  
+  (let ((buf (claude-mcp--get-buffer buffer-name file-path)))
+    (unless buf
+      (error "save_buffer: Buffer '%s' does not exist" (or buffer-name file-path)))
+    (with-current-buffer buf
+      (unless (buffer-file-name)
+        (error "save_buffer: Buffer '%s' is not visiting a file" (buffer-name buf)))
+      (if (buffer-modified-p)
+          (progn
+            (save-buffer)
+            (format "Saved %s to %s" (buffer-name buf) (buffer-file-name)))
+        (format "Buffer %s has no unsaved changes" (buffer-name buf))))))
+
+(claude-mcp-deftool save_buffer
+  "Save a buffer to disk. Use this after editing a file that wasn't auto-saved.
+
+If the edit tool reports that a file was NOT auto-saved, call this to save your changes."
+  :function #'claude-mcp-save-buffer
+  :args ((buffer-name string "Name of the buffer to save")
+         (file-path string "Path to the file (alternative to buffer_name)")))
 
 (claude-mcp-deftool search-buffer
   "Search for a pattern in a buffer and return matches with context lines (similar to grep). Supports regex patterns and context control."

@@ -763,12 +763,13 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if not elisp_fn:
             raise ValueError(f"Tool {name} has no function defined")
 
-        # Auto-inject agent_name for lock/lock_region/locks if not provided
-        if name in ("lock", "lock_region", "locks") and "agent_name" not in arguments:
+        # Auto-inject agent_name if tool requests it via inject_agent_name flag
+        if tool_def.get("inject_agent_name") and "agent_name" not in arguments:
             if SESSION_BUFFER_NAME:
                 arguments["agent_name"] = SESSION_BUFFER_NAME
 
         # Auto-inject from_buffer for send_message if not provided
+        # TODO: Convert this to use a flag like inject_agent_name
         if name == "send_message" and not arguments.get("from_buffer"):
             if SESSION_BUFFER_NAME:
                 arguments["from_buffer"] = SESSION_BUFFER_NAME
