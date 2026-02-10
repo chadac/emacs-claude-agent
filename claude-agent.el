@@ -242,6 +242,25 @@ Set to 0 to disable automatic retries."
   :type 'integer
   :group 'claude-agent)
 
+(defcustom claude-agent-log-directory
+  (expand-file-name "claude-agent/logs" (or (getenv "XDG_DATA_HOME")
+                                            "~/.local/share"))
+  "Directory where Claude agent log files are stored.
+Each session creates a log file named after its work directory.
+Defaults to ~/.local/share/claude-agent/logs (or $XDG_DATA_HOME/claude-agent/logs)."
+  :type 'directory
+  :group 'claude-agent)
+
+(defun claude-agent--log-file (work-dir)
+  "Return the log file path for a session in WORK-DIR.
+Creates the log directory if it doesn't exist."
+  (let* ((log-dir (expand-file-name claude-agent-log-directory))
+         (dir-name (file-name-nondirectory (directory-file-name work-dir)))
+         (log-file (expand-file-name (concat dir-name ".log") log-dir)))
+    (unless (file-directory-p log-dir)
+      (make-directory log-dir t))
+    log-file))
+
 ;;;; Buffer-local Variables
 (defvar-local claude--cwd nil
   "Buffer-local variable storing the current working directory for this Claude session.")

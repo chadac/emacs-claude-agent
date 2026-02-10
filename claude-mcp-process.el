@@ -20,6 +20,7 @@
 ;; Declare variable and function from Claude.el
 (defvar claude--package-dir)
 (declare-function claude--package-root "claude-agent")
+(declare-function claude-agent--log-file "claude-agent")
 
 ;;;; Customization
 
@@ -274,7 +275,7 @@ WORK-DIR can be either:
          (mcp-config (claude--generate-mcp-config expanded-dir buffer-name))
          (agent-args (list "--work-dir" expanded-dir
                           "--mcp-config" mcp-config
-                          "--log-file" (expand-file-name "claude-agent.log" expanded-dir)))
+                          "--log-file" (claude-agent--log-file expanded-dir)))
          ;; Resolve system prompt file path
          (prompt-file (when claude-mcp-system-prompt-file
                         (if (file-name-absolute-p claude-mcp-system-prompt-file)

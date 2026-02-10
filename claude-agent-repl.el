@@ -26,6 +26,7 @@
 ;; Declare function from claude-agent.el (can't require due to circular dependency)
 (declare-function claude--package-root "claude-agent")
 (declare-function claude-agent--get-agent-dir "claude-agent")
+(declare-function claude-agent--log-file "claude-agent")
 
 
 
@@ -2723,7 +2724,7 @@ Optional ADDITIONAL-ALLOWED-TOOLS is a list of extra tools to pre-authorize."
     (message "Starting Emacs server for MCP...")
     (server-start))
   (let* ((agent-dir (claude-agent--get-agent-dir))
-         (log-file (expand-file-name "claude-agent.log" work-dir))
+         (log-file (claude-agent--log-file work-dir))
          (buffer-name (buffer-name buffer))
          (mcp-config (when claude-agent-enable-mcp
                        (claude-agent--generate-mcp-config work-dir buffer-name)))

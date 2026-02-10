@@ -840,6 +840,7 @@ If the buffer doesn't exist, provide file_path to auto-open it."
          (end-line integer :required "Last line to lock (1-indexed, inclusive)")
          (agent-name string "Name of the agent owning the lock (auto-set by MCP server)")
          (file-path string "Path to file - if provided and buffer doesn't exist, opens the file")))
+
 (defun claude-mcp--resolve-lock-id (lock-id)
   "Resolve LOCK-ID: if provided use it, otherwise auto-resolve when only 1 lock exists.
 Returns the resolved lock ID or signals an error."
