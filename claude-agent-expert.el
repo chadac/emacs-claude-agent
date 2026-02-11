@@ -151,8 +151,9 @@ Otherwise returns PATH expanded."
 
 (defun claude-agent-expert--get-project-from-buffer (buffer-name)
   "Extract project name from expert BUFFER-NAME.
-Returns nil if not an expert buffer."
-  (when (string-match "\\*claude:\\([^:]+\\):expert\\*" buffer-name)
+Returns nil if not an expert buffer or if BUFFER-NAME is nil."
+  (when (and buffer-name
+             (string-match "\\*claude:\\([^:]+\\):expert\\*" buffer-name))
     (match-string 1 buffer-name)))
 
 (defun claude-agent-expert--kb-file (project-name)
@@ -171,33 +172,33 @@ Returns nil if not an expert buffer."
 (defun claude-agent-expert--check-permission (tool-name tool-args buffer-name)
   "Check if TOOL-NAME with TOOL-ARGS is allowed for expert BUFFER-NAME.
 Returns nil if allowed, or an error message string if denied."
-  (unless (claude-agent-expert--is-expert-session-p buffer-name)
-    ;; Not an expert session, allow everything
-    (cl-return-from claude-agent-expert--check-permission nil))
+  (cond
+   ;; Not an expert session, allow everything
+   ((not (claude-agent-expert--is-expert-session-p buffer-name))
+    nil)
 
-  (let ((project-name (claude-agent-expert--get-project-from-buffer buffer-name)))
-    ;; Check if tool is in allowlist
-    (unless (member tool-name claude-agent-expert-allowed-tools)
-      (cl-return-from claude-agent-expert--check-permission
-        (format "Permission denied: Expert sessions cannot use '%s'. Use expert_respond to answer queries or expert_kb to manage knowledge."
-                tool-name)))
+   ;; Tool not in allowlist
+   ((not (member tool-name claude-agent-expert-allowed-tools))
+    (format "Permission denied: Expert sessions cannot use '%s'. Use expert_respond to answer queries or expert_kb to manage knowledge."
+            tool-name))
 
-    ;; For edit tools, check that they're only targeting the KB file
-    (when (member tool-name '("lock_file" "lock_buffer" "lock" "locks"
-                              "edit" "edits" "unlock" "unlocks" "save_buffer"))
-      (let ((file-path (or (cdr (assq 'file_path tool-args))
-                           ;; For buffer-based operations, try to resolve
-                           (when-let ((buf-name (cdr (assq 'buffer_name tool-args))))
-                             (buffer-file-name (get-buffer buf-name))))))
-        (when (and file-path
-                   (not (claude-agent-expert--is-kb-file-p file-path project-name)))
-          (cl-return-from claude-agent-expert--check-permission
-            (format "Permission denied: Expert sessions can only edit the knowledge base file (%s), not '%s'."
-                    (claude-agent-expert--kb-file project-name)
-                    file-path)))))
+   ;; Edit tools need to target KB file only
+   ((member tool-name '("lock_file" "lock_buffer" "lock" "locks"
+                        "edit" "edits" "unlock" "unlocks" "save_buffer"))
+    (let* ((project-name (claude-agent-expert--get-project-from-buffer buffer-name))
+           (file-path (or (cdr (assq 'file_path tool-args))
+                          (when-let ((buf-name (cdr (assq 'buffer_name tool-args))))
+                            (buffer-file-name (get-buffer buf-name))))))
+      (if (and file-path
+               (not (claude-agent-expert--is-kb-file-p file-path project-name)))
+          (format "Permission denied: Expert sessions can only edit the knowledge base file (%s), not '%s'."
+                  (claude-agent-expert--kb-file project-name)
+                  file-path)
+        ;; KB file or no file specified - allowed
+        nil)))
 
-    ;; All checks passed
-    nil))
+   ;; Tool is in allowlist and not an edit tool - allowed
+   (t nil)))
 
 ;;;; Expert Session Management
 
@@ -366,18 +367,22 @@ Spawns an expert if one doesn't exist, sends the query, and waits for response."
 
 ;;;; MCP Tool: expert-respond
 
-(defun claude-agent-expert-mcp-respond (response)
+(defun claude-agent-expert-mcp-respond (response &optional agent-name)
   "Respond to the pending query with RESPONSE.
-This tool is only available to expert sessions."
+This tool is only available to expert sessions.
+AGENT-NAME is auto-injected by the MCP server."
   (unless response (error "response is required"))
 
-  ;; Get current buffer name (the expert)
-  (let* ((expert-buffer (or (bound-and-true-p claude-session-buffer-name)
+  ;; Get current buffer name (the expert) - prefer injected agent-name
+  (let* ((expert-buffer (or agent-name
+                            (bound-and-true-p claude-session-buffer-name)
                             "unknown"))
          (pending (gethash expert-buffer claude-agent-expert--pending-queries)))
 
     (unless pending
-      (error "No pending query to respond to"))
+      (error "No pending query to respond to. Expert buffer: %s, Pending queries: %S"
+             expert-buffer
+             (hash-table-keys claude-agent-expert--pending-queries)))
 
     (let ((caller (plist-get pending :caller))
           (original-query (plist-get pending :query)))
@@ -399,23 +404,25 @@ This tool is only available to expert sessions."
 
 ;;;; MCP Tool: expert-kb
 
-(defun claude-agent-expert-mcp-kb (action &optional title kb-type content heading query)
+(defun claude-agent-expert-mcp-kb (action &optional title kb-type content heading query agent-name)
   "Manage the expert's knowledge base.
 ACTION is one of: search, get, create, update, list.
 TITLE is the entry title (for create/update/get).
 KB-TYPE is the entry type: architecture, pattern, gotcha, faq.
 CONTENT is the entry content (for create/update).
 HEADING is the parent heading to add under (for create).
-QUERY is the search query (for search)."
+QUERY is the search query (for search).
+AGENT-NAME is auto-injected by the MCP server."
   (unless action (error "action is required"))
 
-  ;; Get current session info
-  (let* ((expert-buffer (or (bound-and-true-p claude-session-buffer-name)
+  ;; Get current session info - prefer injected agent-name
+  (let* ((expert-buffer (or agent-name
+                            (bound-and-true-p claude-session-buffer-name)
                             "unknown"))
          (project-name (claude-agent-expert--get-project-from-buffer expert-buffer)))
 
     (unless project-name
-      (error "expert_kb can only be used by expert sessions"))
+      (error "expert_kb can only be used by expert sessions (buffer: %s)" expert-buffer))
 
     (let ((kb-file (claude-agent-expert--kb-file project-name)))
       (pcase action
@@ -654,7 +661,9 @@ The system tracks pending queries and this ensures proper routing."
     :function #'claude-agent-expert-mcp-respond
     :safe nil
     :needs-session-cwd nil
-    :args ((response string :required "Your response to the query")))
+    :inject-agent-name t
+    :args ((response string :required "Your response to the query")
+           (agent-name string "Auto-injected by the MCP server. Do not set manually.")))
 
   ;; expert_kb - For experts to manage their knowledge base
   (claude-mcp-deftool expert-kb
@@ -677,12 +686,14 @@ The KB is stored as an org file and persists across sessions."
     :function #'claude-agent-expert-mcp-kb
     :safe nil
     :needs-session-cwd nil
+    :inject-agent-name t
     :args ((action string :required "Action: search, get, create, update, list")
            (title string "Entry title (for get/create/update)")
            (kb-type string "Entry type: architecture, pattern, gotcha, faq (for create)")
            (content string "Entry content (for create/update)")
            (heading string "Parent heading to create under (optional, defaults based on type)")
-           (query string "Search query (for search action)")))
+           (query string "Search query (for search action)")
+           (agent-name string "Auto-injected by the MCP server. Do not set manually.")))
 
   ;; list_experts - List available expert sessions
   (claude-mcp-deftool list-experts

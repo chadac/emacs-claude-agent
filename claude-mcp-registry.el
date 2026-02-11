@@ -25,11 +25,14 @@
 (defmacro claude-mcp-deftool (name docstring &rest args)
   "Define an MCP tool NAME with DOCSTRING.
 NAME uses Lisp conventions (dashes), automatically converted to underscores for MCP.
-ARGS is a plist with :function, :safe, :needs-session-cwd, :async, :timeout,
-and :args keys.
+ARGS is a plist with :function, :safe, :needs-session-cwd, :inject-agent-name,
+:async, :timeout, and :args keys.
 
 :safe t marks tool as safe (no side effects, can be pre-authorized)
 :needs-session-cwd t marks tool as needing session context (default-directory binding)
+:inject-agent-name t marks tool as needing the agent's buffer name injected.
+  The MCP server will auto-inject the `agent_name` argument with the session's
+  buffer name (from CLAUDE_AGENT_BUFFER_NAME env var).
 :async t marks tool as async — the tool function receives a TASK-ID as its first
   argument and must call `claude-mcp-async-complete' or `claude-mcp-async-error'
   to return its result.  The function should return the symbol `:async-started'
@@ -37,7 +40,6 @@ and :args keys.
 :timeout N (required when :async t) — per-tool timeout in seconds.  The MCP
   server will cancel the task and call `claude-mcp-async-cancel' if the tool
   does not complete within this time.
-
 Example (sync):
   (claude-mcp-deftool get-buffer-content
     \"Get the content of an Emacs buffer.\"
@@ -101,6 +103,7 @@ Called by Python server via emacsclient to get tool definitions."
                          (needs_session_cwd . ,(if (plist-member def :needs-session-cwd)
                                                    (if (plist-get def :needs-session-cwd) t :json-false)
                                                  t))  ; default to t if not specified
+                         (inject_agent_name . ,(if (plist-get def :inject-agent-name) t :json-false))
                          (args . ,(claude-mcp--convert-args (plist-get def :args))))))
          ;; Add timeout for async tools
          (when (plist-get def :async)
