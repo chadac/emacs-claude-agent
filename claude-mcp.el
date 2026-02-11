@@ -25,7 +25,7 @@
 (require 'claude-mcp-magit)
 (require 'claude-mcp-notes)
 (require 'claude-kb)
-
+(require 'claude-agent-expert)
 ;;;; Tool Registry
 ;;
 ;; The tool registry (claude-mcp-tools, claude-mcp-deftool macro, etc.)
