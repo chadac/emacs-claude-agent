@@ -1642,9 +1642,9 @@ Any keypress exits watch mode."
 (advice-add 'claude-mcp-lock-region :around #'claude-mcp--lock-region-with-watch-notify)
 
 ;; Update write-region to notify watch mode
-(defun claude-mcp--write-region-with-watch-notify (orig-fun buffer-name content &optional file-path lock-id)
+(defun claude-mcp--write-region-with-watch-notify (orig-fun content &optional buffer-name file-path lock-id)
   "Advice for `claude-mcp-write-region' to notify watch mode."
-  (let ((result (funcall orig-fun buffer-name content file-path lock-id)))
+  (let ((result (funcall orig-fun content buffer-name file-path lock-id)))
     (when claude-mcp-watch-mode
       (when-let ((buf (claude-mcp--get-buffer buffer-name file-path)))
         ;; Get position from the lock info that was just used
