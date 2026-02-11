@@ -17,6 +17,7 @@
 ;;; Code:
 
 (require 'magit-section nil t)
+(require 'claude-mcp-registry)
 
 (defun claude-mcp-magit-section-query--strip-indent (text)
   "Remove common leading whitespace from TEXT.
@@ -441,6 +442,418 @@ Added to `git-commit-post-finish-hook'.
   (claude-mcp-magit--clear-proposed-commit))
 
 (add-hook 'git-commit-post-finish-hook #'claude-mcp-magit--post-commit-cleanup)
+
+;;;; Direct Commit Operations
+;;
+;; These operations create commits directly without the propose/approve workflow.
+;; Useful for automated workflows where user approval is not required.
+
+(defun claude-mcp-magit-commit (message &optional directory no-gpg-sign)
+  "Create a commit with MESSAGE.
+If NO-GPG-SIGN is non-nil (default t), skip GPG signing.
+DIRECTORY defaults to claude-session-cwd.
+Works correctly in git worktrees."
+  (let* ((start-dir (or directory claude-session-cwd default-directory))
+         (default-directory (or (claude-mcp-magit--git-toplevel start-dir) start-dir))
+         (no-sign (if (eq no-gpg-sign nil) nil t)))  ; default to t
+    (unless (claude-mcp-magit--git-toplevel)
+      (error "Not in a git repository: %s" start-dir))
+    (let ((staged (claude-mcp-magit--git-lines "diff" "--cached" "--name-only")))
+      (unless staged
+        (error "No files staged for commit"))
+      (let ((args (list "commit" "-m" message)))
+        (when no-sign
+          (push "--no-gpg-sign" args))
+        (apply #'claude-mcp-magit--git-output (nreverse args)))
+      `((status . "committed")
+        (message . ,message)
+        (files . ,staged)))))
+
+(defun claude-mcp-magit-amend (message &optional directory force no-gpg-sign)
+  "Amend HEAD commit with MESSAGE.
+Fails if HEAD has been pushed unless FORCE is non-nil.
+If NO-GPG-SIGN is non-nil (default t), skip GPG signing.
+DIRECTORY defaults to claude-session-cwd.
+Works correctly in git worktrees."
+  (let* ((start-dir (or directory claude-session-cwd default-directory))
+         (default-directory (or (claude-mcp-magit--git-toplevel start-dir) start-dir))
+         (no-sign (if (eq no-gpg-sign nil) nil t)))  ; default to t
+    (unless (claude-mcp-magit--git-toplevel)
+      (error "Not in a git repository: %s" start-dir))
+    ;; Safety check: is HEAD pushed?
+    (unless force
+      (let* ((branch (ignore-errors
+                       (string-trim (claude-mcp-magit--git-output "symbolic-ref" "--short" "HEAD"))))
+             (upstream (when branch
+                         (ignore-errors
+                           (string-trim (claude-mcp-magit--git-output 
+                            "rev-parse" "--abbrev-ref" (concat branch "@{upstream}"))))))
+             (head-pushed (when upstream
+                            (zerop (car (claude-mcp-magit--call-git
+                                         "merge-base" "--is-ancestor" "HEAD" upstream))))))
+        (when head-pushed
+          (error "HEAD commit has been pushed to %s. Use force=true to amend anyway" upstream))))
+    (let ((args (list "commit" "--amend" "-m" message)))
+      (when no-sign
+        (push "--no-gpg-sign" args))
+      (apply #'claude-mcp-magit--git-output (nreverse args)))
+    `((status . "amended")
+      (message . ,message))))
+
+(defun claude-mcp-magit-rebase (onto &optional directory autosquash)
+  "Rebase current branch onto ONTO.
+If AUTOSQUASH is non-nil, automatically apply fixup/squash commits.
+DIRECTORY defaults to claude-session-cwd.
+Non-interactive only. Auto-aborts on conflicts.
+Works correctly in git worktrees."
+  (let* ((start-dir (or directory claude-session-cwd default-directory))
+         (default-directory (or (claude-mcp-magit--git-toplevel start-dir) start-dir)))
+    (unless (claude-mcp-magit--git-toplevel)
+      (error "Not in a git repository: %s" start-dir))
+    (let ((args (list "rebase")))
+      (when autosquash
+        (push "--autosquash" args))
+      (push onto args)
+      (let ((result (apply #'claude-mcp-magit--call-git (nreverse args))))
+        (if (zerop (car result))
+            `((status . "rebased")
+              (onto . ,onto)
+              (output . ,(string-trim (cdr result))))
+          ;; Rebase failed - likely conflicts
+          (claude-mcp-magit--git-output "rebase" "--abort")  ; Clean up
+          (error "Rebase failed (aborted automatically):\n%s" (cdr result)))))))
+
+(defun claude-mcp-magit-ignore (file &optional directory unignore)
+  "Mark FILE as assumed-unchanged so git ignores local modifications.
+If UNIGNORE is non-nil, remove the assume-unchanged flag instead.
+DIRECTORY defaults to claude-session-cwd.
+Useful for temporarily ignoring changes to tracked files.
+Works correctly in git worktrees."
+  (let* ((start-dir (or directory claude-session-cwd default-directory))
+         (default-directory (or (claude-mcp-magit--git-toplevel start-dir) start-dir)))
+    (unless (claude-mcp-magit--git-toplevel)
+      (error "Not in a git repository: %s" start-dir))
+    (let ((flag (if unignore "--no-assume-unchanged" "--assume-unchanged")))
+      (claude-mcp-magit--git-output "update-index" flag "--" file)
+      `((status . ,(if unignore "unignored" "ignored"))
+        (file . ,file)))))
+
+;;;; Additional Git Operations
+;;
+;; Extended git operations for more comprehensive repository management.
+
+(defun claude-mcp-magit-branch (&optional directory)
+  "Get branch information for DIRECTORY (or claude-session-cwd).
+Returns an alist with :current (current branch name) and :branches (list of all branches).
+Works correctly in git worktrees."
+  (let* ((start-dir (or directory claude-session-cwd default-directory))
+         (default-directory (or (claude-mcp-magit--git-toplevel start-dir) start-dir)))
+    (unless (claude-mcp-magit--git-toplevel)
+      (error "Not in a git repository: %s" start-dir))
+    (let ((current (string-trim
+                    (or (ignore-errors
+                          (claude-mcp-magit--git-output "symbolic-ref" "--short" "HEAD"))
+                        ;; Detached HEAD
+                        (concat "HEAD detached at "
+                                (claude-mcp-magit--git-output "rev-parse" "--short" "HEAD")))))
+          (branches (claude-mcp-magit--git-lines "branch" "--format=%(refname:short)")))
+      `((current . ,current)
+        (branches . ,branches)))))
+
+(defun claude-mcp-magit-show (revision &optional file directory)
+  "Show content of REVISION (commit hash, branch, tag, etc).
+If FILE is provided, show only that file's content at REVISION.
+DIRECTORY defaults to claude-session-cwd.
+Works correctly in git worktrees."
+  (let* ((start-dir (or directory claude-session-cwd default-directory))
+         (default-directory (or (claude-mcp-magit--git-toplevel start-dir) start-dir)))
+    (unless (claude-mcp-magit--git-toplevel)
+      (error "Not in a git repository: %s" start-dir))
+    (if file
+        (claude-mcp-magit--git-output "show" (format "%s:%s" revision file))
+      (claude-mcp-magit--git-output "show" "--stat" "--patch" revision))))
+
+(defun claude-mcp-magit-blame (file &optional directory revision)
+  "Get git blame output for FILE.
+DIRECTORY defaults to claude-session-cwd.
+REVISION optionally specifies a commit to blame from (default: HEAD).
+Returns blame output with commit hash, author, date, and line content.
+Works correctly in git worktrees."
+  (let* ((start-dir (or directory claude-session-cwd default-directory))
+         (default-directory (or (claude-mcp-magit--git-toplevel start-dir) start-dir)))
+    (unless (claude-mcp-magit--git-toplevel)
+      (error "Not in a git repository: %s" start-dir))
+    (let ((args (list "blame" "--date=short")))
+      (when revision
+        (setq args (append args (list revision))))
+      (setq args (append args (list "--" file)))
+      (apply #'claude-mcp-magit--git-output args))))
+
+(defun claude-mcp-magit-stash-list (&optional directory)
+  "List all stashes for DIRECTORY (or claude-session-cwd).
+Returns a list of stash entries with index, message, and branch.
+Works correctly in git worktrees."
+  (let* ((start-dir (or directory claude-session-cwd default-directory))
+         (default-directory (or (claude-mcp-magit--git-toplevel start-dir) start-dir)))
+    (unless (claude-mcp-magit--git-toplevel)
+      (error "Not in a git repository: %s" start-dir))
+    (claude-mcp-magit--git-output "stash" "list")))
+
+(defun claude-mcp-magit-stash-push (&optional message directory include-untracked)
+  "Stash current changes with optional MESSAGE.
+DIRECTORY defaults to claude-session-cwd.
+If INCLUDE-UNTRACKED is non-nil, also stash untracked files.
+Works correctly in git worktrees."
+  (let* ((start-dir (or directory claude-session-cwd default-directory))
+         (default-directory (or (claude-mcp-magit--git-toplevel start-dir) start-dir)))
+    (unless (claude-mcp-magit--git-toplevel)
+      (error "Not in a git repository: %s" start-dir))
+    (let ((args (list "stash" "push")))
+      (when include-untracked
+        (setq args (append args (list "--include-untracked"))))
+      (when message
+        (setq args (append args (list "-m" message))))
+      (apply #'claude-mcp-magit--git-output args))))
+
+(defun claude-mcp-magit-stash-pop (&optional stash-ref directory)
+  "Pop a stash, applying it to the working directory.
+STASH-REF defaults to stash@{0} (most recent).
+DIRECTORY defaults to claude-session-cwd.
+Works correctly in git worktrees."
+  (let* ((start-dir (or directory claude-session-cwd default-directory))
+         (default-directory (or (claude-mcp-magit--git-toplevel start-dir) start-dir))
+         (ref (or stash-ref "stash@{0}")))
+    (unless (claude-mcp-magit--git-toplevel)
+      (error "Not in a git repository: %s" start-dir))
+    (claude-mcp-magit--git-output "stash" "pop" ref)))
+
+(defun claude-mcp-magit-file-log (file &optional count directory)
+  "Get commit history for FILE.
+COUNT defaults to 10.  DIRECTORY defaults to claude-session-cwd.
+Returns a detailed log with commit hash, author, date, and message.
+Works correctly in git worktrees."
+  (let* ((start-dir (or directory claude-session-cwd default-directory))
+         (default-directory (or (claude-mcp-magit--git-toplevel start-dir) start-dir))
+         (n (or count 10)))
+    (unless (claude-mcp-magit--git-toplevel)
+      (error "Not in a git repository: %s" start-dir))
+    (claude-mcp-magit--git-output
+     "log" (format "-%d" n)
+     "--format=%h %ad %an: %s"
+     "--date=short"
+     "--follow"
+     "--" file)))
+
+(defun claude-mcp-magit-checkout-file (file &optional revision directory)
+  "Checkout FILE from REVISION (default: HEAD), discarding local changes.
+DIRECTORY defaults to claude-session-cwd.
+Works correctly in git worktrees."
+  (let* ((start-dir (or directory claude-session-cwd default-directory))
+         (default-directory (or (claude-mcp-magit--git-toplevel start-dir) start-dir))
+         (rev (or revision "HEAD")))
+    (unless (claude-mcp-magit--git-toplevel)
+      (error "Not in a git repository: %s" start-dir))
+    (claude-mcp-magit--git-output "checkout" rev "--" file)
+    (format "Checked out %s from %s" file rev)))
+
+(defun claude-mcp-magit-remote (&optional directory)
+  "Get remote information for DIRECTORY (or claude-session-cwd).
+Returns an alist with remote names and their URLs.
+Works correctly in git worktrees."
+  (let* ((start-dir (or directory claude-session-cwd default-directory))
+         (default-directory (or (claude-mcp-magit--git-toplevel start-dir) start-dir)))
+    (unless (claude-mcp-magit--git-toplevel)
+      (error "Not in a git repository: %s" start-dir))
+    (let ((remotes (claude-mcp-magit--git-lines "remote")))
+      (mapcar (lambda (remote)
+                (let ((url (string-trim
+                            (claude-mcp-magit--git-output "remote" "get-url" remote))))
+                  (cons remote url)))
+              remotes))))
+
+(defun claude-mcp-magit-tags (&optional directory)
+  "List all tags for DIRECTORY (or claude-session-cwd).
+Returns a list of tag names, most recent first.
+Works correctly in git worktrees."
+  (let* ((start-dir (or directory claude-session-cwd default-directory))
+         (default-directory (or (claude-mcp-magit--git-toplevel start-dir) start-dir)))
+    (unless (claude-mcp-magit--git-toplevel)
+      (error "Not in a git repository: %s" start-dir))
+    (claude-mcp-magit--git-lines "tag" "--sort=-creatordate")))
+
+(defun claude-mcp-magit-rev-parse (revision &optional directory)
+  "Resolve REVISION to a full commit hash.
+DIRECTORY defaults to claude-session-cwd.
+Useful for resolving branch names, tags, HEAD~N, etc. to actual commits.
+Works correctly in git worktrees."
+  (let* ((start-dir (or directory claude-session-cwd default-directory))
+         (default-directory (or (claude-mcp-magit--git-toplevel start-dir) start-dir)))
+    (unless (claude-mcp-magit--git-toplevel)
+      (error "Not in a git repository: %s" start-dir))
+    (claude-mcp-magit--git-output "rev-parse" revision)))
+
+;;;; MCP Tool Definitions
+;;
+;; Tool definitions for the MCP (Model Context Protocol) interface.
+
+(claude-mcp-deftool magit-status
+  "Get current git status including staged, unstaged, and untracked files. Returns branch name and file lists."
+  :function #'claude-mcp-magit-status
+  :safe t
+  :args ((directory string "Git repository directory (default: session working directory)")))
+
+(claude-mcp-deftool magit-stage
+  "Stage files for commit. Takes a list of file paths relative to the repository root."
+  :function #'claude-mcp-magit-stage
+  :safe nil
+  :args ((files array :required "Array of file paths to stage")
+         (directory string "Git repository directory (default: session working directory)")))
+
+(claude-mcp-deftool magit-unstage
+  "Unstage files (remove from staging area). Takes a list of file paths."
+  :function #'claude-mcp-magit-unstage
+  :safe nil
+  :args ((files array :required "Array of file paths to unstage")
+         (directory string "Git repository directory (default: session working directory)")))
+
+(claude-mcp-deftool magit-diff
+  "Get git diff output. Can get diff for a specific file or all changes. Use staged=true for staged changes."
+  :function #'claude-mcp-magit-diff
+  :safe t
+  :args ((file string "Specific file to diff (default: all files)")
+         (directory string "Git repository directory (default: session working directory)")
+         (staged boolean "If true, show staged diff; otherwise show unstaged diff")))
+
+(claude-mcp-deftool magit-log
+  "Get recent git commit log entries."
+  :function #'claude-mcp-magit-log
+  :safe t
+  :args ((count integer "Number of log entries to return (default: 5)")
+         (directory string "Git repository directory (default: session working directory)")))
+
+(claude-mcp-deftool magit-commit-propose
+  "Propose a commit for user approval. The user must call magit-commit-approve to actually create the commit. This allows the user to review and sign the commit with their GPG key."
+  :function #'claude-mcp-magit-commit-propose
+  :safe nil
+  :args ((message string :required "The commit message to propose")
+         (directory string "Git repository directory (default: session working directory)")))
+
+(claude-mcp-deftool magit-commit-status
+  "Check if there's a pending commit proposal awaiting user approval."
+  :function #'claude-mcp-magit-commit-status
+  :safe t
+  :args ())
+
+(claude-mcp-deftool magit-commit
+  "Create a git commit with staged changes. Use magit-commit-propose for commits requiring user approval/GPG signing."
+  :function #'claude-mcp-magit-commit
+  :safe nil
+  :args ((message string :required "Commit message")
+         (directory string "Git repository directory (default: session working directory)")
+         (no_gpg_sign boolean "Skip GPG signing (default: true for agent commits)")))
+
+(claude-mcp-deftool magit-amend
+  "Amend the HEAD commit with a new message. Fails if HEAD is already pushed unless force=true."
+  :function #'claude-mcp-magit-amend
+  :safe nil
+  :args ((message string :required "New commit message")
+         (directory string "Git repository directory (default: session working directory)")
+         (force boolean "Allow amending pushed commits (dangerous, default: false)")
+         (no_gpg_sign boolean "Skip GPG signing (default: true for agent commits)")))
+
+(claude-mcp-deftool magit-rebase
+  "Rebase current branch onto another branch/commit. Non-interactive only. Auto-aborts on conflicts."
+  :function #'claude-mcp-magit-rebase
+  :safe nil
+  :args ((onto string :required "Branch or commit to rebase onto")
+         (directory string "Git repository directory (default: session working directory)")
+         (autosquash boolean "Apply fixup!/squash! commits automatically (default: false)")))
+
+(claude-mcp-deftool magit-ignore
+  "Ignore local changes to a tracked file using git update-index --assume-unchanged. Use unignore=true to restore tracking."
+  :function #'claude-mcp-magit-ignore
+  :safe nil
+  :args ((file string :required "File path to ignore or unignore")
+         (directory string "Git repository directory (default: session working directory)")
+         (unignore boolean "If true, restore tracking of the file (default: false)")))
+
+(claude-mcp-deftool magit-branch
+  "Get branch information including current branch and list of all branches."
+  :function #'claude-mcp-magit-branch
+  :safe t
+  :args ((directory string "Git repository directory (default: session working directory)")))
+
+(claude-mcp-deftool magit-show
+  "Show content of a commit, or a specific file at a commit. Use this to inspect commit details or historical file contents."
+  :function #'claude-mcp-magit-show
+  :safe t
+  :args ((revision string :required "Commit hash, branch name, tag, or other revision (e.g., 'HEAD~1', 'main', 'v1.0.0')")
+         (file string "Optional file path to show only that file's content at the revision")
+         (directory string "Git repository directory (default: session working directory)")))
+
+(claude-mcp-deftool magit-blame
+  "Get git blame output for a file, showing who last modified each line."
+  :function #'claude-mcp-magit-blame
+  :safe t
+  :args ((file string :required "File path to blame")
+         (directory string "Git repository directory (default: session working directory)")
+         (revision string "Optional revision to blame from (default: HEAD)")))
+
+(claude-mcp-deftool magit-stash-list
+  "List all stashes in the repository."
+  :function #'claude-mcp-magit-stash-list
+  :safe t
+  :args ((directory string "Git repository directory (default: session working directory)")))
+
+(claude-mcp-deftool magit-stash-push
+  "Stash current changes. Useful for temporarily saving work in progress."
+  :function #'claude-mcp-magit-stash-push
+  :safe nil
+  :args ((message string "Optional message to describe the stash")
+         (directory string "Git repository directory (default: session working directory)")
+         (include-untracked boolean "If true, also stash untracked files")))
+
+(claude-mcp-deftool magit-stash-pop
+  "Pop the most recent stash (or specified stash), applying it to the working directory."
+  :function #'claude-mcp-magit-stash-pop
+  :safe nil
+  :args ((stash-ref string "Stash reference (default: stash@{0})")
+         (directory string "Git repository directory (default: session working directory)")))
+
+(claude-mcp-deftool magit-file-log
+  "Get commit history for a specific file. Useful for understanding file evolution."
+  :function #'claude-mcp-magit-file-log
+  :safe t
+  :args ((file string :required "File path to get history for")
+         (count integer "Number of commits to show (default: 10)")
+         (directory string "Git repository directory (default: session working directory)")))
+
+(claude-mcp-deftool magit-checkout-file
+  "Checkout a file from a specific revision, discarding local changes to that file."
+  :function #'claude-mcp-magit-checkout-file
+  :safe nil
+  :args ((file string :required "File path to checkout")
+         (revision string "Revision to checkout from (default: HEAD)")
+         (directory string "Git repository directory (default: session working directory)")))
+
+(claude-mcp-deftool magit-remote
+  "Get information about configured git remotes (names and URLs)."
+  :function #'claude-mcp-magit-remote
+  :safe t
+  :args ((directory string "Git repository directory (default: session working directory)")))
+
+(claude-mcp-deftool magit-tags
+  "List all tags in the repository, sorted by creation date (most recent first)."
+  :function #'claude-mcp-magit-tags
+  :safe t
+  :args ((directory string "Git repository directory (default: session working directory)")))
+
+(claude-mcp-deftool magit-rev-parse
+  "Resolve a revision to its full commit hash. Useful for resolving branch names, tags, HEAD~N, etc."
+  :function #'claude-mcp-magit-rev-parse
+  :safe t
+  :args ((revision string :required "Revision to resolve (e.g., 'HEAD', 'main~3', 'v1.0.0')")
+         (directory string "Git repository directory (default: session working directory)")))
 
 (provide 'claude-mcp-magit)
 ;;; claude-mcp-magit.el ends here
