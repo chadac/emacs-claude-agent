@@ -91,26 +91,26 @@ The agent can edit any file in the project.
 
 ### Target Highlighting
 
-When you start a oneshot agent, the target region is highlighted:
+When you start a oneshot agent, the target region is highlighted using the same
+visual style as locked regions:
 
-- Yellow background for the target area
-- Border lines marking the scope
-- Header showing agent status
+- Region background uses `bg-region` color (`#3e4451` dark / `#e5e5e6` light)
+- A label line shows ` ⚡ Oneshot (scope) ` with blue background
+- The region is protected from user edits while the agent works
 
-### Fringe Indicator
+### Header Line Indicator
 
-A visual marker appears in the fringe to indicate:
+When a oneshot agent is active, a header line indicator appears:
 
-- Agent is running
-- Target region boundaries
+- Amber background with ` ⚡ Claude oneshot active (N agents) `
+- Press `C-c c o` to visit/switch to agent buffers
 
-### Status Updates
+### Completion Tooltip
 
-The header line shows:
+When the agent completes, a tooltip label appears:
 
-- Agent name/ID
-- Current status (working, waiting, done)
-- Elapsed time
+- Format: ` ✓ Completed message ` with blue background
+- Press `C-c c y` to dismiss tooltips
 
 ## Agent Lifecycle
 

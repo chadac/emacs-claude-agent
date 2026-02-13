@@ -3064,7 +3064,7 @@ Optional ADDITIONAL-ALLOWED-TOOLS is a list of extra tools to pre-authorize."
           (setq-local claude-agent--system-prompt-file prompt-file))))
     ;; Check for auto-reject rules first (needed for both allowed-tools and env var)
     (let ((effective-reject-rules (claude-agent--effective-auto-reject-rules work-dir)))
-      ;; Add safe MCP tools as --allowedTools (pre-authorized, no permission prompts)
+      ;; Add safe MCP tools as --allowed-tools (pre-authorized, no permission prompts)
       ;; Also include any additional allowed tools passed by caller
       ;; When auto-reject rules exist, also pre-authorize the MCP edit tools so they
       ;; bypass Claude Code's permission system and reach the MCP server, where

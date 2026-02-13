@@ -351,14 +351,24 @@ class ClaudeAgent:
                 return domain in url
             input_value = url
         elif tool_name.startswith("mcp__emacs__"):
-            # MCP emacs tools - match against file_path parameter
-            input_value = tool_input.get("file_path", "")
+            # MCP emacs tools - match against file_path or buffer_name parameter
+            # Buffer tools use buffer_name, file tools use file_path
+            if "buffer" in tool_name:
+                input_value = tool_input.get("buffer_name", "")
+            else:
+                input_value = tool_input.get("file_path", "")
         else:
             # For unknown tools, try to match any input value
             input_value = str(tool_input)
 
         # Handle wildcards
-        if pattern_content.endswith("*"):
+        # Single * matches in directory (non-recursive): Edit(/path/*)
+        # Double ** matches recursively: Edit(/path/**)
+        if pattern_content.endswith("**"):
+            # Recursive match - strip ** and match any file under the prefix
+            prefix = pattern_content[:-2]
+            return input_value.startswith(prefix)
+        elif pattern_content.endswith("*"):
             prefix = pattern_content[:-1]
             # For Bash commands, strip the colon separator from the prefix
             # and ensure word boundary (command ends or has space/tab after)
@@ -851,9 +861,10 @@ class ClaudeAgent:
         is_slash_command = message.startswith("/")
 
         # Consume any pending system messages (display already happened at receipt time)
+        # System reminders go BEFORE the user message to set context
         if self._pending_system_messages and not is_slash_command:
             reminder_block = _build_system_reminder_block(self._pending_system_messages)
-            full_message = f"{message}\n\n{reminder_block}"
+            full_message = f"{reminder_block}\n\n{message}"
             self._pending_system_messages.clear()
         else:
             full_message = message

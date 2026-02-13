@@ -3276,7 +3276,7 @@ Returns confirmation that attention was requested."
 
 (defun claude-mcp-get-safe-tools ()
   "Return list of tool names marked as safe.
-These tools can be pre-authorized via --allowedTools."
+These tools can be pre-authorized via --allowed-tools."
   (let (safe-tools)
     (maphash
      (lambda (name def)
@@ -3293,7 +3293,7 @@ Agent messaging tools (spawn_agent, list_agents, etc.) are now
 registered via claude-mcp-deftool in claude-mcp-messaging.el.")
 
 (defun claude-mcp-get-safe-tools-for-cli ()
-  "Return safe MCP tool names formatted for Claude CLI --allowedTools.
+  "Return safe MCP tool names formatted for Claude CLI --allowed-tools.
 Format: mcp__emacs__toolname
 Includes both elisp-defined tools and native Python tools."
   (let ((elisp-tools (claude-mcp-get-safe-tools))

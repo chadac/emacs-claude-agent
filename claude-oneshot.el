@@ -53,49 +53,46 @@ The buffer will be renamed with a '-done' suffix instead of being killed."
 
 (defface claude-oneshot-target-face
   '((((class color) (background dark))
-     :background "#4a4a2e" :extend t)
+     (:background "#3e4451" :extend t))
     (((class color) (background light))
-     :background "#ffffcc" :extend t)
-    (t :inverse-video t :extend t))
+     (:background "#e5e5e6" :extend t)))
   "Face for highlighting the target region of a oneshot agent.
-Uses a yellow tint to indicate the region being edited."
-  :group 'claude-oneshot)
-
-(defface claude-oneshot-target-border-face
-  '((((class color) (background dark))
-     :foreground "#b8a520" :background "#3a3a20" :extend t)
-    (((class color) (background light))
-     :foreground "#8b7500" :background "#eeeeaa" :extend t)
-    (t :weight bold :extend t))
-  "Face for the border lines of a oneshot target region.
-The :extend property ensures the background stretches across the buffer."
+Matches the lock region face for visual consistency."
   :group 'claude-oneshot)
 
 (defface claude-oneshot-header-face
   '((((class color) (background dark))
-     :foreground "#e5c07b" :background "#3e3d32" :weight bold)
+     (:foreground "#282c34" :background "#e5c07b" :weight bold))
     (((class color) (background light))
-     :foreground "#986801" :background "#fffacd" :weight bold)
-    (t :weight bold :inverse-video t))
-  "Face for the oneshot agent indicator header line."
+     (:foreground "#fafafa" :background "#986801" :weight bold)))
+  "Face for the oneshot agent indicator header line.
+Uses amber background matching the modeline style guide."
   :group 'claude-oneshot)
 
-(defface claude-oneshot-fringe-face
+(defface claude-oneshot-label-face
   '((((class color) (background dark))
-     :foreground "#e5c07b")
+     (:background "#61afef" :foreground "#282c34" :weight bold :height 0.85))
     (((class color) (background light))
-     :foreground "#986801"))
-  "Face for the fringe indicator of oneshot target regions."
+     (:background "#4078f2" :foreground "#fafafa" :weight bold :height 0.85)))
+  "Face for oneshot overlay labels (e.g. \" ⚡ Oneshot (region) \").
+Matches the lock label face for visual consistency."
   :group 'claude-oneshot)
 
-(defface claude-oneshot-tooltip-face
+(defface claude-oneshot-completed-label-face
   '((((class color) (background dark))
-     :background "#2d4a2d" :foreground "#98c379" :extend t)
+     (:background "#61afef" :foreground "#282c34" :weight bold :height 0.85))
     (((class color) (background light))
-     :background "#e6ffe6" :foreground "#2d5a2d" :extend t)
-    (t :inverse-video t :extend t))
-  "Face for oneshot completion tooltip messages.
-Uses a green tint to indicate success/completion."
+     (:background "#4078f2" :foreground "#fafafa" :weight bold :height 0.85)))
+  "Face for oneshot completion labels (e.g. \" ✓ Completed by *claude:oneshot* \").
+Matches the lock label face for visual consistency."
+  :group 'claude-oneshot)
+
+(defface claude-oneshot-written-face
+  '((((class color) (background dark))
+     (:background "#2e4a2e" :extend t))
+    (((class color) (background light))
+     (:background "#e6ffe6" :extend t)))
+  "Face for briefly highlighting newly written content by oneshot."
   :group 'claude-oneshot)
 
 ;;;; Variables
@@ -139,19 +136,7 @@ Used by source buffers to track which oneshot agents are working on them.")
 (defvar-local claude-oneshot--target-position nil
   "Position where the oneshot was invoked (for tooltip placement).")
 
-;;;; Fringe Bitmap
 
-(when (fboundp 'define-fringe-bitmap)
-  (define-fringe-bitmap 'claude-oneshot-fringe-indicator
-    [#b11111111
-     #b11111111
-     #b11000011
-     #b11000011
-     #b11000011
-     #b11000011
-     #b11111111
-     #b11111111]
-    nil nil 'center))
 
 ;;;; Core Functions
 
@@ -194,17 +179,41 @@ Used by source buffers to track which oneshot agents are working on them.")
      "- The done message appears as a tooltip in their buffer\n\n"
      "ONESHOT RULES:\n"
      "1. Do the ONE task described below - nothing else\n"
-     "2. Call mcp__emacs__done with a message when finished (REQUIRED!)\n"
+     "2. Call mcp__emacs__done when finished (REQUIRED!)\n"
      "3. If the user asked for an explanation, include it in the done message\n"
      "4. If you need user input, use mcp__emacs__prompt_choice\n"
      "5. Do NOT use watch_buffer, watch_for_pattern, or similar tools\n\n"
-     "TOOL ACCESS:\n"
-     "- For FILE-BACKED BUFFERS: Use the SDK's Edit/Write/Read tools (pre-authorized within your scope)\n"
-     "- For NON-FILE BUFFERS (like *scratch*, capture buffers, etc.):\n"
-     "  * Use mcp__emacs__edit_buffer(buffer_name, old_string, new_string) to edit\n"
-     "  * Use mcp__emacs__read_buffer(buffer_name) to read\n"
-     "  * The SDK Edit tool will NOT work on non-file buffers!\n"
-     "- You can also use mcp__emacs__edit_file and mcp__emacs__read_file for files\n\n"
+     ;; Tool access instructions vary by scope
+     (pcase scope
+       ((or 'line 'region)
+        ;; Line/region scopes: done() replaces the target automatically
+        (concat
+         "HOW TO MAKE CHANGES:\n"
+         "For LINE/REGION scope, the done tool handles everything:\n"
+         "  mcp__emacs__done(message, replacement_text)\n"
+         "- Pass your NEW content as replacement_text\n"
+         "- The target region will be replaced automatically\n"
+         "- Do NOT use lock_file or edit tools\n\n"))
+       ('buffer
+        ;; Buffer scope: use lock/edit workflow
+        (concat
+         "HOW TO MAKE CHANGES:\n"
+         "Use the lock_file → edit workflow:\n"
+         "  1. mcp__emacs__lock_file(file_path, start_line, end_line)\n"
+         "  2. mcp__emacs__edit(content=\"new content\")\n"
+         "The lock auto-releases after edit. File is auto-saved.\n"
+         "Call mcp__emacs__done(message) when finished.\n\n"))
+       ((or 'directory 'project)
+        ;; Directory/project scope: use lock/edit workflow
+        (concat
+         "HOW TO MAKE CHANGES:\n"
+         "Use the lock_file → edit workflow:\n"
+         "  1. mcp__emacs__lock_file(file_path, start_line, end_line)\n"
+         "  2. mcp__emacs__edit(content=\"new content\")\n"
+         "The lock auto-releases after edit. File is auto-saved.\n"
+         "You can read files with mcp__emacs__read_file(file_path).\n"
+         "Call mcp__emacs__done(message) when finished.\n\n"))
+       (_ ""))
      "═══════════════════════════════════════════════════════════════\n"
      "SCOPE: " (upcase (symbol-name scope)) "\n"
      (pcase scope
@@ -231,84 +240,96 @@ Used by source buffers to track which oneshot agents are working on them.")
         (format "You may modify any file in project: %s\n" project))
        (_ "")))))
 
+
+
 (defun claude-oneshot--get-allowed-tools-for-scope (scope target-info)
   "Return list of tools to pre-authorize based on SCOPE and TARGET-INFO.
-Includes SDK tools (Edit, Write, Read, Glob) and MCP tools for buffer editing.
+For line/region scopes, the done() tool handles replacement automatically.
+For buffer/directory/project scopes, agents use the lock/edit workflow.
 
 The format follows Claude Code's allowed tools syntax:
-- ToolName(path) for specific files
-- ToolName(dir/*) for directory
-- ToolName(dir/**) for recursive
-- mcp__server__tool(arg) for MCP tools"
+- ToolName(path) for specific files (built-in tools only)
+- ToolName(dir/*) for directory (built-in tools only)
+- ToolName(dir/**) for recursive (built-in tools only)
+
+NOTE: Parameterized permissions do NOT work for MCP tools.  The Claude CLI
+only parses parameters for built-in tools (Bash, Edit, Read, etc.).  MCP
+tools like `mcp__emacs__lock_file' must be authorized without parameters,
+which grants access to all paths.  Path-based restrictions for MCP tools
+should be enforced at the MCP server level instead."
   (let ((file (plist-get target-info :file))
         (buffer-name (plist-get target-info :buffer-name))
         (directory (plist-get target-info :directory))
         (project (plist-get target-info :project)))
     (append
-     ;; Always allow done tool for oneshot completion
-     ;; NOTE: Plain tool names work; parameterized format (tool(arg)) doesn't seem to work
-     ;; for MCP tools. TODO: Investigate if SDK supports parameterized MCP tool permissions
-     (list "mcp__emacs__done"
-           "mcp__emacs__edit_buffer"
-           "mcp__emacs__read_buffer")
-     ;; SDK and MCP tools for file/scope editing
+     ;; Core MCP tools that all oneshot agents need
+     ;; NOTE: MCP tools cannot have parameterized restrictions - the CLI ignores them
+     (list
+      ;; Completion tool - always needed (handles replacement for line/region)
+      "mcp__emacs__done"
+      ;; User interaction
+      "mcp__emacs__prompt_choice"
+      "mcp__emacs__confirm")
+     ;; Scope-specific tools
      (pcase scope
-       ;; For line/region/buffer scope, allow Edit for that specific file
-       ((or 'line 'region 'buffer)
+       ;; Line/region scope: done() handles replacement, no lock/edit needed
+       ((or 'line 'region)
+        ;; Allow reading the file for context
+        ;; Built-in Read tool supports path restriction; MCP read_file does not
         (when file
-          (list (format "Edit(%s)" file)
-                (format "Write(%s)" file)
-                (format "Read(%s)" file)
-                (format "Glob(%s)" (file-name-directory file))
-                (format "mcp__emacs__edit_file(%s)" file)
-                (format "mcp__emacs__read_file(%s)" file))))
-       ;; For directory scope, allow Edit for files in that directory
+          (list (format "Read(%s)" file)
+                "mcp__emacs__read_file")))
+       ;; Buffer scope: needs lock/edit workflow
+       ('buffer
+        (append
+         ;; MCP tools: plain names only (no parameterization supported)
+         (list "mcp__emacs__edit" "mcp__emacs__unlock"
+               "mcp__emacs__lock_file" "mcp__emacs__lock_buffer"
+               "mcp__emacs__read_file" "mcp__emacs__read_buffer")
+         ;; Built-in tools: can use path restrictions
+         (when file
+           (list (format "Read(%s)" file)
+                 (format "Glob(%s)" (file-name-directory file))))))
+       ;; Directory scope: needs lock/edit workflow
        ('directory
         (when directory
-          (list (format "Edit(%s*)" directory)
-                (format "Write(%s*)" directory)
+          (list ;; MCP tools: plain names (path restrictions not supported)
+                "mcp__emacs__edit" "mcp__emacs__unlock"
+                "mcp__emacs__lock_file" "mcp__emacs__read_file"
+                ;; Built-in tools: can use path restrictions
                 (format "Read(%s*)" directory)
-                (format "Glob(%s)" directory)
-                (format "mcp__emacs__edit_file(%s*)" directory)
-                (format "mcp__emacs__read_file(%s*)" directory))))
-       ;; For project scope, allow Edit anywhere in project
+                (format "Glob(%s)" directory))))
+       ;; Project scope: needs lock/edit workflow
        ('project
         (when project
-          (list (format "Edit(%s**)" project)
-                (format "Write(%s**)" project)
+          (list ;; MCP tools: plain names (path restrictions not supported)
+                "mcp__emacs__edit" "mcp__emacs__unlock"
+                "mcp__emacs__lock_file" "mcp__emacs__read_file"
+                ;; Built-in tools: can use path restrictions
                 (format "Read(%s**)" project)
-                (format "Glob(%s)" project)
-                (format "mcp__emacs__edit_file(%s**)" project)
-                (format "mcp__emacs__read_file(%s**)" project))))
+                (format "Glob(%s)" project))))
        (_ nil)))))
-
-(defun claude-oneshot--create-border-string (label)
-  "Create a border string with LABEL that stretches across the window.
-Returns a string like \"-- claude oneshot ----------------\" that fills the width."
-  (let* ((prefix (concat "-- " label " "))
-         (prefix-len (length prefix))
-         ;; Use a reasonable width, will extend with :extend face property
-         (fill-width (max 0 (- 80 prefix-len)))
-         (dashes (make-string fill-width ?-)))
-    (concat prefix dashes)))
-
-(defun claude-oneshot--create-target-overlay (buffer start end)
-  "Create an overlay in BUFFER from START to END to highlight the target."
-  (when (buffer-live-p buffer)
-    (with-current-buffer buffer
-      (let ((ov (make-overlay start end)))
+(defun claude-oneshot--create-target-overlay (buffer2 start end &optional scope)
+  "Create an overlay in BUFFER2 from START to END to highlight the target.
+SCOPE is the oneshot scope (line, region, buffer, etc.) for the label."
+  (when (buffer-live-p buffer2)
+    (with-current-buffer buffer2
+      (let* ((ov (make-overlay start end))
+             (scope-str (if scope (symbol-name scope) "oneshot"))
+             ;; Create label using the defined face (matches lock overlay style)
+             (label (propertize (format " ⚡ Oneshot (%s) " scope-str)
+                                'face 'claude-oneshot-label-face)))
         (overlay-put ov 'face 'claude-oneshot-target-face)
         (overlay-put ov 'claude-oneshot t)
         (overlay-put ov 'priority 100)
-        ;; Add before-string with simple dashed border that extends
-        (overlay-put ov 'before-string
-                     (propertize (concat (claude-oneshot--create-border-string "claude oneshot") "\n")
-                                 'face 'claude-oneshot-target-border-face
-                                 'display '(space-width 1)))
-        ;; Add after-string with simple dashed border that extends
-        (overlay-put ov 'after-string
-                     (propertize (concat "\n" (make-string 80 ?-))
-                                 'face 'claude-oneshot-target-border-face))
+        ;; Add before-string with label (matching lock style)
+        (overlay-put ov 'before-string (concat label "\n"))
+        (overlay-put ov 'help-echo (format "Oneshot agent target (%s scope)" scope-str))
+        ;; Protect the region from user edits while oneshot is working
+        (overlay-put ov 'modification-hooks
+                     (list (lambda (_ov after-p _beg _end &optional _len)
+                             (unless after-p
+                               (error "This region is being edited by a oneshot agent")))))
         ov))))
 
 (defun claude-oneshot--clear-target-overlay (buffer)
@@ -377,8 +398,8 @@ Returns a string like \"-- claude oneshot ----------------\" that fills the widt
 
 (defun claude-oneshot--create-tooltip (buffer position message)
   "Create a tooltip overlay in BUFFER at POSITION with MESSAGE.
-The tooltip shows the completion message and a hint to dismiss it.
-Long messages are wrapped to fit within the box."
+The tooltip shows the completion message using a label style matching lock overlays.
+Uses the label style per STYLE_GUIDE.md instead of box-drawn tooltips."
   (when (and (buffer-live-p buffer) message (not (string-empty-p message)))
     (with-current-buffer buffer
       (save-excursion
@@ -386,43 +407,17 @@ Long messages are wrapped to fit within the box."
         ;; Move to end of line to place tooltip after content
         (end-of-line)
         (let* ((ov (make-overlay (point) (point)))
-               (box-width 64)
-               ;; Inner width: box-width minus "│ " (2) and " │" (2) = 4
-               (content-width (- box-width 4))  ; Width for text between │ and │
-               (border-line (make-string (- box-width 2) ?─))
-               (hint-text "Press C-c c y to dismiss")
-               ;; Wrap the message - account for "✓ " prefix on first line
-               (wrapped-lines (claude-oneshot--wrap-text message (- content-width 2)))
-               ;; Build the content lines - first line gets checkmark
-               (first-line (car wrapped-lines))
-               (rest-lines (cdr wrapped-lines))
-               ;; Build all lines as plain strings
-               (lines
-                (append
-                 ;; Top border
-                 (list (concat "┌" border-line "┐"))
-                 ;; First line with checkmark
-                 (list (concat "│ ✓ " first-line
-                               (make-string (max 0 (- content-width 2 (length first-line))) ? )
-                               " │"))
-                 ;; Rest of wrapped lines (indented to align with first line)
-                 (mapcar (lambda (line)
-                           (concat "│   " line
-                                   (make-string (max 0 (- content-width 2 (length line))) ? )
-                                   " │"))
-                         rest-lines)
-                 ;; Hint line
-                 (list (concat "│ " hint-text
-                               (make-string (max 0 (- content-width (length hint-text))) ? )
-                               " │"))
-                 ;; Bottom border
-                 (list (concat "└" border-line "┘"))))
-               ;; Join all lines and apply single face to entire string
-               ;; Start with plain newline, then propertized content with trailing newline
-               (tooltip-content
-                (concat "\n"
-                        (propertize (concat (mapconcat #'identity lines "\n") "\n")
-                                    'face 'claude-oneshot-tooltip-face))))
+               ;; Truncate long messages for the label
+               (truncated-msg (if (> (length message) 60)
+                                  (concat (substring message 0 57) "...")
+                                message))
+               ;; Create label in the style of lock overlays
+               (label (propertize (format " ✓ %s " truncated-msg)
+                                  'face 'claude-oneshot-completed-label-face))
+               ;; Add hint as a separate dimmed line
+               (hint (propertize " (C-c c y to dismiss)"
+                                 'face '(:foreground "#5c6370" :height 0.85)))
+               (tooltip-content (concat "\n" label hint)))
           (overlay-put ov 'after-string tooltip-content)
           (overlay-put ov 'claude-oneshot-tooltip t)
           (overlay-put ov 'priority 200)
@@ -458,13 +453,7 @@ Long messages are wrapped to fit within the box."
     (claude-oneshot--clear-all-tooltips)
     (message "Dismissed %d tooltip%s" count (if (= count 1) "" "s"))))
 
-(defun claude-oneshot--add-fringe-indicator (overlay)
-  "Add a fringe indicator to OVERLAY."
-  (when overlay
-    (overlay-put overlay 'line-prefix
-                 (propertize " " 'display
-                             '(left-fringe claude-oneshot-fringe-indicator
-                                           claude-oneshot-fringe-face)))))
+
 
 (defun claude-oneshot--get-line-region ()
   "Get the start and end positions of the current line."
@@ -555,21 +544,21 @@ Returns the buffer of the new agent."
       (let ((ov (claude-oneshot--create-target-overlay
                  source-buffer
                  (plist-get target :start)
-                 (plist-get target :end))))
-        ;; Add fringe indicator
-        (claude-oneshot--add-fringe-indicator ov)
+                 (plist-get target :end)
+                 scope)))
         (with-current-buffer buf
           (setq claude-oneshot--target-overlay ov))))
 
     ;; Register this agent in the source buffer (for header line indicator)
     (claude-oneshot--register-in-source source-buffer buf)
 
-    ;; Start the process with system prompt (no --continue to avoid context bleed)
+    ;; Start the process (no --continue to avoid context bleed)
     ;; Pass scope-appropriate allowed tools so the agent can edit without permission prompts
+    ;; System prompt is sent via stdin as system_message (injected into first user message)
     (let* ((system-prompt (claude-oneshot--get-scope-system-prompt scope target))
            (allowed-tools (claude-oneshot--get-allowed-tools-for-scope scope target))
            (proc (claude-agent--start-process
-                  work-dir buf nil nil claude-oneshot-model system-prompt allowed-tools)))
+                  work-dir buf nil nil claude-oneshot-model nil allowed-tools)))
       (with-current-buffer buf
         (setq claude-agent--process proc)
         ;; Set up timeout timer
@@ -585,23 +574,30 @@ Returns the buffer of the new agent."
                      :start-time (current-time))
                claude-oneshot--active-agents)
 
-      ;; Send the user request after a short delay
-      ;; System prompt is handled by the SDK via --system-prompt flag
+      ;; Send system message first, then user prompt after a short delay
+      ;; The system_message type queues text for injection into next user message
       (run-with-timer
        1.5 nil
-       (lambda (buffer user-prompt)
+       (lambda (buffer sys-prompt user-prompt)
          (when (buffer-live-p buffer)
            (with-current-buffer buffer
              (when (and claude-agent--process
                         (process-live-p claude-agent--process))
-               ;; Send just the user request - system prompt is already set
+               ;; Send system message first (gets injected into user message)
+               (process-send-string
+                claude-agent--process
+                (concat (json-encode
+                         `((type . "system_message")
+                           (text . ,sys-prompt)))
+                        "\n"))
+               ;; Then send the user request
                (process-send-string
                 claude-agent--process
                 (concat (json-encode
                          `((type . "message")
                            (text . ,user-prompt)))
                         "\n"))))))
-       buf prompt))
+       buf system-prompt prompt))
 
     ;; Return the buffer (but don't display it)
     buf))
@@ -675,9 +671,10 @@ Sends a reminder to call done or ask for input."
 
 ;;;; MCP Tools for Oneshot
 
-(defun claude-mcp-done (&optional message)
+(defun claude-mcp-done (&optional message replacement-text)
   "Signal that a oneshot agent has completed its task.
 Optional MESSAGE is displayed to the user and shown as a tooltip in the source buffer.
+Optional REPLACEMENT-TEXT replaces the target region (for line/region scopes).
 This tool should be called by oneshot agents when they finish."
   (let ((buf (current-buffer)))
     ;; Check if we're actually in a oneshot buffer
@@ -685,7 +682,29 @@ This tool should be called by oneshot agents when they finish."
              claude-oneshot--is-oneshot)
         (let ((source-buf claude-oneshot--source-buffer)
               (tooltip-pos claude-oneshot--target-position)
-              (tooltip-msg message))
+              (tooltip-msg message)
+              (target-ov claude-oneshot--target-overlay))
+          ;; Replace target region if replacement text provided
+          (when (and replacement-text source-buf target-ov
+                     (overlay-buffer target-ov))
+            (with-current-buffer source-buf
+              ;; Save window configuration to preserve cursor position
+              (let ((windows (get-buffer-window-list source-buf nil t)))
+                (dolist (win windows)
+                  (with-selected-window win
+                    (let ((saved-point (point))
+                          (saved-window-start (window-start)))
+                      ;; Replace the overlay region
+                      (let ((start (overlay-start target-ov))
+                            (end (overlay-end target-ov)))
+                        (save-excursion
+                          (goto-char start)
+                          (delete-region start end)
+                          (insert replacement-text)))
+                      ;; Restore cursor position if it was before the change
+                      (when (< saved-point (overlay-start target-ov))
+                        (goto-char saved-point))
+                      (set-window-start win saved-window-start t)))))))
           ;; Create tooltip in source buffer before cleanup
           (when (and source-buf tooltip-pos tooltip-msg)
             (claude-oneshot--create-tooltip source-buf tooltip-pos tooltip-msg))
@@ -698,11 +717,12 @@ This tool should be called by oneshot agents when they finish."
       "done (not a oneshot agent)")))
 
 (claude-mcp-deftool done
-  "Signal completion of a oneshot task. Call this when you have finished your assigned task. The oneshot agent will be terminated and the user notified."
+  "Signal completion of a oneshot task. For LINE/REGION scopes, pass replacement_text to replace the target. The oneshot agent will be terminated and the user notified."
   :function #'claude-mcp-done
   :safe t
   :needs-session-cwd t
-  :args ((message string "Optional completion message to show the user")))
+  :args ((message string "Completion message to show the user")
+         (replacement_text string "New content to replace the target region (for line/region scopes)")))
 
 (defun claude-mcp-update-target (file-path &optional start-line end-line)
   "Update the visual highlighting for the current oneshot target.
@@ -725,7 +745,7 @@ START-LINE and END-LINE define the target region (optional)."
             (let ((end (point)))
               (setq claude-oneshot--target-overlay
                     (claude-oneshot--create-target-overlay
-                     claude-oneshot--source-buffer start end))))))))
+                     claude-oneshot--source-buffer start end 'updated))))))))
   "Target updated")
 
 (claude-mcp-deftool update-target
@@ -809,6 +829,50 @@ Prompts for what you want done."
                                      name scope elapsed)))))
        claude-oneshot--active-agents)
       (message "%s" msg))))
+
+;;;###autoload
+(defun claude-oneshot-visit ()
+  "Visit an active oneshot agent buffer with completion.
+If only one agent is active, switch to it directly.
+If no agents are active, show a message."
+  (interactive)
+  ;; First, clean up any dead agents from the hash table
+  (let ((dead-agents '()))
+    (maphash
+     (lambda (name info)
+       (unless (buffer-live-p (plist-get info :buffer))
+         (push name dead-agents)))
+     claude-oneshot--active-agents)
+    (dolist (name dead-agents)
+      (remhash name claude-oneshot--active-agents)))
+  ;; Now show the live agents
+  (if (= (hash-table-count claude-oneshot--active-agents) 0)
+      (message "No active oneshot agents")
+    (let ((agents '()))
+      ;; Build list of agent names with annotations
+      (maphash
+       (lambda (name info)
+         (let* ((buf (plist-get info :buffer))
+                (scope (plist-get info :scope))
+                (start-time (plist-get info :start-time))
+                (elapsed (float-time (time-subtract (current-time) start-time)))
+                (annotation (format " [%s, %.0fs]" scope elapsed)))
+           (push (cons name (list :annotation annotation :buffer buf))
+                 agents)))
+       claude-oneshot--active-agents)
+      (if (= (length agents) 1)
+          ;; Only one agent, switch directly
+          (switch-to-buffer (plist-get (cdar agents) :buffer))
+        ;; Multiple agents, prompt with completion
+        (let* ((completion-extra-properties
+                `(:annotation-function
+                  ,(lambda (name)
+                     (plist-get (cdr (assoc name agents)) :annotation))))
+               (selected (completing-read "Visit oneshot agent: "
+                                          (mapcar #'car agents)
+                                          nil t))
+               (buf (plist-get (cdr (assoc selected agents)) :buffer)))
+          (switch-to-buffer buf))))))
 
 ;;;###autoload
 (defun claude-oneshot-cancel-all ()

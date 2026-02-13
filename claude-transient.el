@@ -32,6 +32,7 @@
 (declare-function claude-oneshot-directory "claude-oneshot")
 (declare-function claude-oneshot-project "claude-oneshot")
 (declare-function claude-oneshot-list "claude-oneshot")
+(declare-function claude-oneshot-visit "claude-oneshot")
 (declare-function claude-oneshot-dismiss-tooltips "claude-oneshot")
 
 ;;;; Faces
@@ -90,7 +91,7 @@ Each entry is a plist with :key, :description, :command, :group, :if.")
                                                 "c" "C" "q" "k" "p" "P" "t" "i" "RET" "g" "w")
   "List of built-in keys in the agent menu.")
 
-(defvar claude-transient--builtin-pair-keys '("c" "b" "d" "p" "o" "x" "t" "D" "f" "C" "P" "s" "r" "w" "l")
+(defvar claude-transient--builtin-pair-keys '("c" "b" "d" "p" "o" "y" "x" "t" "D" "f" "C" "P" "s" "r" "w" "l")
   "List of built-in keys in the pair menu.")
 
 (defun claude-transient--key-exists-p (extensions key)
@@ -208,6 +209,12 @@ Signals an error if KEY is already registered."
   (interactive)
   (require 'claude-oneshot)
   (call-interactively #'claude-oneshot-list))
+
+(defun claude-transient-oneshot-visit ()
+  "Visit an active oneshot agent buffer with completion."
+  (interactive)
+  (require 'claude-oneshot)
+  (call-interactively #'claude-oneshot-visit))
 
 (defun claude-transient-dismiss-tooltips ()
   "Dismiss all oneshot tooltip overlays."
@@ -490,7 +497,7 @@ If a session already exists for this project, prompts for a slug."
     ("b" "Buffer" claude-transient-oneshot-buffer)
     ("d" "Directory" claude-transient-oneshot-directory)
     ("p" "Project" claude-transient-oneshot-project)
-    ("o" "List" claude-transient-oneshot-list)
+    ("o" "Visit" claude-transient-oneshot-visit)
     ("y" "Dismiss tips" claude-transient-dismiss-tooltips)]
    [:description "📋 Sessions"
     ("s" "Start" claude-transient-start-session)

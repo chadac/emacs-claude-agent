@@ -461,7 +461,7 @@ Returns a list of tool names marked as safe."
           (split-string (string-trim output) "\n" t))))))
 
 (defun claude--get-auto-allow-permissions ()
-  "Generate --allowedTools flag for safe tools.
+  "Generate --allowed-tools flag for safe tools.
 Includes both CLI commands (if enabled) and safe MCP tools."
   (let ((tools '()))
     ;; Add CLI tools if enabled
@@ -477,7 +477,7 @@ Includes both CLI commands (if enabled) and safe MCP tools."
                               (mapcar (lambda (tool) (format "mcp__emacs__%s" tool))
                                       mcp-safe-tools))))))
     (when tools
-      (list "--allowedTools" (string-join tools " ")))))
+      (list "--allowed-tools" (string-join tools ",")))))
 
 (defvar claude--mcp-config-file nil
   "Path to the dynamically generated MCP config file.")

@@ -44,14 +44,10 @@
       ;; Should be unique
       (should-not (string= name1 name2)))))
 
-(ert-deftest claude-oneshot-test-create-border-string ()
-  "Test border string creation."
-  :tags '(:unit :mcp :oneshot)
-  (when (fboundp 'claude-oneshot--create-border-string)
-    (let ((border (claude-oneshot--create-border-string "test label")))
-      (should (stringp border))
-      (should (string-match-p "test label" border))
-      (should (string-match-p "--" border)))))
+;; NOTE: claude-oneshot--create-border-string was removed when the style was
+;; updated from box-drawing style to lock-label style (per STYLE_GUIDE.md).
+;; The label is now created inline in claude-oneshot--create-target-overlay
+;; using propertize with claude-oneshot-label-face.
 
 (ert-deftest claude-oneshot-test-wrap-text ()
   "Test text wrapping."
