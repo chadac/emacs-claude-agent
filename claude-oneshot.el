@@ -309,6 +309,7 @@ should be enforced at the MCP server level instead."
                 (format "Read(%s**)" project)
                 (format "Glob(%s)" project))))
        (_ nil)))))
+
 (defun claude-oneshot--create-target-overlay (buffer2 start end &optional scope)
   "Create an overlay in BUFFER2 from START to END to highlight the target.
 SCOPE is the oneshot scope (line, region, buffer, etc.) for the label."
