@@ -110,6 +110,8 @@ Each entry is a plist with :caller, :query, :timestamp.")
     ;; Expert-specific tools
     "expert_respond"
     "expert_kb"
+    ;; TODO tools (experts can create TODOs)
+    "todo_create"
     ;; Utility tools
     "whoami"
     "list_agents"
