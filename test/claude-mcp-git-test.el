@@ -694,6 +694,230 @@ The variable `repo-dir' is bound to the repository path."
     (let ((result (claude-mcp-git-ignore "config.txt" repo-dir t)))
       (should (equal "unignored" (cdr (assoc 'status result)))))))
 
+
+;;; ============================================================
+;;; Interactive Rebase Tests
+;;; ============================================================
+
+(ert-deftest claude-mcp-git-test-rebase-interactive-get-commits ()
+  "Test getting commits for interactive rebase."
+  :tags '(:unit :git :rebase-interactive)
+  (claude-mcp-git-test-with-repo
+    ;; Create a base commit
+    (claude-mcp-git-test--create-file repo-dir "base.txt" "base")
+    (claude-mcp-git-test--stage-file repo-dir "base.txt")
+    (claude-mcp-git-test--commit repo-dir "Base commit")
+    ;; Create two more commits
+    (claude-mcp-git-test--create-file repo-dir "file1.txt" "content1")
+    (claude-mcp-git-test--stage-file repo-dir "file1.txt")
+    (claude-mcp-git-test--commit repo-dir "First feature commit")
+    (claude-mcp-git-test--create-file repo-dir "file2.txt" "content2")
+    (claude-mcp-git-test--stage-file repo-dir "file2.txt")
+    (claude-mcp-git-test--commit repo-dir "Second feature commit")
+    ;; Get commits since HEAD~2
+    (let ((commits (claude-mcp-git-rebase-interactive-get-commits "HEAD~2" repo-dir)))
+      (should (= 2 (length commits)))
+      ;; Commits should be in rebase order (oldest first)
+      (should (string-match-p "First feature" (cdr (assoc 'subject (car commits)))))
+      (should (string-match-p "Second feature" (cdr (assoc 'subject (cadr commits)))))
+      ;; Each commit should have expected keys
+      (let ((commit (car commits)))
+        (should (assoc 'hash commit))
+        (should (assoc 'short_hash commit))
+        (should (assoc 'subject commit))
+        (should (assoc 'author commit))
+        (should (assoc 'date commit))))))
+
+(ert-deftest claude-mcp-git-test-rebase-interactive-get-commits-empty ()
+  "Test getting commits when there are none to rebase."
+  :tags '(:unit :git :rebase-interactive)
+  (claude-mcp-git-test-with-repo
+    (claude-mcp-git-test--create-file repo-dir "file.txt" "content")
+    (claude-mcp-git-test--stage-file repo-dir "file.txt")
+    (claude-mcp-git-test--commit repo-dir "Only commit")
+    ;; HEAD..HEAD should return empty
+    (let ((commits (claude-mcp-git-rebase-interactive-get-commits "HEAD" repo-dir)))
+      (should (null commits)))))
+
+(ert-deftest claude-mcp-git-test-rebase-interactive-pick ()
+  "Test interactive rebase with all picks (no changes)."
+  :tags '(:unit :git :rebase-interactive)
+  (claude-mcp-git-test-with-repo
+    ;; Create base commit
+    (claude-mcp-git-test--create-file repo-dir "base.txt" "base")
+    (claude-mcp-git-test--stage-file repo-dir "base.txt")
+    (claude-mcp-git-test--commit repo-dir "Base commit")
+    ;; Get base commit hash
+    (let ((base-hash (string-trim (claude-mcp-git--output "rev-parse" "HEAD"))))
+      ;; Create two commits to rebase
+      (claude-mcp-git-test--create-file repo-dir "file1.txt" "content1")
+      (claude-mcp-git-test--stage-file repo-dir "file1.txt")
+      (claude-mcp-git-test--commit repo-dir "First commit")
+      (claude-mcp-git-test--create-file repo-dir "file2.txt" "content2")
+      (claude-mcp-git-test--stage-file repo-dir "file2.txt")
+      (claude-mcp-git-test--commit repo-dir "Second commit")
+      ;; Get commit hashes
+      (let* ((commits (claude-mcp-git-rebase-interactive-get-commits base-hash repo-dir))
+             (actions (mapcar (lambda (c)
+                                `((commit . ,(cdr (assoc 'short_hash c)))
+                                  (action . "pick")))
+                              commits))
+             (result (claude-mcp-git-rebase-interactive base-hash actions repo-dir)))
+        (should (equal "rebased" (cdr (assoc 'status result))))
+        ;; Verify commits still exist with same messages
+        (let ((log (claude-mcp-git-log 3 repo-dir)))
+          (should (string-match-p "First commit" log))
+          (should (string-match-p "Second commit" log)))))))
+
+(ert-deftest claude-mcp-git-test-rebase-interactive-drop ()
+  "Test interactive rebase with drop action."
+  :tags '(:unit :git :rebase-interactive)
+  (claude-mcp-git-test-with-repo
+    ;; Create base commit
+    (claude-mcp-git-test--create-file repo-dir "base.txt" "base")
+    (claude-mcp-git-test--stage-file repo-dir "base.txt")
+    (claude-mcp-git-test--commit repo-dir "Base commit")
+    (let ((base-hash (string-trim (claude-mcp-git--output "rev-parse" "HEAD"))))
+      ;; Create two commits
+      (claude-mcp-git-test--create-file repo-dir "file1.txt" "content1")
+      (claude-mcp-git-test--stage-file repo-dir "file1.txt")
+      (claude-mcp-git-test--commit repo-dir "Keep this commit")
+      (claude-mcp-git-test--create-file repo-dir "file2.txt" "content2")
+      (claude-mcp-git-test--stage-file repo-dir "file2.txt")
+      (claude-mcp-git-test--commit repo-dir "Drop this commit")
+      ;; Get commits and drop the second one
+      (let* ((commits (claude-mcp-git-rebase-interactive-get-commits base-hash repo-dir))
+             (actions `(((commit . ,(cdr (assoc 'short_hash (car commits))))
+                         (action . "pick"))
+                        ((commit . ,(cdr (assoc 'short_hash (cadr commits))))
+                         (action . "drop"))))
+             (result (claude-mcp-git-rebase-interactive base-hash actions repo-dir)))
+        (should (equal "rebased" (cdr (assoc 'status result))))
+        ;; Verify second commit is gone
+        (let ((log (claude-mcp-git-log 3 repo-dir)))
+          (should (string-match-p "Keep this commit" log))
+          (should-not (string-match-p "Drop this commit" log)))
+        ;; Verify file2.txt doesn't exist
+        (should-not (file-exists-p (expand-file-name "file2.txt" repo-dir)))))))
+
+(ert-deftest claude-mcp-git-test-rebase-interactive-squash ()
+  "Test interactive rebase with squash action."
+  :tags '(:unit :git :rebase-interactive)
+  (claude-mcp-git-test-with-repo
+    ;; Create base commit
+    (claude-mcp-git-test--create-file repo-dir "base.txt" "base")
+    (claude-mcp-git-test--stage-file repo-dir "base.txt")
+    (claude-mcp-git-test--commit repo-dir "Base commit")
+    (let ((base-hash (string-trim (claude-mcp-git--output "rev-parse" "HEAD"))))
+      ;; Create two commits to squash
+      (claude-mcp-git-test--create-file repo-dir "file1.txt" "content1")
+      (claude-mcp-git-test--stage-file repo-dir "file1.txt")
+      (claude-mcp-git-test--commit repo-dir "Main feature")
+      (claude-mcp-git-test--create-file repo-dir "file2.txt" "content2")
+      (claude-mcp-git-test--stage-file repo-dir "file2.txt")
+      (claude-mcp-git-test--commit repo-dir "Squash into main")
+      ;; Squash second into first
+      (let* ((commits (claude-mcp-git-rebase-interactive-get-commits base-hash repo-dir))
+             (actions `(((commit . ,(cdr (assoc 'short_hash (car commits))))
+                         (action . "pick"))
+                        ((commit . ,(cdr (assoc 'short_hash (cadr commits))))
+                         (action . "squash"))))
+             (result (claude-mcp-git-rebase-interactive base-hash actions repo-dir)))
+        (should (equal "rebased" (cdr (assoc 'status result))))
+        ;; Should only have 2 commits now (base + squashed)
+        (let ((default-directory repo-dir))
+          (should (= 2 (length (split-string
+                                (string-trim (shell-command-to-string "git rev-list HEAD"))
+                                "\n" t)))))
+        ;; Both files should exist
+        (should (file-exists-p (expand-file-name "file1.txt" repo-dir)))
+        (should (file-exists-p (expand-file-name "file2.txt" repo-dir)))))))
+
+(ert-deftest claude-mcp-git-test-rebase-interactive-fixup ()
+  "Test interactive rebase with fixup action."
+  :tags '(:unit :git :rebase-interactive)
+  (claude-mcp-git-test-with-repo
+    ;; Create base commit
+    (claude-mcp-git-test--create-file repo-dir "base.txt" "base")
+    (claude-mcp-git-test--stage-file repo-dir "base.txt")
+    (claude-mcp-git-test--commit repo-dir "Base commit")
+    (let ((base-hash (string-trim (claude-mcp-git--output "rev-parse" "HEAD"))))
+      ;; Create two commits
+      (claude-mcp-git-test--create-file repo-dir "file1.txt" "content1")
+      (claude-mcp-git-test--stage-file repo-dir "file1.txt")
+      (claude-mcp-git-test--commit repo-dir "Main feature")
+      (claude-mcp-git-test--create-file repo-dir "file1.txt" "content1 fixed")
+      (claude-mcp-git-test--stage-file repo-dir "file1.txt")
+      (claude-mcp-git-test--commit repo-dir "fixup! typo fix")
+      ;; Fixup second into first
+      (let* ((commits (claude-mcp-git-rebase-interactive-get-commits base-hash repo-dir))
+             (actions `(((commit . ,(cdr (assoc 'short_hash (car commits))))
+                         (action . "pick"))
+                        ((commit . ,(cdr (assoc 'short_hash (cadr commits))))
+                         (action . "fixup"))))
+             (result (claude-mcp-git-rebase-interactive base-hash actions repo-dir)))
+        (should (equal "rebased" (cdr (assoc 'status result))))
+        ;; Should only have 2 commits now
+        (let ((default-directory repo-dir))
+          (should (= 2 (length (split-string
+                                (string-trim (shell-command-to-string "git rev-list HEAD"))
+                                "\n" t)))))
+        ;; Fixup message should NOT appear in log (unlike squash)
+        (let ((log (claude-mcp-git-log 2 repo-dir)))
+          (should (string-match-p "Main feature" log))
+          (should-not (string-match-p "fixup" log)))))))
+
+(ert-deftest claude-mcp-git-test-rebase-interactive-reword ()
+  "Test interactive rebase with reword action."
+  :tags '(:unit :git :rebase-interactive)
+  (claude-mcp-git-test-with-repo
+    ;; Create base commit
+    (claude-mcp-git-test--create-file repo-dir "base.txt" "base")
+    (claude-mcp-git-test--stage-file repo-dir "base.txt")
+    (claude-mcp-git-test--commit repo-dir "Base commit")
+    (let ((base-hash (string-trim (claude-mcp-git--output "rev-parse" "HEAD"))))
+      ;; Create commit to reword
+      (claude-mcp-git-test--create-file repo-dir "file1.txt" "content1")
+      (claude-mcp-git-test--stage-file repo-dir "file1.txt")
+      (claude-mcp-git-test--commit repo-dir "Old message")
+      ;; Reword it
+      (let* ((commits (claude-mcp-git-rebase-interactive-get-commits base-hash repo-dir))
+             (actions `(((commit . ,(cdr (assoc 'short_hash (car commits))))
+                         (action . "reword")
+                         (message . "New improved message"))))
+             (result (claude-mcp-git-rebase-interactive base-hash actions repo-dir)))
+        (should (equal "rebased" (cdr (assoc 'status result))))
+        ;; Verify message was changed
+        (let ((log (claude-mcp-git-log 1 repo-dir)))
+          (should (string-match-p "New improved message" log))
+          (should-not (string-match-p "Old message" log)))))))
+
+(ert-deftest claude-mcp-git-test-rebase-interactive-validation-error ()
+  "Test that invalid actions are rejected."
+  :tags '(:unit :git :rebase-interactive :error)
+  (claude-mcp-git-test-with-repo
+    (claude-mcp-git-test--create-file repo-dir "file.txt" "content")
+    (claude-mcp-git-test--stage-file repo-dir "file.txt")
+    (claude-mcp-git-test--commit repo-dir "Commit")
+    ;; Invalid action
+    (should-error
+     (claude-mcp-git-rebase-interactive
+      "HEAD~1"
+      '(((commit . "abc123") (action . "invalid")))
+      repo-dir)
+     :type 'error)
+    ;; Missing commit
+    (should-error
+     (claude-mcp-git-rebase-interactive
+      "HEAD~1"
+      '(((action . "pick")))
+      repo-dir)
+     :type 'error)
+    ;; Empty actions
+    (should-error
+     (claude-mcp-git-rebase-interactive "HEAD~1" '() repo-dir)
+     :type 'error)))
+
 ;;; ============================================================
 ;;; Tool Registration Tests
 ;;; ============================================================
@@ -723,6 +947,8 @@ The variable `repo-dir' is bound to the repository path."
   (should (gethash "git_tags" claude-mcp-tools))
   (should (gethash "git_rev_parse" claude-mcp-tools))
   (should (gethash "git_rebase" claude-mcp-tools))
+  (should (gethash "git_rebase_interactive" claude-mcp-tools))
+  (should (gethash "git_rebase_interactive_get_commits" claude-mcp-tools))
   (should (gethash "git_ignore" claude-mcp-tools)))
 
 (provide 'claude-mcp-git-test)

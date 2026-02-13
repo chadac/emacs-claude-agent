@@ -578,6 +578,147 @@ Works correctly in git worktrees."
       (error "Not in a git repository: %s" start-dir))
     (claude-mcp-git--output "rev-parse" revision)))
 
+(defun claude-mcp-git-rebase-interactive (onto actions &optional directory)
+  "Perform an interactive rebase onto ONTO with specified ACTIONS.
+ACTIONS is a list of alists, each with keys:
+  - commit: The commit hash (short or full)
+  - action: One of \"pick\", \"reword\", \"edit\", \"squash\", \"fixup\", \"drop\"
+  - message: (optional) New commit message for \"reword\" action
+
+The actions are applied in order (oldest to newest, as git rebase expects).
+DIRECTORY defaults to claude-session-cwd.
+
+Example ACTIONS:
+  (((commit . \"abc123\") (action . \"pick\"))
+   ((commit . \"def456\") (action . \"squash\"))
+   ((commit . \"ghi789\") (action . \"reword\") (message . \"New message\")))
+
+Returns an alist with status and details.
+Auto-aborts on conflicts.
+Works correctly in git worktrees."
+  (let* ((start-dir (or directory claude-session-cwd default-directory))
+         (default-directory (or (claude-mcp-git--toplevel start-dir) start-dir)))
+    (unless (claude-mcp-git--toplevel)
+      (error "Not in a git repository: %s" start-dir))
+    ;; Validate actions
+    (unless (and actions (listp actions))
+      (error "ACTIONS must be a non-empty list of commit actions"))
+    (dolist (action-spec actions)
+      (let ((commit (cdr (assoc 'commit action-spec)))
+            (action (cdr (assoc 'action action-spec))))
+        (unless commit
+          (error "Each action must have a 'commit' key"))
+        (unless (member action '("pick" "reword" "edit" "squash" "fixup" "drop"))
+          (error "Invalid action '%s'. Must be one of: pick, reword, edit, squash, fixup, drop" action))))
+    ;; Create the sequence file content
+    (let* ((sequence-content
+            (mapconcat
+             (lambda (action-spec)
+               (let ((commit (cdr (assoc 'commit action-spec)))
+                     (action (cdr (assoc 'action action-spec))))
+                 (format "%s %s" action commit)))
+             actions
+             "\n"))
+           ;; Create temp files for the sequence editor script and reword messages
+           (sequence-file (make-temp-file "claude-rebase-sequence-"))
+           (reword-messages (make-temp-file "claude-rebase-reword-"))
+           (editor-script (make-temp-file "claude-rebase-editor-" nil ".sh")))
+      (unwind-protect
+          (progn
+            ;; Write sequence content
+            (with-temp-file sequence-file
+              (insert sequence-content))
+            ;; Collect reword messages into a file (commit-hash:message format)
+            (with-temp-file reword-messages
+              (dolist (action-spec actions)
+                (when (and (equal (cdr (assoc 'action action-spec)) "reword")
+                           (cdr (assoc 'message action-spec)))
+                  (insert (format "%s:%s\n"
+                                  (cdr (assoc 'commit action-spec))
+                                  ;; Base64 encode to handle newlines in messages
+                                  (base64-encode-string
+                                   (encode-coding-string
+                                    (cdr (assoc 'message action-spec))
+                                    'utf-8)
+                                   t))))))
+            ;; Create the editor script that handles both sequence and commit messages
+            (with-temp-file editor-script
+              (insert "#!/usr/bin/env bash\n")
+              (insert "# Claude rebase editor script\n")
+              (insert "TARGET_FILE=\"$1\"\n")
+              (insert (format "SEQUENCE_FILE='%s'\n" sequence-file))
+              (insert (format "REWORD_FILE='%s'\n" reword-messages))
+              (insert "\n")
+              (insert "# Check if this is the rebase todo file (git-rebase-todo)\n")
+              (insert "if [[ \"$TARGET_FILE\" == *\"git-rebase-todo\"* ]]; then\n")
+              (insert "  # This is the sequence/todo file - replace with our sequence\n")
+              (insert "  cat \"$SEQUENCE_FILE\" > \"$TARGET_FILE\"\n")
+              (insert "  exit 0\n")
+              (insert "fi\n")
+              (insert "\n")
+              (insert "# This is a commit message file (COMMIT_EDITMSG for reword/squash)\n")
+              (insert "# For reword, we replace with the provided message\n")
+              (insert "# For squash, we let git's default message through (don't modify)\n")
+              (insert "CURRENT_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo '')\n")
+              (insert "if [ -n \"$CURRENT_COMMIT\" ] && [ -s \"$REWORD_FILE\" ]; then\n")
+              (insert "  # Look for a reword message for this commit\n")
+              (insert "  while IFS=: read -r COMMIT MSG; do\n")
+              (insert "    # Check if current commit starts with the stored commit hash\n")
+              (insert "    if [[ \"$CURRENT_COMMIT\" == \"$COMMIT\"* ]] || [[ \"$COMMIT\" == \"$CURRENT_COMMIT\"* ]]; then\n")
+              (insert "      # Decode and write the message\n")
+              (insert "      echo \"$MSG\" | base64 -d > \"$TARGET_FILE\"\n")
+              (insert "      exit 0\n")
+              (insert "    fi\n")
+              (insert "  done < \"$REWORD_FILE\"\n")
+              (insert "fi\n")
+              (insert "# No reword message found - leave file unchanged (for squash/fixup)\n"))
+            (set-file-modes editor-script #o755)
+            ;; Run the rebase with our custom editor
+            (let* ((process-environment
+                    (cons (format "GIT_SEQUENCE_EDITOR=%s" editor-script)
+                          (cons (format "GIT_EDITOR=%s" editor-script)
+                                process-environment)))
+                   (result (claude-mcp-git--call-git "rebase" "-i" onto)))
+              (if (zerop (car result))
+                  `((status . "rebased")
+                    (onto . ,onto)
+                    (actions . ,(length actions))
+                    (output . ,(string-trim (cdr result))))
+                ;; Rebase failed - abort and report
+                (claude-mcp-git--call-git "rebase" "--abort")
+                (error "Interactive rebase failed (aborted automatically):\n%s" (cdr result)))))
+        ;; Cleanup temp files
+        (when (file-exists-p sequence-file)
+          (delete-file sequence-file))
+        (when (file-exists-p reword-messages)
+          (delete-file reword-messages))
+        (when (file-exists-p editor-script)
+          (delete-file editor-script))))))
+
+(defun claude-mcp-git-rebase-interactive-get-commits (base &optional directory)
+  "Get the list of commits from HEAD back to BASE for interactive rebase planning.
+Returns a list of alists with commit info (hash, subject, author, date).
+Commits are returned in rebase order (oldest first).
+DIRECTORY defaults to claude-session-cwd.
+Works correctly in git worktrees."
+  (let* ((start-dir (or directory claude-session-cwd default-directory))
+         (default-directory (or (claude-mcp-git--toplevel start-dir) start-dir)))
+    (unless (claude-mcp-git--toplevel)
+      (error "Not in a git repository: %s" start-dir))
+    (let* ((range (format "%s..HEAD" base))
+           ;; Get commits in reverse order (oldest first, like rebase shows them)
+           (output (claude-mcp-git--output
+                    "log" "--reverse" "--format=%H|%h|%s|%an|%ad" "--date=short" range))
+           (lines (if (string-empty-p output) '() (split-string output "\n" t))))
+      (mapcar (lambda (line)
+                (let ((parts (split-string line "|")))
+                  `((hash . ,(nth 0 parts))
+                    (short_hash . ,(nth 1 parts))
+                    (subject . ,(nth 2 parts))
+                    (author . ,(nth 3 parts))
+                    (date . ,(nth 4 parts)))))
+              lines))))
+
 ;;;; MCP Tool Definitions
 ;;
 ;; Tool definitions for the MCP (Model Context Protocol) interface.
@@ -654,6 +795,36 @@ Works correctly in git worktrees."
   :args ((onto string :required "Branch or commit to rebase onto")
          (directory string "Git repository directory (default: session working directory)")
          (autosquash boolean "Apply fixup!/squash! commits automatically (default: false)")))
+
+(claude-mcp-deftool git-rebase-interactive
+  "Perform an interactive rebase with specified actions for each commit.
+Use git-rebase-interactive-get-commits first to get the list of commits to rebase.
+Then specify an action for each commit: pick, reword, edit, squash, fixup, or drop.
+
+Example workflow:
+1. Call git-rebase-interactive-get-commits with base='main' to see commits
+2. Call git-rebase-interactive with actions specifying what to do with each commit
+
+Actions array format: [{commit: 'abc123', action: 'pick'}, {commit: 'def456', action: 'squash'}, ...]
+For reword action, include message: {commit: 'abc', action: 'reword', message: 'New message'}
+
+Auto-aborts on conflicts."
+  :function #'claude-mcp-git-rebase-interactive
+  :safe nil
+  :args ((onto string :required "Branch or commit to rebase onto (e.g., 'main', 'HEAD~3')")
+         (actions array :required "Array of action objects. Each has: commit (hash), action (pick/reword/edit/squash/fixup/drop), and optionally message (for reword)")
+         (directory string "Git repository directory (default: session working directory)")))
+
+(claude-mcp-deftool git-rebase-interactive-get-commits
+  "Get the list of commits that would be included in an interactive rebase.
+Returns commits from BASE to HEAD in rebase order (oldest first).
+Use this to see what commits you're working with before calling git-rebase-interactive.
+
+Each commit includes: hash (full), short_hash, subject (first line of message), author, date."
+  :function #'claude-mcp-git-rebase-interactive-get-commits
+  :safe t
+  :args ((base string :required "Base commit/branch to rebase from (e.g., 'main', 'HEAD~5')")
+         (directory string "Git repository directory (default: session working directory)")))
 
 (claude-mcp-deftool git-ignore
   "Ignore local changes to a tracked file using git update-index --assume-unchanged. Use unignore=true to restore tracking."
