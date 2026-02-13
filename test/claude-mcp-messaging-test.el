@@ -17,10 +17,14 @@
 (require 'ert)
 (require 'cl-lib)
 
-;; Load test helper (handles circular dependency between claude-mcp and sub-modules)
+;; Load test helper (sets up load path)
 (add-to-list 'load-path (file-name-directory load-file-name))
 (add-to-list 'load-path (file-name-directory (directory-file-name (file-name-directory load-file-name))))
 (require 'test-helper)
+
+;; Load only what we need - avoid pulling in claude-mcp which has heavy dependencies
+(require 'claude-mcp-registry)
+(require 'claude-mcp-messaging)
 
 ;;; Test Utilities
 

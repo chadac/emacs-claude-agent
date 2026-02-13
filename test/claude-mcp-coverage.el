@@ -32,6 +32,7 @@
 ;; Load all tool-defining modules to populate the tool registry
 (condition-case nil (require 'claude-mcp-messaging) (error nil))
 (condition-case nil (require 'claude-mcp-magit) (error nil))
+(condition-case nil (require 'claude-mcp-git) (error nil))
 (condition-case nil (require 'claude-kb) (error nil))
 (condition-case nil (require 'claude-oneshot) (error nil))
 (condition-case nil (require 'todo) (error nil))

@@ -28,6 +28,7 @@ test-unit:
     @{{ emacs }} -batch -L . -L test -l ert -l test/test-helper.el \
         -l test/claude-agent-expert-test.el \
         -l test/claude-mcp-messaging-test.el \
+        -l test/claude-mcp-git-test.el \
         -l test/claude-kb-test.el \
         -f ert-run-tests-batch-and-exit
 
@@ -42,6 +43,7 @@ test-pattern pattern:
     @{{ emacs }} -batch -L . -L test -l ert -l test/test-helper.el \
         -l test/claude-agent-expert-test.el \
         -l test/claude-mcp-messaging-test.el \
+        -l test/claude-mcp-git-test.el \
         -l test/claude-kb-test.el \
         --eval "(ert-run-tests-batch-and-exit \"{{ pattern }}\")"
 

@@ -23,6 +23,7 @@
 (require 'claude-mcp-registry)  ; Load registry before sub-modules that use claude-mcp-deftool
 (require 'claude-mcp-messaging)
 (require 'claude-mcp-magit)
+(require 'claude-mcp-git)
 (require 'claude-mcp-notes)
 (require 'claude-kb)
 (require 'claude-agent-expert)

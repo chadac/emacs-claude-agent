@@ -18,10 +18,15 @@
 (require 'ert)
 (require 'cl-lib)
 
-;; Load test helper (handles circular dependency between claude-mcp and sub-modules)
+
+;; Load test helper (sets up load path)
 (add-to-list 'load-path (file-name-directory load-file-name))
 (add-to-list 'load-path (file-name-directory (directory-file-name (file-name-directory load-file-name))))
 (require 'test-helper)
+
+;; Load registry first
+(require 'claude-mcp-registry)
+
 ;; Try loading claude-kb (it may fail if org-roam is not available)
 (condition-case nil
     (require 'claude-kb)

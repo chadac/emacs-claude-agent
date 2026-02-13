@@ -1,15 +1,15 @@
-# Magit Integration
+# Git Integration
 
-Git operations through Emacs's Magit interface.
+Git operations for Claude agents via MCP tools.
 
 ## Overview
 
-emacs-claude-agent integrates with Magit to provide:
+emacs-claude-agent provides git operations that:
 
-- Status and diff viewing
-- File staging/unstaging
-- Commit proposals for user approval
-- Full git history access
+- Call git directly (not through magit)
+- Work correctly in git worktrees
+- Support multiline commit messages
+- Provide commit proposal workflow for user approval
 
 ## Available Tools
 
@@ -18,7 +18,7 @@ emacs-claude-agent integrates with Magit to provide:
 View current git status:
 
 ```python
-mcp__emacs__magit_status()
+mcp__emacs__git_status()
 # Returns: branch name, staged files, unstaged files, untracked files
 ```
 
@@ -38,7 +38,7 @@ Example response:
 Stage files for commit:
 
 ```python
-mcp__emacs__magit_stage(
+mcp__emacs__git_stage(
     files=["src/main.py", "src/utils.py"]
 )
 ```
@@ -48,7 +48,7 @@ mcp__emacs__magit_stage(
 Remove files from staging:
 
 ```python
-mcp__emacs__magit_unstage(
+mcp__emacs__git_unstage(
     files=["src/utils.py"]
 )
 ```
@@ -59,13 +59,13 @@ Get diff output:
 
 ```python
 # All unstaged changes
-mcp__emacs__magit_diff()
+mcp__emacs__git_diff()
 
 # Staged changes only
-mcp__emacs__magit_diff(staged=True)
+mcp__emacs__git_diff(staged=True)
 
 # Specific file
-mcp__emacs__magit_diff(file="src/main.py")
+mcp__emacs__git_diff(file="src/main.py")
 ```
 
 ### Commit History
@@ -73,17 +73,29 @@ mcp__emacs__magit_diff(file="src/main.py")
 View recent commits:
 
 ```python
-mcp__emacs__magit_log(count=10)
+mcp__emacs__git_log(count=10)
 ```
 
 Returns commit hashes, authors, dates, and messages.
 
-### Proposing Commits
+### Creating Commits
 
-Claude doesn't commit directly. Instead, it proposes commits:
+For automated workflows, create commits directly:
 
 ```python
-mcp__emacs__magit_commit_propose(
+mcp__emacs__git_commit(
+    message="Add user authentication\n\nImplements JWT-based auth with refresh tokens."
+)
+```
+
+Multiline commit messages are fully supported.
+
+### Proposing Commits
+
+For workflows requiring user approval, propose commits instead:
+
+```python
+mcp__emacs__git_commit_propose(
     message="Add user authentication\n\nImplements JWT-based auth with refresh tokens."
 )
 ```
@@ -93,7 +105,7 @@ This creates a proposal that you must approve manually.
 ### Checking Proposal Status
 
 ```python
-mcp__emacs__magit_commit_status()
+mcp__emacs__git_commit_status()
 # Returns whether there's a pending proposal
 ```
 
@@ -106,13 +118,13 @@ Claude edits files using MCP tools.
 ### 2. Claude Stages Files
 
 ```python
-mcp__emacs__magit_stage(files=["src/auth.py", "tests/test_auth.py"])
+mcp__emacs__git_stage(files=["src/auth.py", "tests/test_auth.py"])
 ```
 
 ### 3. Claude Proposes Commit
 
 ```python
-mcp__emacs__magit_commit_propose(
+mcp__emacs__git_commit_propose(
     message="feat: add JWT authentication\n\n- Add login endpoint\n- Add token refresh\n- Add tests"
 )
 ```
@@ -137,42 +149,42 @@ Only after your approval is the actual commit created.
 All git operations use the session's working directory by default. You can specify a different directory:
 
 ```python
-mcp__emacs__magit_status(directory="/path/to/other/repo")
+mcp__emacs__git_status(directory="/path/to/other/repo")
 ```
 
 ## Example Workflow
 
 ```python
 # 1. Check current status
-status = mcp__emacs__magit_status()
+status = mcp__emacs__git_status()
 print(f"On branch: {status['branch']}")
 print(f"Unstaged: {status['unstaged']}")
 
 # 2. Review changes
-diff = mcp__emacs__magit_diff()
+diff = mcp__emacs__git_diff()
 
 # 3. Stage relevant files
-mcp__emacs__magit_stage(files=["src/new_feature.py"])
+mcp__emacs__git_stage(files=["src/new_feature.py"])
 
 # 4. View staged diff
-staged_diff = mcp__emacs__magit_diff(staged=True)
+staged_diff = mcp__emacs__git_diff(staged=True)
 
 # 5. Propose commit
-mcp__emacs__magit_commit_propose(
+mcp__emacs__git_commit_propose(
     message="feat: implement new feature\n\nAdds the new feature as discussed."
 )
 
 # 6. Check if user approved
-status = mcp__emacs__magit_commit_status()
+status = mcp__emacs__git_commit_status()
 if not status['pending']:
     print("Commit was approved and created!")
 ```
 
 ## Benefits Over Direct Git
 
-| Aspect | Direct Git | Magit Integration |
-|--------|-----------|-------------------|
-| Approval | Automatic | User must approve |
+| Aspect | Direct Git | Git Integration |
+|--------|-----------|-----------------|
+| Approval | Automatic | User must approve (with propose workflow) |
 | Signing | Claude's key | Your GPG key |
 | Review | After commit | Before commit |
 | Visibility | In terminal | In Emacs |
@@ -180,7 +192,7 @@ if not status['pending']:
 
 ## Configuration
 
-The Magit integration uses your existing Magit configuration. No additional setup is needed beyond having Magit installed.
+The git integration works out of the box. For the commit-propose workflow, having Magit installed enables the approval UI.
 
 ```elisp
 ;; Optional: Customize commit proposal appearance
@@ -189,7 +201,7 @@ The Magit integration uses your existing Magit configuration. No additional setu
 
 ## Tips
 
-1. **Review proposals carefully** - Claude can't commit without your approval
+1. **Review proposals carefully** - Claude can't commit without your approval (when using propose workflow)
 2. **Use conventional commits** - Ask Claude to follow your commit message style
 3. **Stage incrementally** - Stage related changes together
 4. **Check the diff** - Always review what's being committed
