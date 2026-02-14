@@ -390,12 +390,15 @@ Works correctly in git worktrees."
 If AUTOSQUASH is non-nil, automatically apply fixup/squash commits.
 DIRECTORY defaults to claude-session-cwd.
 Non-interactive only. Auto-aborts on conflicts.
+Disables GPG signing to avoid TTY prompts in agent sessions.
 Works correctly in git worktrees."
   (let* ((start-dir (or directory claude-session-cwd default-directory))
          (default-directory (or (claude-mcp-git--toplevel start-dir) start-dir)))
     (unless (claude-mcp-git--toplevel)
       (error "Not in a git repository: %s" start-dir))
-    (let ((args (list "rebase")))
+    ;; Use -c commit.gpgsign=false to disable GPG signing during rebase
+    ;; This prevents TTY prompts for passphrase in agent sessions
+    (let ((args (list "-c" "commit.gpgsign=false" "rebase")))
       (when autosquash
         (push "--autosquash" args))
       (push onto args)
@@ -405,7 +408,7 @@ Works correctly in git worktrees."
               (onto . ,onto)
               (output . ,(string-trim (cdr result))))
           ;; Rebase failed - likely conflicts
-          (claude-mcp-git--output "rebase" "--abort")  ; Clean up
+          (claude-mcp-git--output "-c" "commit.gpgsign=false" "rebase" "--abort")  ; Clean up
           (error "Rebase failed (aborted automatically):\n%s" (cdr result)))))))
 
 (defun claude-mcp-git-ignore (file &optional directory unignore)
@@ -674,18 +677,20 @@ Works correctly in git worktrees."
               (insert "# No reword message found - leave file unchanged (for squash/fixup)\n"))
             (set-file-modes editor-script #o755)
             ;; Run the rebase with our custom editor
+            ;; Use -c commit.gpgsign=false to disable GPG signing during rebase
+            ;; This prevents TTY prompts for passphrase in agent sessions
             (let* ((process-environment
                     (cons (format "GIT_SEQUENCE_EDITOR=%s" editor-script)
                           (cons (format "GIT_EDITOR=%s" editor-script)
                                 process-environment)))
-                   (result (claude-mcp-git--call-git "rebase" "-i" onto)))
+                   (result (claude-mcp-git--call-git "-c" "commit.gpgsign=false" "rebase" "-i" onto)))
               (if (zerop (car result))
                   `((status . "rebased")
                     (onto . ,onto)
                     (actions . ,(length actions))
                     (output . ,(string-trim (cdr result))))
                 ;; Rebase failed - abort and report
-                (claude-mcp-git--call-git "rebase" "--abort")
+                (claude-mcp-git--call-git "-c" "commit.gpgsign=false" "rebase" "--abort")
                 (error "Interactive rebase failed (aborted automatically):\n%s" (cdr result)))))
         ;; Cleanup temp files
         (when (file-exists-p sequence-file)
