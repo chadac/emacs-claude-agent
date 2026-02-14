@@ -5,7 +5,7 @@ emacs := env("EMACS", "emacs")
 default: lint test
 
 # Run all checks
-lint: check-duplicate-defs check-imports
+lint: check-duplicate-defs check-imports check-cyclic-requires
     @echo "✓ All lint checks passed"
 
 # Check for duplicate defun/defvar/defcustom/defmacro across .el files
@@ -17,6 +17,11 @@ check-duplicate-defs:
 check-imports:
     @echo "Checking module imports..."
     @{{ emacs }} -batch --load scripts/check-imports.el --eval "(check-imports)"
+
+# Check for cyclic require dependencies between .el files
+check-cyclic-requires:
+    @echo "Checking for cyclic require dependencies..."
+    @{{ emacs }} -batch --load scripts/check-cyclic-requires.el --eval "(check-cyclic-requires)"
 
 # Run all tests
 test: test-unit
