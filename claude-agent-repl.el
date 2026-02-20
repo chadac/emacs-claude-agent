@@ -844,7 +844,7 @@ Example:
     (define-key map (kbd "i") #'claude-agent-goto-input)
     (define-key map (kbd "RET") #'claude-agent-goto-input)
     ;; Tool result viewing
-    (define-key map (kbd "'") #'claude-agent-show-tool-result)
+    (define-key map (kbd "C-c '") #'claude-agent-show-tool-result)
     (define-key map (kbd "TAB") #'claude-agent-toggle-tool-popup)
     ;; Navigation between messages/tool calls
     (define-key map (kbd "{") #'claude-agent-previous-section)
