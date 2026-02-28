@@ -12,6 +12,7 @@
 (require 'claude-agent-repl)
 (require 'claude-mcp)  ; Will be renamed from claude-ai.el
 (require 'claude-sessions)
+(require 'json)
 
 ;; Declare functions from claude-mcp (MCP config generation)
 (declare-function claude--generate-mcp-config "claude-mcp")
@@ -230,6 +231,25 @@ This works across macOS, Linux, and Windows platforms."
 
 ;;;; Process Management
 
+(defun claude-mcp--load-cli-env-vars ()
+  "Load environment variables from ~/.claude/settings.json.
+Returns an alist of (VAR . VALUE) pairs to be added to process-environment."
+  (let ((settings-file (expand-file-name "~/.claude/settings.json")))
+    (when (file-exists-p settings-file)
+      (condition-case err
+          (let* ((json-object-type 'alist)
+                 (json-array-type 'list)
+                 (json-key-type 'string)
+                 (settings (json-read-file settings-file))
+                 (env-vars (cdr (assoc "env" settings))))
+            (when env-vars
+              (mapcar (lambda (pair)
+                        (format "%s=%s" (car pair) (cdr pair)))
+                      env-vars)))
+        (error
+         (message "Warning: Failed to parse ~/.claude/settings.json: %s" (error-message-string err))
+         nil)))))
+
 (defun claude-agent--start-process-with-args (work-dir buffer args)
   "Start agent process with custom ARGS for BUFFER in WORK-DIR.
 This is a wrapper that allows passing custom arguments to the Python wrapper
@@ -238,7 +258,10 @@ This is a wrapper that allows passing custom arguments to the Python wrapper
          (agent-dir (when this-dir
                       (expand-file-name "claude_agent" this-dir)))
          (process-connection-type t)
-         (process-environment (cons "PYTHONUNBUFFERED=1" process-environment))
+         ;; Load env vars from ~/.claude/settings.json and merge with PYTHONUNBUFFERED
+         (claude-env-vars (claude-mcp--load-cli-env-vars))
+         (process-environment (append claude-env-vars
+                                     (cons "PYTHONUNBUFFERED=1" process-environment)))
          (proc (apply #'start-process
                       "claude-agent"
                       buffer

@@ -615,5 +615,60 @@ The file is automatically cleaned up after BODY executes."
           (when (buffer-live-p test-buffer)
             (kill-buffer test-buffer)))))))
 
+(ert-deftest claude-test-load-cli-env-vars ()
+  "Test loading environment variables from ~/.claude/settings.json."
+  :tags '(:unit :config)
+  (require 'claude-mcp-process)
+
+  ;; Store original function
+  (let ((original-expand-file-name (symbol-function 'expand-file-name)))
+
+    ;; Test with a mock settings file
+    (claude-test-with-temp-file "test-settings.json"
+        "{\"env\": {\"AWS_PROFILE\": \"test-profile\", \"AWS_REGION\": \"us-west-2\", \"CLAUDE_CODE_USE_BEDROCK\": \"1\"}}"
+
+      ;; Mock expand-file-name to return our temp file
+      (cl-letf (((symbol-function 'expand-file-name)
+                 (lambda (name &optional dir)
+                   (if (string= name "~/.claude/settings.json")
+                       buffer-file-name
+                     (funcall original-expand-file-name name dir)))))
+
+        ;; Test successful loading
+        (let ((env-vars (claude-mcp--load-cli-env-vars)))
+          (should (member "AWS_PROFILE=test-profile" env-vars))
+          (should (member "AWS_REGION=us-west-2" env-vars))
+          (should (member "CLAUDE_CODE_USE_BEDROCK=1" env-vars)))))
+
+    ;; Test with missing file
+    (cl-letf (((symbol-function 'expand-file-name)
+               (lambda (name &optional dir)
+                 (if (string= name "~/.claude/settings.json")
+                     "/nonexistent/path.json"
+                   (funcall original-expand-file-name name dir)))))
+      (let ((env-vars (claude-mcp--load-cli-env-vars)))
+        (should (null env-vars))))
+
+    ;; Test with malformed JSON
+    (claude-test-with-temp-file "malformed.json" "{ invalid json"
+      (cl-letf (((symbol-function 'expand-file-name)
+                 (lambda (name &optional dir)
+                   (if (string= name "~/.claude/settings.json")
+                       buffer-file-name
+                     (funcall original-expand-file-name name dir)))))
+        ;; Should handle error gracefully
+        (let ((env-vars (claude-mcp--load-cli-env-vars)))
+          (should (null env-vars)))))
+
+    ;; Test with settings file but no env key
+    (claude-test-with-temp-file "no-env.json" "{\"other\": \"value\"}"
+      (cl-letf (((symbol-function 'expand-file-name)
+                 (lambda (name &optional dir)
+                   (if (string= name "~/.claude/settings.json")
+                       buffer-file-name
+                     (funcall original-expand-file-name name dir)))))
+        (let ((env-vars (claude-mcp--load-cli-env-vars)))
+          (should (null env-vars)))))))
+
 (provide 'claude-test)
 ;;; claude-test.el ends here

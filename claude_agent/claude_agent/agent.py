@@ -718,6 +718,7 @@ class ClaudeAgent:
             "hooks": hooks,
             "model": self._model,
             "stderr": self._handle_stderr,  # Capture stderr for better error messages
+            "max_buffer_size": 10 * 1024 * 1024,  # 10MB buffer limit (default is 1MB)
         }
         # Add system prompt if provided (for oneshot agents)
         if self._system_prompt:

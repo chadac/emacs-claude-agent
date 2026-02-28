@@ -226,7 +226,6 @@ Signals an error if KEY is already registered."
 
 (defvar claude-agent--progress-visible)
 (defvar claude-agent--todos-visible)
-(declare-function claude-mcp-magit-has-proposed-commit-p "claude-mcp-magit")
 
 ;;;###autoload (autoload 'claude-agent-menu "claude-transient" nil t)
 (transient-define-prefix claude-agent-menu ()
@@ -274,9 +273,7 @@ Press 'i' or RET in the log area to jump to input."
     ("RET" "Go to input" claude-agent-goto-input)]
    ["Review"
     ("P" "Review proposal" claude-mcp-proposal-review
-     :if (lambda () (claude-mcp-proposal-has-pending-p)))
-    ("g" "Approve commit" claude-mcp-magit-commit-approve
-     :if (lambda () (claude-mcp-magit-has-proposed-commit-p)))]])
+     :if (lambda () (claude-mcp-proposal-has-pending-p)))]])
 
 ;;;; Pair Programming Transient Menu
 
