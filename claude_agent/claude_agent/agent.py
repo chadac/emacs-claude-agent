@@ -667,6 +667,9 @@ class ClaudeAgent:
             "model": self._model,
             "stderr": self._handle_stderr,  # Capture stderr for better error messages
             "max_buffer_size": 10 * 1024 * 1024,  # 10MB buffer limit (default is 1MB)
+            # Allow the CLI to read user settings (~/.claude/settings.json) so that
+            # provider configuration (e.g. Bedrock env vars, awsAuthRefresh) is applied.
+            "setting_sources": ["user"],
         }
         # Add system prompt if provided (for oneshot agents)
         if self._system_prompt:
