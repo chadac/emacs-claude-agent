@@ -277,5 +277,140 @@
   (should (equal "allow_always" (claude-agent-permission-scope-to-action :always)))
   (should (equal "allow_once" (claude-agent-permission-scope-to-action :unknown))))
 
+;;;; Predicate matcher tests
+
+(ert-deftest claude-permission-predicate-matcher ()
+  "Test :predicate matcher with custom function."
+  (let ((claude-agent-permission-policy :rules)
+        (claude-agent-permission-rules
+         `((:match (:predicate ,(lambda (tool input)
+                                  (and (string= tool "Bash")
+                                       (string-match-p "^rm " (alist-get 'command input)))))
+            :action :deny
+            :reason "rm command blocked")
+           (:match t :action :allow :scope :session))))
+    ;; rm command should be denied
+    (let ((result (claude-agent-permission-handle-request
+                   "Bash" '((command . "rm -rf /")))))
+      (should (eq :deny (car result)))
+      (should (equal "rm command blocked" (plist-get (cdr result) :reason))))
+    ;; Other commands should be allowed
+    (let ((result (claude-agent-permission-handle-request
+                   "Bash" '((command . "ls -la")))))
+      (should (eq :allow (car result))))))
+
+(ert-deftest claude-permission-predicate-matcher-with-symbol ()
+  "Test :predicate matcher with named function."
+  (cl-flet ((my-test-predicate (tool input)
+              (string= tool "Write")))
+    (let ((claude-agent-permission-policy :rules)
+          (claude-agent-permission-rules
+           `((:match (:predicate ,#'my-test-predicate)
+              :action :deny
+              :reason "Write blocked"))))
+      (let ((result (claude-agent-permission-handle-request "Write" nil)))
+        (should (eq :deny (car result)))))))
+
+;;;; Catch-all (t) matcher tests
+
+(ert-deftest claude-permission-catch-all-matcher ()
+  "Test t matcher as catch-all."
+  (let ((claude-agent-permission-policy :rules)
+        (claude-agent-permission-rules
+         '((:match (:tool "Read") :action :allow :scope :session)
+           (:match t :action :deny :reason "Everything else denied"))))
+    ;; Read should be allowed
+    (let ((result (claude-agent-permission-handle-request "Read" nil)))
+      (should (eq :allow (car result))))
+    ;; Write should be denied by catch-all
+    (let ((result (claude-agent-permission-handle-request "Write" nil)))
+      (should (eq :deny (car result)))
+      (should (equal "Everything else denied" (plist-get (cdr result) :reason))))))
+
+(ert-deftest claude-permission-catch-all-prompt ()
+  "Test t matcher with :prompt action."
+  (let ((claude-agent-permission-policy :rules)
+        (claude-agent-permission-rules
+         '((:match (:tool "Read") :action :allow :scope :session)
+           (:match t :action :prompt))))
+    ;; Read should be allowed
+    (let ((result (claude-agent-permission-handle-request "Read" nil)))
+      (should (eq :allow (car result))))
+    ;; Write should fall through to prompt
+    (let ((result (claude-agent-permission-handle-request "Write" nil)))
+      (should (eq :prompt (car result))))))
+
+;;;; Unified permission check function tests
+
+(ert-deftest claude-permission-check-allow ()
+  "Test claude-agent-permission-check returning allow."
+  (let ((claude-agent-permission-policy :rules)
+        (claude-agent-permission-rules
+         '((:match (:tool "Read") :action :allow :scope :session))))
+    (let ((result (claude-agent-permission-check "Read" nil)))
+      (should (eq :allow (plist-get result :decision)))
+      (should (eq :session (plist-get result :scope))))))
+
+(ert-deftest claude-permission-check-deny ()
+  "Test claude-agent-permission-check returning deny."
+  (let ((claude-agent-permission-policy :rules)
+        (claude-agent-permission-rules
+         '((:match (:tool "Write") :action :deny :reason "No writes"))))
+    (let ((result (claude-agent-permission-check "Write" nil)))
+      (should (eq :deny (plist-get result :decision)))
+      (should (equal "No writes" (plist-get result :reason))))))
+
+(ert-deftest claude-permission-check-prompt ()
+  "Test claude-agent-permission-check returning prompt."
+  (let ((claude-agent-permission-policy :rules)
+        (claude-agent-permission-rules
+         '((:match t :action :prompt))))
+    (let ((result (claude-agent-permission-check "AnyTool" nil)))
+      (should (eq :prompt (plist-get result :decision))))))
+
+(ert-deftest claude-permission-check-rule-precedence ()
+  "Test rule evaluation order in claude-agent-permission-check."
+  (let ((claude-agent-permission-policy :rules)
+        (claude-agent-permission-rules-local
+         '((:match (:tool "Read") :action :deny :reason "Local override")))
+        (claude-agent-project-permission-rules
+         '((:match (:tool "Read") :action :allow :scope :always)))
+        (claude-agent-permission-rules
+         '((:match (:tool "Read") :action :allow :scope :session))))
+    ;; Local rules should take precedence
+    (let ((result (claude-agent-permission-check "Read" nil)))
+      (should (eq :deny (plist-get result :decision)))
+      (should (equal "Local override" (plist-get result :reason))))))
+
+(ert-deftest claude-permission-check-project-rules ()
+  "Test project rules in claude-agent-permission-check."
+  (let ((claude-agent-permission-policy :rules)
+        (claude-agent-permission-rules-local nil)
+        (claude-agent-project-permission-rules
+         '((:match (:tool "Edit") :action :allow :scope :always)))
+        (claude-agent-permission-rules
+         '((:match t :action :prompt))))
+    ;; Project rule should match before global
+    (let ((result (claude-agent-permission-check "Edit" nil)))
+      (should (eq :allow (plist-get result :decision)))
+      (should (eq :always (plist-get result :scope))))))
+
+;;;; Path extraction tests
+
+(ert-deftest claude-permission-path-extraction-sdk-tools ()
+  "Test path extraction for SDK tools."
+  (should (equal '("/tmp/file.txt")
+                 (claude-agent-permission--extract-paths
+                  "Read" '((file_path . "/tmp/file.txt")))))
+  (should (equal '("/home/user/file.el")
+                 (claude-agent-permission--extract-paths
+                  "Edit" '((file_path . "/home/user/file.el")
+                           (old_string . "foo")
+                           (new_string . "bar")))))
+  (should (equal '("/project/")
+                 (claude-agent-permission--extract-paths
+                  "Glob" '((path . "/project/")
+                           (pattern . "*.el"))))))
+
 (provide 'claude-agent-permissions-test)
 ;;; claude-agent-permissions-test.el ends here

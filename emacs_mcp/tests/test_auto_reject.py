@@ -1,7 +1,10 @@
-"""Tests for MCP server auto-reject path enforcement.
+"""DEPRECATED: This file should be deleted.
 
-These tests verify that the MCP server correctly rejects lock/edit
-operations on files in auto-rejected path prefixes (worktree confinement).
+The auto-reject functionality has been removed from the MCP server.
+Path-based permission rules are now handled by Emacs via the unified
+permission system in claude-agent-permissions.el.
+
+DELETE THIS FILE after merging the permissions refactoring branch.
 """
 
 import asyncio

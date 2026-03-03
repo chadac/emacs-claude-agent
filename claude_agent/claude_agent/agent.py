@@ -155,7 +155,6 @@ class ClaudeAgent:
         model: Optional[str] = None,
         system_prompt: Optional[str] = None,
         block_direct_edit: bool = True,
-        auto_reject_rules: Optional[list[dict]] = None,
         max_retries: int = 3,
     ):
         self.work_dir = work_dir
@@ -171,7 +170,6 @@ class ClaudeAgent:
         self._model = model
         self._system_prompt = system_prompt
         self._block_direct_edit = block_direct_edit  # Block Edit/Write tools for Emacs integration
-        self._auto_reject_rules = auto_reject_rules or []  # Auto-reject rules for worktree confinement
         self._first_message = True  # Track if this is the first message
         self._max_retries = max_retries  # Max retries for transient API errors
         if log_file:
@@ -387,41 +385,9 @@ class ClaudeAgent:
         # Handle exact match
         return pattern_content == input_value
 
-    def _extract_file_path(self, tool_name: str, tool_input: dict) -> str | None:
-        """Extract file path from tool input for path-based matching."""
-        if tool_name in ("Read", "Write", "Edit"):
-            return tool_input.get("file_path")
-        elif tool_name.startswith("mcp__emacs__"):
-            # MCP emacs tools use file_path parameter
-            return tool_input.get("file_path")
-        elif tool_name == "Glob":
-            return tool_input.get("path")
-        elif tool_name == "Grep":
-            return tool_input.get("path")
-        return None
-
-    def _matches_auto_reject(self, rule: dict, tool_name: str, tool_input: dict) -> bool:
-        """Check if a tool call matches an auto-reject rule.
-
-        Rules have:
-          pattern: Tool pattern like "Edit(/path/*)" or "mcp__emacs__lock"
-          path_prefix: Optional path prefix - if the tool operates on a file
-                       within this prefix, it matches.
-          message: Rejection message to show the agent.
-        """
-        pattern = rule.get("pattern")
-        path_prefix = rule.get("path_prefix")
-
-        if pattern:
-            return self._pattern_matches(pattern, tool_name, tool_input)
-
-        if path_prefix:
-            # Match any tool that operates on files within this path prefix
-            file_path = self._extract_file_path(tool_name, tool_input)
-            if file_path and file_path.startswith(path_prefix):
-                return True
-
-        return False
+    # NOTE: _extract_file_path and _matches_auto_reject methods removed.
+    # Path-based permission matching is now handled by Emacs via the unified
+    # permission system in claude-agent-permissions.el.
 
     async def _fix_empty_error_content(
         self,
@@ -526,21 +492,25 @@ class ClaudeAgent:
 
         return {}
 
-    # Workflow tools that should always be allowed without permission prompts
-    # These have no side effects on the filesystem and are required for plan mode
-    ALWAYS_SAFE_TOOLS = {
-        "ExitPlanMode",
-        "EnterPlanMode",
-        "TodoWrite",
-    }
-
     async def _can_use_tool(
         self,
         tool_name: str,
         tool_input: dict[str, Any],
         context: ToolPermissionContext,
     ) -> PermissionResultAllow | PermissionResultDeny:
-        """Callback for permission checks. Asks user if not pre-approved."""
+        """Callback for permission checks.
+
+        This method is simplified to only check BLOCKED_TOOLS locally.
+        All other permission decisions are forwarded to Emacs via the
+        permission_request message, where the unified permission system
+        in claude-agent-permissions.el handles the decision.
+
+        The Emacs permission system supports:
+        - Buffer-local rules (agent-type specific)
+        - Project-level rules (.claude/settings.local.el)
+        - Global rules (user's init.el)
+        - Interactive prompts with scope selection
+        """
         # Try to get tool_use_id from context, or generate a unique one
         tool_use_id = getattr(context, "tool_use_id", None) or f"perm_{id(tool_input)}"
         self._log_json("PERMISSION_CHECK", {"tool": tool_name, "input": tool_input, "tool_use_id": tool_use_id})
@@ -550,7 +520,7 @@ class ClaudeAgent:
         if self._block_direct_edit and tool_name in self.BLOCKED_TOOLS:
             self._log_json("PERMISSION_BLOCKED", {"tool": tool_name, "reason": "use_emacs_mcp"})
             reason = (f"Tool '{tool_name}' is blocked in Emacs integration. "
-                      f"Use mcp__emacs__lock_region + mcp__emacs__write_region instead for pair programming support. "
+                      f"Use mcp__emacs__lock_file + mcp__emacs__edit instead for pair programming support. "
                       f"See claude-agent-prompt.md for details.")
             self._emit({
                 "type": "permission_denied",
@@ -561,35 +531,13 @@ class ClaudeAgent:
             })
             return PermissionResultDeny(message=reason)
 
-        # Check auto-reject rules (worktree confinement, etc.)
-        for rule in self._auto_reject_rules:
-            if self._matches_auto_reject(rule, tool_name, tool_input):
-                reason = rule.get("message", "Auto-rejected by configuration")
-                self._log_json("PERMISSION_AUTO_REJECT", {
-                    "tool": tool_name, "reason": reason,
-                    "pattern": rule.get("pattern", ""),
-                    "path_prefix": rule.get("path_prefix", ""),
-                })
-                self._emit({
-                    "type": "permission_denied",
-                    "tool_use_id": tool_use_id,
-                    "tool_name": tool_name,
-                    "reason": reason,
-                    "denial_type": "auto_reject",
-                })
-                return PermissionResultDeny(message=reason)
-
-        # Always allow workflow/planning tools without prompting
-        if tool_name in self.ALWAYS_SAFE_TOOLS:
-            self._log_json("PERMISSION_AUTO_ALLOW", {"tool": tool_name, "reason": "workflow_tool"})
-            return PermissionResultAllow()
-
-        # Check if already permitted
+        # Check if already permitted by session/always permissions
         if self._matches_permission(tool_name, tool_input):
             self._log_json("PERMISSION_AUTO_ALLOW", {"tool": tool_name})
             return PermissionResultAllow()
 
-        # Need to ask user - emit permission request
+        # Forward all other permission decisions to Emacs
+        # Emacs will use the unified permission system to decide
         self._pending_permission_requests[tool_use_id] = {
             "tool_use_id": tool_use_id,
             "tool_name": tool_name,
@@ -1253,7 +1201,6 @@ async def run_agent(
     model: Optional[str] = None,
     system_prompt: Optional[str] = None,
     block_direct_edit: bool = True,
-    auto_reject_rules: Optional[list[dict]] = None,
     max_retries: int = 3,
 ) -> None:
     """Run the agent, reading commands from stdin."""
@@ -1268,7 +1215,6 @@ async def run_agent(
         model=model,
         system_prompt=system_prompt,
         block_direct_edit=block_direct_edit,
-        auto_reject_rules=auto_reject_rules,
         max_retries=max_retries,
     )
 
@@ -1426,11 +1372,6 @@ def main() -> None:
         help="Disable blocking of Edit/Write tools (allow direct file editing)",
     )
     parser.add_argument(
-        "--auto-reject-config",
-        default=None,
-        help="Path to JSON file with auto-reject rules",
-    )
-    parser.add_argument(
         "--max-retries",
         type=int,
         default=3,
@@ -1452,12 +1393,6 @@ def main() -> None:
         with open(args.system_prompt_file, "r") as f:
             system_prompt = f.read()
 
-    # Load auto-reject rules from JSON file if specified
-    auto_reject_rules = None
-    if args.auto_reject_config:
-        with open(args.auto_reject_config, "r") as f:
-            auto_reject_rules = json.load(f)
-
     asyncio.run(
         run_agent(
             work_dir=args.work_dir,
@@ -1470,7 +1405,6 @@ def main() -> None:
             model=args.model,
             system_prompt=system_prompt,
             block_direct_edit=not args.no_block_direct_edit,
-            auto_reject_rules=auto_reject_rules,
             max_retries=args.max_retries,
         )
     )

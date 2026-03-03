@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-"""Translate paths in .claude/settings.local.json for worktrees.
+"""DEPRECATED: This file should be deleted.
 
-Usage: translate-settings.py <project-root> <worktree-path>
+The translate-settings.py script is no longer needed. Project-level
+permission rules are now stored in .claude/settings.local.el (Emacs Lisp
+format) and managed by the unified permission system in
+claude-agent-permissions.el.
 
-Reads .claude/settings.local.json from <project-root>, rewrites any
-permission patterns containing <project-root> paths to use
-<worktree-path> instead, and writes the result to
-<worktree-path>/.claude/settings.local.json.
+The new system uses `claude-agent-load-project-settings` and
+`claude-agent-save-project-rule` for loading and saving project rules.
 
-Patterns that don't contain filesystem paths (e.g. "Bash(git:*)" or
-"mcp__emacs__eval(*)") are preserved unchanged.
+DELETE THIS FILE after merging the permissions refactoring branch.
 
-If the source settings.local.json doesn't exist, this is a no-op.
+Original description:
+Translate paths in .claude/settings.local.json for worktrees.
 """
 import json
 import sys

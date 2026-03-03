@@ -12,6 +12,18 @@
 ;; This is separated from claude-mcp.el to break the circular dependency
 ;; between claude-mcp.el and claude-mcp-messaging.el. Both files can
 ;; require this registry file without creating a cycle.
+;;
+;; ## Argument Types
+;;
+;; The `path` type is special: it indicates that the argument contains a
+;; file path. This information is used by the permission system's
+;; :path-prefix matcher. When defining tools that operate on files, use:
+;;
+;;   :args ((file-path path :required "Path to the file"))
+;;
+;; The path type is exported as "string" to JSON (for the MCP schema) but
+;; the tool is registered with `claude-agent-mcp-tool-path-args` so the
+;; permission system knows which arguments contain paths.
 
 ;;; Code:
 
@@ -21,6 +33,23 @@
 
 (defvar claude-mcp-tools (make-hash-table :test 'equal)
   "Registry of MCP tools. Key is tool name string, value is plist.")
+
+;; Forward declaration - defined in claude-agent-permissions.el
+;; We use this to register path args for the permission system
+(defvar claude-agent-mcp-tool-path-args)
+
+(defun claude-mcp--register-path-args (tool-name args)
+  "Register path-typed arguments for TOOL-NAME with the permission system.
+ARGS is the argument list from deftool. Path args are identified by type `path`."
+  (when (boundp 'claude-agent-mcp-tool-path-args)
+    (let ((path-arg-names
+           (cl-loop for arg in args
+                    for arg-name = (symbol-name (nth 0 arg))
+                    for arg-type = (nth 1 arg)
+                    when (eq arg-type 'path)
+                    collect (replace-regexp-in-string "-" "_" arg-name))))
+      (when path-arg-names
+        (puthash tool-name path-arg-names claude-agent-mcp-tool-path-args)))))
 
 (defmacro claude-mcp-deftool (name docstring &rest args)
   "Define an MCP tool NAME with DOCSTRING.
@@ -40,6 +69,15 @@ ARGS is a plist with :function, :safe, :needs-session-cwd, :inject-agent-name,
 :timeout N (required when :async t) — per-tool timeout in seconds.  The MCP
   server will cancel the task and call `claude-mcp-async-cancel' if the tool
   does not complete within this time.
+
+Argument types:
+  string   - String argument
+  integer  - Integer argument
+  boolean  - Boolean argument
+  array    - Array/list argument
+  object   - Object/plist argument
+  path     - File path (string, but registered for permission :path-prefix matching)
+
 Example (sync):
   (claude-mcp-deftool get-buffer-content
     \"Get the content of an Emacs buffer.\"
@@ -48,6 +86,13 @@ Example (sync):
     :needs-session-cwd t
     :args ((buffer-name string :required \"Name of the buffer\")
            (tail-lines integer \"Optional: last N lines\")))
+
+Example with path type:
+  (claude-mcp-deftool read-file
+    \"Read a file from disk.\"
+    :function #'claude-mcp-read-file
+    :needs-session-cwd t
+    :args ((file-path path :required \"Path to the file to read\")))
 
 Example (async):
   (claude-mcp-deftool my-long-running-tool
@@ -65,21 +110,29 @@ Example (async):
     (when (and timeout (not async-p))
       (error "claude-mcp-deftool: tool `%s' specifies :timeout but is not :async t" name)))
   (let ((mcp-name (replace-regexp-in-string "-" "_" (symbol-name name)))
+        (tool-args (plist-get args :args))
         (quoted-args (cl-loop for (key val) on args by #'cddr
                               append (list key (if (eq key :args) `',val val)))))
-    `(puthash ,mcp-name
-              (list :description ,docstring
-                    ,@quoted-args)
-              claude-mcp-tools)))
+    `(progn
+       ;; Register the tool definition
+       (puthash ,mcp-name
+                (list :description ,docstring
+                      ,@quoted-args)
+                claude-mcp-tools)
+       ;; Register path args with permission system
+       (claude-mcp--register-path-args ,mcp-name ',tool-args))))
 
 (defun claude-mcp--convert-args (args)
   "Convert ARGS list to hash table for JSON export.
 Each arg is (name type [:required] description).
-Converts dashes to underscores in arg names."
+Converts dashes to underscores in arg names.
+The `path` type is exported as `string` (for JSON schema compatibility)."
   (let ((result (make-hash-table :test 'equal)))
     (dolist (arg args)
       (let* ((name (replace-regexp-in-string "-" "_" (symbol-name (nth 0 arg))))
-             (type (symbol-name (nth 1 arg)))
+             (raw-type (nth 1 arg))
+             ;; Convert 'path' to 'string' for JSON schema
+             (type (if (eq raw-type 'path) "string" (symbol-name raw-type)))
              (rest (nthcdr 2 arg))
              (required (eq (car rest) :required))
              (desc (if required (cadr rest) (car rest))))

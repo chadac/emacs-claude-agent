@@ -29,15 +29,9 @@ app = Server("emacs")
 # This is set during server initialization from CLAUDE_AGENT_BUFFER_NAME env var
 SESSION_BUFFER_NAME: str | None = None
 
-# Auto-reject path prefixes for worktree confinement.
-# When set, the MCP server will reject lock/edit operations on files
-# whose paths start with any of these prefixes.
-# Loaded from CLAUDE_AUTO_REJECT_PATHS env var (unit-separator delimited).
-AUTO_REJECT_PATH_PREFIXES: list[str] = []
-
-# Tools that modify files and need auto-reject path checking.
-# lock/locks acquire write access; edit/edits perform writes.
-AUTO_REJECT_TOOLS = {"lock", "locks", "edit", "edits"}
+# NOTE: Auto-reject path checking has been removed from the MCP server.
+# Path-based permission rules are now handled by Emacs via the unified
+# permission system in claude-agent-permissions.el.
 
 # Hint appended to error messages so agents know to file bug reports
 BUG_REPORT_HINT = (
@@ -683,69 +677,10 @@ async def handle_send_and_wait(arguments: dict) -> str:
     )
 
 
-async def check_auto_reject(name: str, arguments: dict) -> str | None:
-    """Check if a tool call should be auto-rejected based on path prefixes.
-
-    For worktree confinement: prevents agents from editing files in the
-    main repository via MCP lock/edit tools.
-
-    For lock/locks: checks file_path argument and buffer_name resolution.
-    For edit/edits: resolves the buffer from lock_id/buffer_name/file_path
-    and checks its file path.
-
-    Returns an error message string if rejected, None if allowed.
-    """
-
-    if not AUTO_REJECT_PATH_PREFIXES:
-        return None
-    if name not in AUTO_REJECT_TOOLS:
-        return None
-
-    # Collect file paths to check (expand ~ to home directory)
-    paths_to_check: list[str] = []
-
-    # Direct file_path argument (used by lock, edit, locks, edits)
-    if "file_path" in arguments and arguments["file_path"]:
-        paths_to_check.append(os.path.expanduser(arguments["file_path"]))
-
-    # For lock/edit with buffer_name but no file_path, resolve the buffer's file
-    if not paths_to_check and "buffer_name" in arguments and arguments["buffer_name"]:
-        try:
-            escaped_buf = escape_elisp_string(arguments["buffer_name"])
-            result = await lib.call_emacs_async(
-                f'(buffer-file-name (get-buffer "{escaped_buf}"))',
-                timeout=5,
-            )
-            if result and result != "nil":
-                resolved = lib.unescape_elisp_string(result) if result.startswith('"') else result
-                if resolved:
-                    paths_to_check.append(resolved)
-        except Exception:
-            pass  # Best effort — if we can't resolve, allow the call through
-
-
-
-    # Check all collected paths against auto-reject prefixes
-    for path in paths_to_check:
-        for prefix in AUTO_REJECT_PATH_PREFIXES:
-            if path.startswith(prefix):
-                return (
-                    f"REJECTED: Cannot {name} files in '{prefix}'. "
-                    f"Path '{path}' is in an auto-rejected directory. "
-                    f"You must only edit files in your assigned worktree."
-                )
-
-    return None
-
-
 @app.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     """Handle tool calls by invoking elisp or native Python functions."""
     try:
-        # Enforce auto-reject path rules for file-modifying tools
-        reject_msg = await check_auto_reject(name, arguments)
-        if reject_msg:
-            return [TextContent(type="text", text=f"Error: {reject_msg}")]
 
         # Check if it's a native Python tool
         if name in NATIVE_TOOLS:
@@ -1034,16 +969,10 @@ async def start_http_server():
 
 async def main():
     """Run the MCP server with HTTP endpoint for bash callbacks."""
-    global SESSION_BUFFER_NAME, AUTO_REJECT_PATH_PREFIXES
+    global SESSION_BUFFER_NAME
 
     # Initialize session buffer name from environment
     SESSION_BUFFER_NAME = os.environ.get("CLAUDE_AGENT_BUFFER_NAME")
-
-    # Load auto-reject path prefixes from environment (unit-separator delimited)
-    reject_paths_env = os.environ.get("CLAUDE_AUTO_REJECT_PATHS", "")
-    if reject_paths_env:
-        AUTO_REJECT_PATH_PREFIXES = [p for p in reject_paths_env.split("\x1f") if p]
-        print(f"Auto-reject path prefixes: {AUTO_REJECT_PATH_PREFIXES}", file=sys.stderr, flush=True)
 
     # Load tools on startup
     await load_tools_async()

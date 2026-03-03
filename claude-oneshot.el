@@ -18,6 +18,7 @@
 ;; - C-c c p: Project scope - can edit any file in project
 ;;; Code:
 (require 'claude-agent-repl)
+(require 'claude-agent-permissions)
 (require 'claude-mcp)
 
 ;;;; Customization
@@ -536,8 +537,14 @@ Returns the buffer of the new agent."
             claude-oneshot--target-info target
             ;; Save position for tooltip placement (use start of target or current point)
             claude-oneshot--target-position (or (plist-get target :start)
-                                                (with-current-buffer source-buffer (point)))))
-
+                                                (with-current-buffer source-buffer (point))))
+      ;; Set up permission rules for oneshot agents
+      ;; Auto-deny all permission requests - oneshot agents use pre-authorized tools only
+      (setq-local claude-agent-permission-rules-local
+                  `((:match t
+                     :action :deny
+                     :reason ,(format "Oneshot agent (%s scope) - use pre-authorized tools only"
+                                      scope)))))
     ;; Create visual highlight in source buffer for line/region scope
     (when (and (memq scope '(line region))
                (plist-get target :start)
@@ -909,26 +916,10 @@ ORIG-FUN is the original function, MSG-TYPE and MSG are the arguments."
 
 (advice-add 'claude-agent--dispatch-message :around #'claude-oneshot--advice-dispatch-ready)
 
-;; Auto-deny permission requests from oneshot agents
-(defun claude-oneshot--advice-auto-deny-permission (orig-fun data)
-  "Advice for `claude-agent--show-permission-prompt' to auto-deny for oneshot agents.
-ORIG-FUN is the original function, DATA is the permission request data."
-  (if claude-oneshot--is-oneshot
-      ;; Auto-deny and notify the user, but let the agent continue
-      (let ((tool-name (cdr (assq 'tool_name data))))
-        (message "Oneshot agent requested permission for '%s' - auto-denied (agent continues)" tool-name)
-        ;; Send deny response directly - agent will continue and may try another approach
-        (when (and claude-agent--process (process-live-p claude-agent--process))
-          (process-send-string
-           claude-agent--process
-           (concat (json-encode
-                    `((type . "permission_response")
-                      (action . "deny")))
-                   "\n"))))
-    ;; Not a oneshot - proceed normally
-    (funcall orig-fun data)))
-
-(advice-add 'claude-agent--show-permission-prompt :around #'claude-oneshot--advice-auto-deny-permission)
+;; NOTE: Permission handling for oneshot agents is now done via buffer-local
+;; `claude-agent-permission-rules-local' set in `claude-oneshot--start'.
+;; The old advice-based approach has been removed in favor of the unified
+;; permission system.
 
 (provide 'claude-oneshot)
 ;;; claude-oneshot.el ends here
