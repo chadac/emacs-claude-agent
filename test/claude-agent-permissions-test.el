@@ -193,55 +193,54 @@
       (should (eq :deny (plist-get result :action)))
       (should (equal "No shell access" (plist-get result :message))))))
 
-;;;; Policy handler tests
+;;;; Rules evaluation tests
 
-(ert-deftest claude-permission-policy-deny-all ()
-  "Test :deny-all policy."
-  (let ((claude-agent-permission-policy :deny-all)
-        (claude-agent-permission-deny-reason "Sandboxed session"))
+(ert-deftest claude-permission-rules-deny-all ()
+  "Test catch-all deny rule (replacement for :deny-all policy)."
+  (let ((claude-agent-permission-rules-local
+         '((:match t :action :deny :reason "Sandboxed session")))
+        (claude-agent-permission-rules nil))
     (let ((result (claude-agent-permission-handle-request "Read" nil)))
       (should (eq :deny (car result)))
       (should (equal "Sandboxed session" (plist-get (cdr result) :message))))))
 
-(ert-deftest claude-permission-policy-allow-all ()
-  "Test :allow-all policy."
-  (let ((claude-agent-permission-policy :allow-all))
+(ert-deftest claude-permission-rules-allow-all ()
+  "Test catch-all allow rule (replacement for :allow-all policy)."
+  (let ((claude-agent-permission-rules-local
+         '((:match t :action :allow :scope :session)))
+        (claude-agent-permission-rules nil))
     (let ((result (claude-agent-permission-handle-request "Edit" nil)))
       (should (eq :allow (car result)))
       (should (eq :session (plist-get (cdr result) :scope))))))
 
-(ert-deftest claude-permission-policy-rules ()
-  "Test :rules policy with local rules."
-  (let ((claude-agent-permission-policy :rules)
-        (claude-agent-permission-rules-local
+(ert-deftest claude-permission-rules-local ()
+  "Test local rules evaluation."
+  (let ((claude-agent-permission-rules-local
          '((:match (:tool "Read") :action :allow :scope :always)))
         (claude-agent-permission-rules nil))
     (let ((result (claude-agent-permission-handle-request "Read" '((file_path . "/tmp/test")))))
       (should (eq :allow (car result)))
       (should (eq :always (plist-get (cdr result) :scope))))))
 
-(ert-deftest claude-permission-policy-nil-with-global-rules ()
-  "Test nil policy falls through to global rules."
-  (let ((claude-agent-permission-policy nil)
-        (claude-agent-permission-rules-local nil)
+(ert-deftest claude-permission-rules-global ()
+  "Test global rules evaluation."
+  (let ((claude-agent-permission-rules-local nil)
         (claude-agent-permission-rules
-         '((:match (:path-prefix "/etc") :action :deny :message "System files"))))
+         '((:match (:path-prefix "/etc") :action :deny :reason "System files"))))
     (let ((result (claude-agent-permission-handle-request
                    "Edit" '((file_path . "/etc/passwd")))))
       (should (eq :deny (car result))))))
 
-(ert-deftest claude-permission-policy-nil-no-match ()
-  "Test nil policy with no matching rules returns nil (show UI)."
-  (let ((claude-agent-permission-policy nil)
-        (claude-agent-permission-rules-local nil)
+(ert-deftest claude-permission-rules-no-match ()
+  "Test no matching rules returns nil (show UI)."
+  (let ((claude-agent-permission-rules-local nil)
         (claude-agent-permission-rules nil))
     (should (null (claude-agent-permission-handle-request "Edit" nil)))))
 
 (ert-deftest claude-permission-local-rules-precedence ()
   "Test that local rules take precedence over global rules."
-  (let ((claude-agent-permission-policy :rules)
-        (claude-agent-permission-rules-local
-         '((:match (:tool "Read") :action :deny :message "Local deny")))
+  (let ((claude-agent-permission-rules-local
+         '((:match (:tool "Read") :action :deny :reason "Local deny")))
         (claude-agent-permission-rules
          '((:match (:tool "Read") :action :allow :scope :always))))
     (let ((result (claude-agent-permission-handle-request "Read" nil)))
@@ -281,8 +280,7 @@
 
 (ert-deftest claude-permission-predicate-matcher ()
   "Test :predicate matcher with custom function."
-  (let ((claude-agent-permission-policy :rules)
-        (claude-agent-permission-rules
+  (let ((claude-agent-permission-rules
          `((:match (:predicate ,(lambda (tool input)
                                   (and (string= tool "Bash")
                                        (string-match-p "^rm " (alist-get 'command input)))))
@@ -303,8 +301,7 @@
   "Test :predicate matcher with named function."
   (cl-flet ((my-test-predicate (tool input)
               (string= tool "Write")))
-    (let ((claude-agent-permission-policy :rules)
-          (claude-agent-permission-rules
+    (let ((claude-agent-permission-rules
            `((:match (:predicate ,#'my-test-predicate)
               :action :deny
               :reason "Write blocked"))))
@@ -315,8 +312,7 @@
 
 (ert-deftest claude-permission-catch-all-matcher ()
   "Test t matcher as catch-all."
-  (let ((claude-agent-permission-policy :rules)
-        (claude-agent-permission-rules
+  (let ((claude-agent-permission-rules
          '((:match (:tool "Read") :action :allow :scope :session)
            (:match t :action :deny :reason "Everything else denied"))))
     ;; Read should be allowed
@@ -329,8 +325,7 @@
 
 (ert-deftest claude-permission-catch-all-prompt ()
   "Test t matcher with :prompt action."
-  (let ((claude-agent-permission-policy :rules)
-        (claude-agent-permission-rules
+  (let ((claude-agent-permission-rules
          '((:match (:tool "Read") :action :allow :scope :session)
            (:match t :action :prompt))))
     ;; Read should be allowed
@@ -344,8 +339,7 @@
 
 (ert-deftest claude-permission-check-allow ()
   "Test claude-agent-permission-check returning allow."
-  (let ((claude-agent-permission-policy :rules)
-        (claude-agent-permission-rules
+  (let ((claude-agent-permission-rules
          '((:match (:tool "Read") :action :allow :scope :session))))
     (let ((result (claude-agent-permission-check "Read" nil)))
       (should (eq :allow (plist-get result :decision)))
@@ -353,8 +347,7 @@
 
 (ert-deftest claude-permission-check-deny ()
   "Test claude-agent-permission-check returning deny."
-  (let ((claude-agent-permission-policy :rules)
-        (claude-agent-permission-rules
+  (let ((claude-agent-permission-rules
          '((:match (:tool "Write") :action :deny :reason "No writes"))))
     (let ((result (claude-agent-permission-check "Write" nil)))
       (should (eq :deny (plist-get result :decision)))
@@ -362,16 +355,14 @@
 
 (ert-deftest claude-permission-check-prompt ()
   "Test claude-agent-permission-check returning prompt."
-  (let ((claude-agent-permission-policy :rules)
-        (claude-agent-permission-rules
+  (let ((claude-agent-permission-rules
          '((:match t :action :prompt))))
     (let ((result (claude-agent-permission-check "AnyTool" nil)))
       (should (eq :prompt (plist-get result :decision))))))
 
 (ert-deftest claude-permission-check-rule-precedence ()
   "Test rule evaluation order in claude-agent-permission-check."
-  (let ((claude-agent-permission-policy :rules)
-        (claude-agent-permission-rules-local
+  (let ((claude-agent-permission-rules-local
          '((:match (:tool "Read") :action :deny :reason "Local override")))
         (claude-agent-project-permission-rules
          '((:match (:tool "Read") :action :allow :scope :always)))
@@ -384,8 +375,7 @@
 
 (ert-deftest claude-permission-check-project-rules ()
   "Test project rules in claude-agent-permission-check."
-  (let ((claude-agent-permission-policy :rules)
-        (claude-agent-permission-rules-local nil)
+  (let ((claude-agent-permission-rules-local nil)
         (claude-agent-project-permission-rules
          '((:match (:tool "Edit") :action :allow :scope :always)))
         (claude-agent-permission-rules

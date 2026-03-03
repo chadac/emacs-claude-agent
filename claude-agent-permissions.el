@@ -294,50 +294,26 @@ The decision is made by evaluating rules in order:
       ;; No matching rule - fall through to prompt
       (list :decision :prompt))))
 
-;;;; Backwards compatibility: claude-agent-permission-handle-request
-
-(defvar-local claude-agent-permission-policy nil
-  "DEPRECATED: Buffer-local permission policy.
-Use `claude-agent-permission-rules-local' instead.
-
-For backwards compatibility, this is still checked:
-  - :deny-all: Treated as \\='((:match t :action :deny))
-  - :allow-all: Treated as \\='((:match t :action :allow))
-  - :rules or nil: Use the unified rules system")
-
-(defvar-local claude-agent-permission-deny-reason nil
-  "DEPRECATED: Reason for denial when policy is :deny-all.
-Use :reason in rules instead.")
+;;;; Legacy API wrapper
 
 (defun claude-agent-permission-handle-request (tool-name tool-input)
   "Handle permission request for TOOL-NAME with TOOL-INPUT.
-DEPRECATED: Use `claude-agent-permission-check' instead.
+This is a wrapper around `claude-agent-permission-check' that returns
+the result in the legacy format expected by existing callers.
 
 Returns one of:
   (:allow :scope SCOPE :pattern PATTERN) - Auto-allow with scope
   (:deny :message MESSAGE)               - Auto-deny with reason
   nil                                    - Show interactive prompt"
-  ;; Handle legacy :deny-all and :allow-all policies
-  (pcase claude-agent-permission-policy
-    (:deny-all
-     (let ((reason (or claude-agent-permission-deny-reason
-                       "This session auto-denies all permission requests")))
-       (message "Claude agent: Auto-denied %s (policy: deny-all)" tool-name)
-       (list :deny :message reason)))
-    (:allow-all
-     (message "Claude agent: Auto-allowed %s (policy: allow-all)" tool-name)
-     (list :allow :scope :session :pattern (format "%s(*)" tool-name)))
-    (_
-     ;; Use the new unified system
-     (let ((result (claude-agent-permission-check tool-name tool-input)))
-       (pcase (plist-get result :decision)
-         (:allow
-          (list :allow
-                :scope (plist-get result :scope)
-                :pattern (plist-get result :pattern)))
-         (:deny
-          (list :deny :message (plist-get result :reason)))
-         (:prompt nil))))))
+  (let ((result (claude-agent-permission-check tool-name tool-input)))
+    (pcase (plist-get result :decision)
+      (:allow
+       (list :allow
+             :scope (plist-get result :scope)
+             :pattern (plist-get result :pattern)))
+      (:deny
+       (list :deny :message (plist-get result :reason)))
+      (:prompt nil))))
 
 ;;;; Pattern generation
 
@@ -469,40 +445,11 @@ RULE should be a permission rule plist."
               (settings-file (expand-file-name ".claude/settings.local.el" project-root)))
     (find-file settings-file)))
 
-;;;; Convenience functions (DEPRECATED - use rules instead)
+;;;; Convenience functions
 
-(defun claude-agent-permission-set-deny-all (&optional reason)
-  "DEPRECATED: Set permission policy to deny-all.
-Use `claude-agent-permission-rules-local' with a catch-all deny rule instead:
-  (setq-local claude-agent-permission-rules-local
-              \\='((:match t :action :deny :reason \"...\")))
-
-Optional REASON is shown when denying requests."
-  (setq-local claude-agent-permission-policy :deny-all)
-  (when reason
-    (setq-local claude-agent-permission-deny-reason reason))
-  (message "Permission policy set to :deny-all (DEPRECATED)"))
-
-(defun claude-agent-permission-set-allow-all ()
-  "DEPRECATED: Set permission policy to allow-all.
-Use `claude-agent-permission-rules-local' with a catch-all allow rule instead:
-  (setq-local claude-agent-permission-rules-local
-              \\='((:match t :action :allow)))
-
-WARNING: This is dangerous and auto-allows all permission requests!"
-  (when (yes-or-no-p "WARNING: This will auto-approve ALL permission requests. Continue? ")
-    (setq-local claude-agent-permission-policy :allow-all)
-    (message "Permission policy set to :allow-all (DANGEROUS! DEPRECATED)")))
-
-(defun claude-agent-permission-set-rules ()
-  "DEPRECATED: Set permission policy to rules-based evaluation.
-The unified system now always uses rules. This function is a no-op."
-  (message "Permission system now always uses rules (this function is deprecated)"))
-
-(defun claude-agent-permission-clear-policy ()
+(defun claude-agent-permission-clear-rules ()
   "Clear the current buffer's permission rules."
-  (setq-local claude-agent-permission-policy nil)
-  (setq-local claude-agent-permission-deny-reason nil)
+  (interactive)
   (setq-local claude-agent-permission-rules-local nil)
   (setq-local claude-agent-project-permission-rules nil)
   (message "Permission rules cleared"))

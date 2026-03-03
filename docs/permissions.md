@@ -207,11 +207,10 @@ Returns a plist:
 - `(:decision :deny :reason R)` - Deny with reason R
 - `(:decision :prompt)` - Show interactive UI
 
-### Backwards Compatibility
+### Legacy API
 
-The deprecated `claude-agent-permission-handle-request` function still works
-and delegates to the new unified system. The `:deny-all` and `:allow-all`
-policy values are mapped to equivalent rules.
+The `claude-agent-permission-handle-request` function is a wrapper that
+returns results in the legacy format expected by existing callers.
 
 ## Migration Guide
 
