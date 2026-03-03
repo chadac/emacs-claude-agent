@@ -2677,7 +2677,12 @@ If a permission dialog is already showing, queue this request."
         (when tool-use-id
           (unless claude-agent--denied-tools
             (setq claude-agent--denied-tools (make-hash-table :test 'equal)))
-          (puthash tool-use-id t claude-agent--denied-tools))
+          (puthash tool-use-id t claude-agent--denied-tools)
+          ;; Immediately update the status icon if we have the overlay
+          (when-let* ((tool-info (and claude-agent--pending-tools
+                                      (gethash tool-use-id claude-agent--pending-tools)))
+                      (status-overlay (plist-get tool-info :status-overlay)))
+            (claude-agent--update-tool-status status-overlay 'denied)))
         (when (and claude-agent--process
                    (process-live-p claude-agent--process))
           (process-send-string claude-agent--process
@@ -2729,7 +2734,12 @@ If a permission dialog is already showing, queue this request."
              (when tool-use-id
                (unless claude-agent--denied-tools
                  (setq claude-agent--denied-tools (make-hash-table :test 'equal)))
-               (puthash tool-use-id t claude-agent--denied-tools))
+               (puthash tool-use-id t claude-agent--denied-tools)
+               ;; Immediately update the status icon if we have the overlay
+               (when-let* ((tool-info (and claude-agent--pending-tools
+                                           (gethash tool-use-id claude-agent--pending-tools)))
+                           (status-overlay (plist-get tool-info :status-overlay)))
+                 (claude-agent--update-tool-status status-overlay 'denied)))
              (when (and claude-agent--process
                         (process-live-p claude-agent--process))
                (process-send-string claude-agent--process

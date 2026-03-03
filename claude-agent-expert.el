@@ -254,8 +254,7 @@ Returns the buffer name of the expert."
     ;; Set up permission policy for the expert buffer
     (when-let ((buf (get-buffer buffer-name)))
       (with-current-buffer buf
-        ;; Set buffer-local permission policy
-        (setq-local claude-agent-permission-policy :rules)
+        ;; Set buffer-local permission rules (unified system always uses rules)
         (setq-local claude-agent-permission-rules-local
                     `(;; Allow all read-only tools
                       (:match (:tool-regex "read_file\\|grep\\|glob\\|search_buffer\\|get_buffer_content\\|buffer_info\\|list_buffers\\|read_buffer\\|magit_")

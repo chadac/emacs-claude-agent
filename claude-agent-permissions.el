@@ -1,26 +1,28 @@
-;;; claude-agent-permissions.el --- Permission policy system for Claude Agent -*- lexical-binding: t; -*-
+;;; claude-agent-permissions.el --- Permission system for Claude Agent -*- lexical-binding: t; -*-
 
 ;; This file is part of Claude Agent.
 ;; Package-Requires: ((emacs "28.1"))
 
 ;;; Commentary:
 
-;; This module provides a flexible permission policy system for Claude Agent.
-;; It allows configuring how permission requests are handled:
+;; This module provides a unified permission system for Claude Agent.
+;; All permission decisions are made by evaluating rules in order:
 ;;
-;; 1. :deny-all - Auto-deny all permission requests with a reason
-;; 2. :allow-all - Auto-allow all requests (dangerous, requires explicit opt-in)
-;; 3. :rules - Evaluate permission rules in order, first match wins
-;; 4. nil - Fall through to interactive UI (default behavior)
+;; 1. Buffer-local `claude-agent-permission-rules-local` (agent-type specific)
+;; 2. Project `claude-agent-project-permission-rules` (from .claude/settings.local.el)
+;; 3. Global `claude-agent-permission-rules` (user's init.el)
+;; 4. Fall through to :prompt (if no rule matches)
 ;;
 ;; Rules can match on:
+;; - t                    - Always matches (catch-all)
 ;; - Tool name (exact or regex)
 ;; - File paths (prefix or regex)
+;; - Custom predicates
 ;; - Combinations with :and, :or, :not
 ;;
 ;; Actions:
 ;; - :allow - Auto-grant with optional scope (:once, :session, :always)
-;; - :deny - Auto-deny with optional message
+;; - :deny  - Auto-deny with optional reason
 ;; - :prompt - Fall through to interactive UI
 
 ;;; Code:
@@ -30,7 +32,7 @@
 ;;;; Customization
 
 (defgroup claude-agent-permissions nil
-  "Permission policy system for Claude Agent."
+  "Permission system for Claude Agent."
   :group 'claude-agent)
 
 (defcustom claude-agent-permission-rules nil
@@ -38,14 +40,16 @@
 Each rule is a plist with:
   :match   - Matching criteria (see below)
   :action  - :allow, :deny, or :prompt
-  :message - Optional message (for :deny) or log note
+  :reason  - Optional message (for :deny)
   :scope   - :once, :session, or :always (for :allow, default :once)
 
 Matching criteria (:match) can be:
+  t                            - Always matches (catch-all)
   (:tool TOOL-NAME)            - Match specific tool name exactly
   (:tool-regex REGEX)          - Match tool name by regex
   (:path-prefix PATH)          - Match file operations under PATH
   (:path-regex REGEX)          - Match file paths by regex
+  (:predicate FN)              - Call (FN TOOL-NAME TOOL-INPUT), match if truthy
   (:and MATCHER MATCHER ...)   - All matchers must match
   (:or MATCHER MATCHER ...)    - Any matcher must match
   (:not MATCHER)               - Invert match
@@ -57,74 +61,86 @@ Example:
     (:match (:and (:tool-regex \"Edit\\\\|Write\")
                   (:path-prefix \"/etc\"))
      :action :deny
-     :message \"Cannot edit system files\")
-    (:match (:tool \"Bash\")
-     :action :prompt))"
+     :reason \"Cannot edit system files\")
+    (:match t :action :deny :reason \"Sandboxed session\"))"
   :type '(repeat (plist :key-type symbol :value-type sexp))
   :safe #'listp
   :group 'claude-agent-permissions)
 
 ;;;; Buffer-local variables
 
-(defvar-local claude-agent-permission-policy nil
-  "Buffer-local permission policy for this Claude session.
-Can be:
-  - nil: Use global rules, fall back to prompting (default)
-  - :deny-all: Auto-deny all requests with optional reason
-  - :allow-all: Auto-allow all requests (dangerous!)
-  - :rules: Evaluate against buffer-local + global rules")
-
-(defvar-local claude-agent-permission-deny-reason nil
-  "Buffer-local reason for denial when policy is :deny-all.
-If nil, uses a default message.")
-
 (defvar-local claude-agent-permission-rules-local nil
-  "Buffer-local permission rules, evaluated before global rules.
+  "Buffer-local permission rules, evaluated FIRST before all other rules.
+Same format as `claude-agent-permission-rules'.
+
+Agent types set this to define their permission model:
+- Oneshot: \\='((:match t :action :deny :reason \"...\"))
+- Expert: \\='((:match (:tool-regex \"read.*\") :action :allow) ...)
+- TODO auto-mode: \\='((:match (:predicate auto-mode-active-p) :action :deny))")
+
+;;;; Project-level rules
+
+(defvar-local claude-agent-project-permission-rules nil
+  "Project-level permission rules from .claude/settings.local.el.
+Evaluated AFTER buffer-local rules, BEFORE global rules.
 Same format as `claude-agent-permission-rules'.")
+
+;;;; SDK Tool Path Args Registry
+
+(defvar claude-agent-sdk-tool-path-args
+  '(("Read" . ("file_path"))
+    ("Edit" . ("file_path"))
+    ("Write" . ("file_path"))
+    ("Glob" . ("path"))
+    ("Grep" . ("path"))
+    ("NotebookEdit" . ("notebook_path"))
+    ("Bash" . nil))  ; Bash doesn't have path args (command is opaque)
+  "Alist mapping SDK tool names to their path-typed argument names.
+Used by :path-prefix matcher. Only needed for tools NOT defined via deftool.")
+
+(defvar claude-agent-mcp-tool-path-args (make-hash-table :test 'equal)
+  "Hash table mapping MCP tool names to their path-typed argument names.
+Populated by `claude-mcp-deftool' when using path type for arguments.")
 
 ;;;; Path extraction
 
+(defun claude-agent-permission--get-tool-path-args (tool-name)
+  "Get list of path-typed argument names for TOOL-NAME.
+Checks MCP tool registry first, then SDK tool registry."
+  (or (gethash tool-name claude-agent-mcp-tool-path-args)
+      (cdr (assoc tool-name claude-agent-sdk-tool-path-args))))
+
+(defun claude-agent-permission--extract-paths (tool-name tool-input)
+  "Extract file paths from TOOL-INPUT for TOOL-NAME.
+Returns a list of path strings found in the tool's path-typed arguments."
+  (let ((path-args (claude-agent-permission--get-tool-path-args tool-name)))
+    (if path-args
+        ;; Use registered path args
+        (cl-loop for arg in path-args
+                 for key = (intern (concat ":" arg))
+                 for value = (plist-get tool-input key)
+                 ;; Also try alist format (from Python agent)
+                 for alist-value = (cdr (assq (intern arg) tool-input))
+                 for final-value = (or value alist-value)
+                 when (stringp final-value)
+                 collect final-value)
+      ;; Fallback: try common path argument names
+      (let ((paths nil))
+        (dolist (key '(file_path path notebook_path directory))
+          (when-let ((value (or (plist-get tool-input (intern (concat ":" (symbol-name key))))
+                                (cdr (assq key tool-input)))))
+            (when (stringp value)
+              (push value paths))))
+        (nreverse paths)))))
+
 (defun claude-agent-permission--extract-path (tool-name tool-input)
   "Extract file path from TOOL-INPUT for TOOL-NAME.
-Returns the path string or nil if the tool doesn't operate on files."
-  (cond
-   ;; Standard Claude tools with file_path
-   ((member tool-name '("Read" "Write" "Edit" "NotebookEdit"))
-    (cdr (assq 'file_path tool-input)))
-
-   ;; Glob and Grep have optional path
-   ((member tool-name '("Glob" "Grep"))
-    (or (cdr (assq 'path tool-input))
-        ;; Default to current directory if no path specified
-        nil))
-
-   ;; MCP emacs tools with file_path
-   ((and (string-prefix-p "mcp__emacs__" tool-name)
-         (assq 'file_path tool-input))
-    (cdr (assq 'file_path tool-input)))
-
-   ;; MCP emacs tools with buffer_name that might map to a file
-   ((and (string-prefix-p "mcp__emacs__" tool-name)
-         (assq 'buffer_name tool-input))
-    ;; Buffer names like "foo.el" might map to files, but we can't be sure
-    ;; Return nil to avoid false matches
-    nil)
-
-   ;; Bash commands - try to extract file paths from common patterns
-   ((string= tool-name "Bash")
-    (let ((command (cdr (assq 'command tool-input))))
-      (when command
-        (claude-agent-permission--extract-path-from-bash command))))
-
-   ;; Task tool - check the prompt for file references
-   ((string= tool-name "Task")
-    nil)  ; Tasks are too complex to extract paths from
-
-   ;; Default: no path
-   (t nil)))
+Returns the first path string or nil if the tool doesn't operate on files.
+For backwards compatibility - prefer `claude-agent-permission--extract-paths'."
+  (car (claude-agent-permission--extract-paths tool-name tool-input)))
 
 (defun claude-agent-permission--extract-path-from-bash (command)
-  "Try to extract a file path from a COMMAND string.
+  "Try to extract a file path from a bash COMMAND string.
 Returns the first likely file path found, or nil."
   ;; Common patterns that operate on files
   (cond
@@ -156,11 +172,28 @@ Returns the first likely file path found, or nil."
 
 ;;;; Rule matching
 
+(defun claude-agent-permission--match-path-prefix (prefix tool-name tool-input)
+  "Return non-nil if any path in TOOL-INPUT starts with PREFIX.
+TOOL-NAME is used to determine which arguments contain paths."
+  (let ((paths (claude-agent-permission--extract-paths tool-name tool-input))
+        (expanded-prefix (expand-file-name prefix)))
+    (cl-some (lambda (path)
+               (string-prefix-p expanded-prefix (expand-file-name path)))
+             paths)))
+
 (defun claude-agent-permission--match-rule (matcher tool-name tool-input)
   "Check if MATCHER matches TOOL-NAME and TOOL-INPUT.
 Returns t if matched, nil otherwise."
   (condition-case err
       (pcase matcher
+        ;; Catch-all matcher
+        ('t t)
+        (`t t)
+
+        ;; Predicate matcher - call function with tool context
+        (`(:predicate ,fn)
+         (funcall fn tool-name tool-input))
+
         ;; Exact tool name match
         (`(:tool ,name)
          (string= tool-name name))
@@ -169,16 +202,14 @@ Returns t if matched, nil otherwise."
         (`(:tool-regex ,regex)
          (string-match-p regex tool-name))
 
-        ;; Path prefix match
+        ;; Path prefix match (using new multi-path extraction)
         (`(:path-prefix ,prefix)
-         (when-let ((path (claude-agent-permission--extract-path tool-name tool-input)))
-           (string-prefix-p (expand-file-name prefix)
-                            (expand-file-name path))))
+         (claude-agent-permission--match-path-prefix prefix tool-name tool-input))
 
         ;; Path regex match
         (`(:path-regex ,regex)
-         (when-let ((path (claude-agent-permission--extract-path tool-name tool-input)))
-           (string-match-p regex path)))
+         (let ((paths (claude-agent-permission--extract-paths tool-name tool-input)))
+           (cl-some (lambda (path) (string-match-p regex path)) paths)))
 
         ;; AND combinator - all must match
         (`(:and . ,matchers)
@@ -208,99 +239,83 @@ Returns t if matched, nil otherwise."
 
 (defun claude-agent-permission--evaluate-rules (tool-name tool-input rules)
   "Evaluate RULES against TOOL-NAME and TOOL-INPUT.
-Returns the action plist (:action ACTION :scope SCOPE :message MSG)
+Returns the action plist (:action ACTION :scope SCOPE :reason MSG)
 of the first matching rule, or nil if no rule matches."
   (catch 'found
     (dolist (rule rules)
       (let ((matcher (plist-get rule :match))
             (action (plist-get rule :action)))
-        (when (and matcher action)
+        (when action
           (when (claude-agent-permission--match-rule matcher tool-name tool-input)
             (throw 'found
                    (list :action action
                          :scope (or (plist-get rule :scope) :once)
-                         :message (plist-get rule :message)))))))
+                         :reason (or (plist-get rule :reason)
+                                     (plist-get rule :message))))))))  ; :message for backwards compat
     nil))
 
-;;;; Main permission handler
+;;;; Main permission check API
+
+(defun claude-agent-permission-check (tool-name tool-input)
+  "Check if TOOL-NAME with TOOL-INPUT should be allowed.
+Returns a plist:
+  (:decision :allow :scope SCOPE :pattern PATTERN)  - Allow the tool
+  (:decision :deny :reason R)                       - Deny with reason R
+  (:decision :prompt)                               - Show interactive UI
+
+The decision is made by evaluating rules in order:
+1. Buffer-local `claude-agent-permission-rules-local`
+2. Project `claude-agent-project-permission-rules`
+3. Global `claude-agent-permission-rules`
+4. Fall through to :prompt (if no rule matches)"
+  ;; Evaluate rules in order: local > project > global
+  (let* ((all-rules (append claude-agent-permission-rules-local
+                            claude-agent-project-permission-rules
+                            claude-agent-permission-rules))
+         (result (claude-agent-permission--evaluate-rules tool-name tool-input all-rules)))
+    (if result
+        (pcase (plist-get result :action)
+          (:allow
+           (let* ((scope (plist-get result :scope))
+                  (pattern (claude-agent-permission--generate-pattern
+                            tool-name tool-input scope)))
+             (message "Claude agent: Auto-allowed %s (rule match, scope: %s)"
+                      tool-name scope)
+             (list :decision :allow :scope scope :pattern pattern)))
+          (:deny
+           (let ((reason (or (plist-get result :reason)
+                             "Denied by permission rule")))
+             (message "Claude agent: Auto-denied %s (rule match)" tool-name)
+             (list :decision :deny :reason reason)))
+          (:prompt
+           (list :decision :prompt))
+          (_
+           (list :decision :prompt)))
+      ;; No matching rule - fall through to prompt
+      (list :decision :prompt))))
+
+;;;; Legacy API wrapper
 
 (defun claude-agent-permission-handle-request (tool-name tool-input)
   "Handle permission request for TOOL-NAME with TOOL-INPUT.
-Evaluates the current buffer's permission policy and rules.
+This is a wrapper around `claude-agent-permission-check' that returns
+the result in the legacy format expected by existing callers.
 
 Returns one of:
   (:allow :scope SCOPE :pattern PATTERN) - Auto-allow with scope
   (:deny :message MESSAGE)               - Auto-deny with reason
-  nil                                    - Show interactive prompt
+  nil                                    - Show interactive prompt"
+  (let ((result (claude-agent-permission-check tool-name tool-input)))
+    (pcase (plist-get result :decision)
+      (:allow
+       (list :allow
+             :scope (plist-get result :scope)
+             :pattern (plist-get result :pattern)))
+      (:deny
+       (list :deny :message (plist-get result :reason)))
+      (:prompt nil))))
 
-This function should be called from `claude-agent--show-permission-prompt'
-before showing the interactive UI."
-  (let ((policy claude-agent-permission-policy))
-    (pcase policy
-      ;; Deny-all policy (for sandboxed/expert agents)
-      (:deny-all
-       (let ((reason (or claude-agent-permission-deny-reason
-                         "This session auto-denies all permission requests")))
-         (message "Claude agent: Auto-denied %s (policy: deny-all)" tool-name)
-         (list :deny :message reason)))
-
-      ;; Allow-all policy (dangerous, requires explicit opt-in)
-      (:allow-all
-       (message "Claude agent: Auto-allowed %s (policy: allow-all)" tool-name)
-       (list :allow :scope :session :pattern (format "%s(*)" tool-name)))
-
-      ;; Rules-based evaluation
-      (:rules
-       (let* ((all-rules (append claude-agent-permission-rules-local
-                                 claude-agent-permission-rules))
-              (result (claude-agent-permission--evaluate-rules
-                       tool-name tool-input all-rules)))
-         (when result
-           (pcase (plist-get result :action)
-             (:allow
-              (let* ((scope (plist-get result :scope))
-                     (pattern (claude-agent-permission--generate-pattern
-                               tool-name tool-input scope)))
-                (message "Claude agent: Auto-allowed %s (rule match, scope: %s)"
-                         tool-name scope)
-                (list :allow :scope scope :pattern pattern)))
-             (:deny
-              (let ((msg (or (plist-get result :message)
-                             "Denied by permission rule")))
-                (message "Claude agent: Auto-denied %s (rule match)" tool-name)
-                (list :deny :message msg)))
-             (:prompt
-              ;; Explicit prompt action - fall through to UI
-              nil)
-             (_
-              ;; Unknown action - fall through
-              nil)))))
-
-      ;; nil or unrecognized policy - check global rules then fall through
-      (_
-       (if claude-agent-permission-rules
-           (let ((result (claude-agent-permission--evaluate-rules
-                          tool-name tool-input claude-agent-permission-rules)))
-             (if result
-                 (pcase (plist-get result :action)
-                   (:allow
-                    (let* ((scope (plist-get result :scope))
-                           (pattern (claude-agent-permission--generate-pattern
-                                     tool-name tool-input scope)))
-                      (message "Claude agent: Auto-allowed %s (global rule, scope: %s)"
-                               tool-name scope)
-                      (list :allow :scope scope :pattern pattern)))
-                   (:deny
-                    (let ((msg (or (plist-get result :message)
-                                   "Denied by permission rule")))
-                      (message "Claude agent: Auto-denied %s (global rule)" tool-name)
-                      (list :deny :message msg)))
-                   (:prompt nil)
-                   (_ nil))
-               ;; No matching rule - fall through to UI
-               nil))
-         ;; No global rules - fall through to UI
-         nil)))))
+;;;; Pattern generation
 
 (defun claude-agent-permission--generate-pattern (tool-name tool-input scope)
   "Generate permission pattern for TOOL-NAME with TOOL-INPUT at SCOPE level.
@@ -345,34 +360,99 @@ This mirrors the pattern generation in the existing permission system."
     ;; Default to once
     (_ (format "%s" tool-name))))
 
-;;;; Convenience functions for setting policies
+;;;; Project settings file support
 
-(defun claude-agent-permission-set-deny-all (&optional reason)
-  "Set the current buffer's permission policy to deny-all.
-Optional REASON is shown when denying requests."
-  (setq-local claude-agent-permission-policy :deny-all)
-  (when reason
-    (setq-local claude-agent-permission-deny-reason reason))
-  (message "Permission policy set to :deny-all"))
+(defun claude-agent-load-project-settings ()
+  "Load permission rules from .claude/settings.local.el if it exists.
+Loads from current project root's .claude/settings.local.el."
+  (when-let* ((project-root (or (when (bound-and-true-p claude--cwd)
+                                  claude--cwd)
+                                (when (fboundp 'claude--project-root)
+                                  (claude--project-root))
+                                default-directory))
+              (settings-file (expand-file-name ".claude/settings.local.el" project-root)))
+    (when (file-exists-p settings-file)
+      (condition-case err
+          (with-temp-buffer
+            (insert-file-contents settings-file)
+            (let ((form (read (current-buffer))))
+              ;; The file should contain a setq for claude-agent-project-permission-rules
+              ;; or just the rules list directly
+              (cond
+               ((and (listp form)
+                     (eq (car form) 'setq)
+                     (eq (cadr form) 'claude-agent-project-permission-rules))
+                (setq-local claude-agent-project-permission-rules (eval (caddr form))))
+               ((listp form)
+                ;; Assume it's a rules list directly
+                (setq-local claude-agent-project-permission-rules form)))
+              (message "Loaded project permissions from %s" settings-file)))
+        (error
+         (message "Error loading project permissions from %s: %s"
+                  settings-file (error-message-string err)))))))
 
-(defun claude-agent-permission-set-allow-all ()
-  "Set the current buffer's permission policy to allow-all.
-WARNING: This is dangerous and auto-allows all permission requests!"
-  (when (yes-or-no-p "WARNING: :allow-all will auto-approve ALL permission requests. Continue? ")
-    (setq-local claude-agent-permission-policy :allow-all)
-    (message "Permission policy set to :allow-all (DANGEROUS!)")))
+(defun claude-agent-save-project-rule (rule)
+  "Append RULE to .claude/settings.local.el, creating file if needed.
+RULE should be a permission rule plist."
+  (when-let* ((project-root (or (when (bound-and-true-p claude--cwd)
+                                  claude--cwd)
+                                (when (fboundp 'claude--project-root)
+                                  (claude--project-root))
+                                default-directory))
+              (settings-dir (expand-file-name ".claude" project-root))
+              (settings-file (expand-file-name "settings.local.el" settings-dir)))
+    ;; Ensure .claude directory exists
+    (unless (file-directory-p settings-dir)
+      (make-directory settings-dir t))
+    ;; Load existing rules or start fresh
+    (let ((existing-rules (when (file-exists-p settings-file)
+                            (condition-case nil
+                                (with-temp-buffer
+                                  (insert-file-contents settings-file)
+                                  (let ((form (read (current-buffer))))
+                                    (cond
+                                     ((and (listp form)
+                                           (eq (car form) 'setq)
+                                           (eq (cadr form) 'claude-agent-project-permission-rules))
+                                      (eval (caddr form)))
+                                     ((listp form) form)
+                                     (t nil))))
+                              (error nil)))))
+      ;; Add new rule (avoid duplicates)
+      (unless (member rule existing-rules)
+        (push rule existing-rules))
+      ;; Write back
+      (with-temp-file settings-file
+        (insert ";;; .claude/settings.local.el --- Project permission rules -*- lexical-binding: t; -*-\n\n")
+        (insert ";; Auto-generated by claude-agent permission prompts.\n")
+        (insert ";; You may edit this file manually.\n\n")
+        (insert "(setq claude-agent-project-permission-rules\n")
+        (insert "      '")
+        (pp existing-rules (current-buffer))
+        (insert ")\n"))
+      ;; Update buffer-local copy
+      (setq-local claude-agent-project-permission-rules existing-rules)
+      (message "Saved permission rule to %s" settings-file))))
 
-(defun claude-agent-permission-set-rules ()
-  "Set the current buffer's permission policy to rules-based evaluation."
-  (setq-local claude-agent-permission-policy :rules)
-  (message "Permission policy set to :rules"))
+(defun claude-agent-edit-project-settings ()
+  "Open .claude/settings.local.el for manual editing."
+  (interactive)
+  (when-let* ((project-root (or (when (bound-and-true-p claude--cwd)
+                                  claude--cwd)
+                                (when (fboundp 'claude--project-root)
+                                  (claude--project-root))
+                                default-directory))
+              (settings-file (expand-file-name ".claude/settings.local.el" project-root)))
+    (find-file settings-file)))
 
-(defun claude-agent-permission-clear-policy ()
-  "Clear the current buffer's permission policy (use global rules)."
-  (setq-local claude-agent-permission-policy nil)
-  (setq-local claude-agent-permission-deny-reason nil)
+;;;; Convenience functions
+
+(defun claude-agent-permission-clear-rules ()
+  "Clear the current buffer's permission rules."
+  (interactive)
   (setq-local claude-agent-permission-rules-local nil)
-  (message "Permission policy cleared (using global rules)"))
+  (setq-local claude-agent-project-permission-rules nil)
+  (message "Permission rules cleared"))
 
 ;;;; Integration helpers
 
