@@ -354,18 +354,14 @@ Returns nil if not in a project or directory doesn't exist."
                          (project-root proj))
                        default-directory))
               (expanded (expand-file-name dir))
-              ;; Convert path to Claude's format:
-              ;; /home/foo/.bar/baz -> -home-foo--bar-baz
-              ;; 1. Remove trailing slash
-              ;; 2. Replace . with - (so /. becomes --)
-              ;; 3. Replace / with -
+              ;; Convert path to Claude CLI's slug format:
+              ;; /home/foo/.bar/baz_qux -> -home-foo--bar-baz-qux
+              ;; Replace /, ., and _ with -
               (no-trailing (directory-file-name expanded))
-              (dots-to-dash (replace-regexp-in-string "\\." "-" no-trailing))
-              (encoded (replace-regexp-in-string "/" "-" dots-to-dash))
+              (encoded (replace-regexp-in-string "[/._]" "-" no-trailing))
               (sessions-dir (expand-file-name encoded "~/.claude/projects/")))
     (when (file-directory-p sessions-dir)
       sessions-dir)))
-
 (defun claude-transient--valid-uuid-p (string)
   "Return non-nil if STRING is a valid UUID format.
 UUIDs have the format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"

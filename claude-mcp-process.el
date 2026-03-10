@@ -312,7 +312,10 @@ WORK-DIR can be either:
     ;; Add --resume or --continue based on args
     (when (member "--resume" args)
       (let ((session-id (cadr (member "--resume" args))))
-        (setq agent-args (append agent-args (list "--resume" session-id)))))
+        (if session-id
+            (setq agent-args (append agent-args (list "--resume" session-id)))
+          ;; No explicit session ID - use --continue to resume most recent
+          (setq agent-args (append agent-args (list "--continue"))))))
     (when (member "--continue" args)
       (setq agent-args (append agent-args (list "--continue"))))
 
@@ -368,10 +371,9 @@ If CLEAR-FIRST is non-nil, clear the input area before inserting."
 Returns the UUID of the most recently modified session file, or nil if none found."
   (let* ((expanded-dir (expand-file-name work-dir))
          ;; Convert /home/user/.path/to/dir to -home-user--path-to-dir
-         ;; Claude's format: replace / with -, replace . with -
-         (slug-with-slashes (replace-regexp-in-string "/" "-" expanded-dir))
-         (project-slug (replace-regexp-in-string "\\." "-" slug-with-slashes))
-         (sessions-dir (expand-file-name project-slug "~/.claude/projects/")))
+         ;; Claude CLI format: replace /, ., and _ with -
+         (slug (replace-regexp-in-string "[/._]" "-" expanded-dir))
+         (sessions-dir (expand-file-name slug "~/.claude/projects/")))
     (when (file-directory-p sessions-dir)
       (let* ((files (directory-files sessions-dir t "\\.jsonl$"))
              (sorted-files (sort files
