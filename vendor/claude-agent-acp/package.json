@@ -1,0 +1,5 @@
+{
+  "dependencies": {
+    "@zed-industries/claude-agent-acp": "^0.21.0"
+  }
+}

@@ -1,0 +1,3 @@
+[submodule "vendor/acp.el"]
+	path = vendor/acp.el
+	url = https://github.com/xenodium/acp.el.git
