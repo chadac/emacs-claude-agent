@@ -30,6 +30,14 @@
 (declare-function claude-agent--log-file "claude-agent")
 
 
+;; Declare ACP backend functions (optional dependency)
+(defvar claude-acp--backend-active)
+(declare-function claude-acp--send-user-message "claude-acp")
+(declare-function claude-acp--send-permission-response-bridge "claude-acp")
+(declare-function claude-acp--process-live-p "claude-acp")
+(declare-function claude-acp-cancel "claude-acp")
+(declare-function claude-acp-shutdown "claude-acp")
+
 
 ;;;; Customization
 
@@ -233,13 +241,10 @@ to determine which hooks should fire."
 (defun claude-agent--send-system-message (text)
   "Send a system_message command to the agent process.
 TEXT is the message string to inject into the next user message."
-  (when (and claude-agent--process
-             (process-live-p claude-agent--process)
+  (when (and (claude-agent--backend-alive-p)
              text
              (not (string-empty-p text)))
-    (process-send-string
-     claude-agent--process
-     (concat (json-encode `((type . "system_message") (text . ,text))) "\n"))))
+    (claude-agent--backend-send-json `((type . "system_message") (text . ,text)))))
 
 (defun claude-agent-send-test-system-message (text)
   "Send a test system message TEXT to the agent for debugging.
@@ -261,10 +266,15 @@ system messages in the REPL buffer."
   (let ((hook-messages (claude-agent--evaluate-hooks)))
     (dolist (msg hook-messages)
       (claude-agent--send-system-message msg)))
-  ;; Send the actual user message
-  (process-send-string
-   claude-agent--process
-   (concat (json-encode `((type . "message") (text . ,text))) "\n")))
+  ;; For ACP backend, prepend any queued system messages to the prompt
+  (let ((final-text text))
+    (when (and (bound-and-true-p claude-acp--backend-active)
+               claude-agent--pending-system-messages)
+      (let ((sys-text (mapconcat #'identity claude-agent--pending-system-messages "\n\n")))
+        (setq final-text (concat "<system-reminder>\n" sys-text "\n</system-reminder>\n\n" final-text))
+        (setq claude-agent--pending-system-messages nil)))
+    ;; Send via appropriate backend
+    (claude-agent--backend-send-json `((type . "message") (text . ,final-text)))))
 
 ;;;; Faces
 
@@ -502,6 +512,95 @@ system messages in the REPL buffer."
 
 (defvar-local claude-agent--process nil
   "The agent process for this session.")
+
+;;;; Backend Abstraction Layer
+;;
+;; These functions provide a unified API for agent communication that
+;; works with both the Python backend (process-send-string) and the
+;; ACP backend (acp.el JSON-RPC). Use these instead of directly
+;; accessing claude-agent--process.
+
+(defun claude-agent--backend-alive-p ()
+  "Return non-nil if the agent backend (Python or ACP) is alive."
+  (or (and claude-agent--process
+           (process-live-p claude-agent--process))
+      (and (bound-and-true-p claude-acp--backend-active)
+           (claude-acp--process-live-p))))
+
+(defun claude-agent--backend-send-json (msg)
+  "Send MSG (an alist) as JSON to the agent via the active backend.
+For the Python backend, encodes MSG as JSON and sends via stdin.
+For the ACP backend, dispatches based on the message type."
+  (cond
+   ((bound-and-true-p claude-acp--backend-active)
+    ;; ACP backend - dispatch based on message type
+    (let ((type (cdr (assq 'type msg)))
+          (text (cdr (assq 'text msg))))
+      (pcase type
+        ("message"
+         (claude-acp--send-user-message text))
+        ("system_message"
+         ;; ACP doesn't have a separate system_message type.
+         ;; System messages are included in the prompt text.
+         ;; For now, queue them for prepending to the next user message.
+         (when text
+           (setq claude-agent--pending-system-messages
+                 (append (or (bound-and-true-p claude-agent--pending-system-messages) nil)
+                         (list text)))))
+        ("interrupt"
+         (claude-acp-cancel))
+        ("quit"
+         (claude-acp-shutdown))
+        ("permission_response"
+         (let ((action (cdr (assq 'action msg))))
+           (claude-acp--send-permission-response-bridge action nil)))
+        (_
+         ;; Unknown type - log warning
+         (message "Claude ACP: Unknown message type for backend-send-json: %s" type)))))
+   ;; Python backend - send NDJSON
+   ((and claude-agent--process
+         (process-live-p claude-agent--process))
+    (process-send-string claude-agent--process
+                         (concat (json-encode msg) "\n")))
+   (t
+    (message "Claude: No active backend to send message"))))
+
+(defun claude-agent--backend-send-permission-response (action &optional tool-use-id)
+  "Send a permission response with ACTION via the active backend.
+ACTION is a string like \"allow_once\", \"allow_session\", \"allow_always\", or \"deny\".
+TOOL-USE-ID is the tool use ID (used by Python backend)."
+  (if (bound-and-true-p claude-acp--backend-active)
+      (claude-acp--send-permission-response-bridge action tool-use-id)
+    (when (and claude-agent--process
+               (process-live-p claude-agent--process))
+      (let ((response-msg `((type . "permission_response")
+                            (action . ,action)
+                            ,@(when tool-use-id `((tool_use_id . ,tool-use-id))))))
+        (process-send-string claude-agent--process
+                             (concat (json-encode response-msg) "\n"))))))
+
+(defun claude-agent--backend-shutdown ()
+  "Shutdown the active backend (Python process or ACP client)."
+  (cond
+   ((bound-and-true-p claude-acp--backend-active)
+    (claude-acp-shutdown)
+    (setq claude-acp--backend-active nil))
+   ((and claude-agent--process (process-live-p claude-agent--process))
+    (delete-process claude-agent--process)
+    (setq claude-agent--process nil))))
+
+(defun claude-agent--backend-interrupt ()
+  "Interrupt the current operation via the active backend."
+  (if (bound-and-true-p claude-acp--backend-active)
+      (claude-acp-cancel)
+    (when (and claude-agent--process
+               (process-live-p claude-agent--process))
+      (process-send-string claude-agent--process
+                           (concat (json-encode '((type . "interrupt"))) "\n")))))
+
+(defvar-local claude-agent--pending-system-messages nil
+  "List of system messages queued for prepending to the next user prompt.
+Used by the ACP backend which doesn't have a separate system_message type.")
 
 (defvar-local claude-agent--static-end-marker nil
   "Marker for end of static section (start of dynamic section).
@@ -2639,6 +2738,9 @@ If a permission dialog is already showing, queue this request."
   (let* ((tool-name (cdr (assq 'tool_name data)))
          (tool-input (cdr (assq 'tool_input data)))
          (tool-use-id (cdr (assq 'tool_use_id data)))
+         ;; When policy_checked is set (e.g., from ACP handler), skip
+         ;; re-evaluating permission rules since they were already checked
+         (policy-checked (cdr (assq 'policy_checked data)))
          ;; Variables for hook-based denial
          (hook-denied nil)
          (hook-deny-reason nil)
@@ -2683,25 +2785,21 @@ If a permission dialog is already showing, queue this request."
                                       (gethash tool-use-id claude-agent--pending-tools)))
                       (status-overlay (plist-get tool-info :status-overlay)))
             (claude-agent--update-tool-status status-overlay 'denied)))
-        (when (and claude-agent--process
-                   (process-live-p claude-agent--process))
-          (process-send-string claude-agent--process
-                               (concat (json-encode response-msg) "\n")))
+        (claude-agent--backend-send-permission-response "deny" tool-use-id)
         (claude-agent--set-thinking "Processing...")))
 
      ;; Hook didn't deny - proceed with permission policy evaluation
+     ;; (skip if policy_checked flag is set, e.g., from ACP handler)
      (t
-      (let ((decision (claude-agent-permission-handle-request tool-name tool-input)))
+      (let ((decision (if policy-checked
+                          nil  ; Skip - already checked by ACP handler
+                        (claude-agent-permission-handle-request tool-name tool-input))))
         (pcase decision
           ;; Auto-allow: send permission response immediately
           (`(:allow . ,props)
            (let* ((scope (plist-get props :scope))
                   (pattern (plist-get props :pattern))
-                  (action (claude-agent-permission-scope-to-action scope))
-                  (response-msg `((type . "permission_response")
-                                  (action . ,action)
-                                  (pattern . ,pattern)
-                                  ,@(when tool-use-id `((tool_use_id . ,tool-use-id))))))
+                  (action (claude-agent-permission-scope-to-action scope)))
              ;; Fire permission-response hook
              (run-hook-with-args 'claude-agent-permission-response-hook
                                  (current-buffer)
@@ -2710,10 +2808,7 @@ If a permission dialog is already showing, queue this request."
                                        :tool-use-id tool-use-id
                                        :scope scope
                                        :pattern pattern))
-             (when (and claude-agent--process
-                        (process-live-p claude-agent--process))
-               (process-send-string claude-agent--process
-                                    (concat (json-encode response-msg) "\n")))
+             (claude-agent--backend-send-permission-response action tool-use-id)
              (claude-agent--set-thinking "Processing...")))
 
           ;; Auto-deny: send deny response immediately
@@ -2740,13 +2835,10 @@ If a permission dialog is already showing, queue this request."
                                            (gethash tool-use-id claude-agent--pending-tools)))
                            (status-overlay (plist-get tool-info :status-overlay)))
                  (claude-agent--update-tool-status status-overlay 'denied)))
-             (when (and claude-agent--process
-                        (process-live-p claude-agent--process))
-               (process-send-string claude-agent--process
-                                    (concat (json-encode response-msg) "\n")))
+             (claude-agent--backend-send-permission-response "deny" tool-use-id)
              (claude-agent--set-thinking "Processing...")))
 
-          ;; No policy match - show interactive UI
+          ;; No policy match (or policy_checked) - show interactive UI
           (_
            ;; Fire permission-response hook with 'prompt decision
            (run-hook-with-args 'claude-agent-permission-response-hook
@@ -2904,11 +2996,10 @@ Restores text input mode and any saved input."
        (dolist (ov (overlays-in (point-min) (point-max)))
          (when (overlay-get ov 'claude-permission-face)
            (delete-overlay ov)))
-       ;; Send JSON response to process
-       (when (and claude-agent--process
-                  (process-live-p claude-agent--process))
-         (process-send-string claude-agent--process
-                              (concat (json-encode response-msg) "\n")))
+       ;; Send response to appropriate backend
+       (claude-agent--backend-send-permission-response action tool-use-id)
+
+
        ;; Check if there are more queued permission requests
        (if claude-agent--permission-queue
            ;; Show the next queued permission
@@ -3170,8 +3261,7 @@ This avoids the problem of each queued message being interrupted
 individually."
   (when (and claude-agent--message-queue
              (not (claude-agent--is-busy-p))
-             claude-agent--process
-             (process-live-p claude-agent--process))
+             (claude-agent--backend-alive-p))
     (let ((combined (mapconcat #'identity claude-agent--message-queue "\n\n")))
       (setq claude-agent--message-queue nil)
       (claude-agent--dispatch-user-message combined))))
@@ -3292,10 +3382,7 @@ When called from the input buffer, sends the message."
   "Interrupt the current Claude operation."
   (interactive)
   (claude-agent--in-base-buffer
-   (when (and claude-agent--process
-              (process-live-p claude-agent--process))
-     (process-send-string claude-agent--process
-                          (concat (json-encode '((type . "interrupt"))) "\n")))))
+   (claude-agent--backend-interrupt)))
 
 (defun claude-agent-quit ()
   "Quit the Claude session."
@@ -3304,19 +3391,13 @@ When called from the input buffer, sends the message."
     (claude-agent--in-base-buffer
      ;; Clean up input window/buffer
      (claude-agent--close-input-window)
-     (when (and claude-agent--process
-                (process-live-p claude-agent--process))
-       (process-send-string claude-agent--process
-                            (concat (json-encode '((type . "quit"))) "\n"))))))
+     (claude-agent--backend-send-json '((type . "quit"))))))
 
 (defun claude-agent--send-json (msg)
   "Send MSG as JSON to the agent process.
 MSG should be an alist that will be encoded as JSON."
   (claude-agent--in-base-buffer
-   (when (and claude-agent--process
-              (process-live-p claude-agent--process))
-     (process-send-string claude-agent--process
-                          (concat (json-encode msg) "\n")))))
+   (claude-agent--backend-send-json msg)))
 
 (defun claude-agent-previous-input ()
   "Recall previous input from history in the input buffer."
@@ -3573,26 +3654,34 @@ latest version of each model family."
    (list (completing-read "Model (alias or full name): "
                           claude-agent--model-aliases
                           nil nil)))  ; Allow free-form input
-  (if (and claude-agent--process (process-live-p claude-agent--process))
-      (let ((session-id (plist-get claude-agent--session-info :session-id))
-            (work-dir claude-agent--work-dir))
-        (if session-id
-            (progn
-              ;; Kill current process
-              (delete-process claude-agent--process)
-              (setq claude-agent--process nil)
-              ;; Clear thinking state
-              (claude-agent--set-thinking nil)
-              ;; Notify user
-              (claude-agent--append-to-log
-               (format "\n🔄 Switching to %s model...\n" model)
-               'claude-agent-session-face)
-              ;; Start new process with same session ID but new model
-              (let ((proc (claude-agent--start-process
-                           work-dir (current-buffer) session-id nil model)))
-                (setq claude-agent--process proc))
-              (message "Restarting session with %s model..." model))
-          (message "No session ID available - cannot switch model")))
+  (if (claude-agent--backend-alive-p)
+      (if (bound-and-true-p claude-acp--backend-active)
+          ;; ACP backend - use set-model API (no restart needed)
+          (progn
+            (require 'claude-acp)
+            (claude-acp--set-model claude-acp--client (current-buffer)
+                                   claude-acp--session-id model)
+            (message "Model changed to %s" model))
+        ;; Python backend - restart with new model
+        (let ((session-id (plist-get claude-agent--session-info :session-id))
+              (work-dir claude-agent--work-dir))
+          (if session-id
+              (progn
+                ;; Kill current process
+                (delete-process claude-agent--process)
+                (setq claude-agent--process nil)
+                ;; Clear thinking state
+                (claude-agent--set-thinking nil)
+                ;; Notify user
+                (claude-agent--append-to-log
+                 (format "\n🔄 Switching to %s model...\n" model)
+                 'claude-agent-session-face)
+                ;; Start new process with same session ID but new model
+                (let ((proc (claude-agent--start-process
+                             work-dir (current-buffer) session-id nil model)))
+                  (setq claude-agent--process proc))
+                (message "Restarting session with %s model..." model))
+            (message "No session ID available - cannot switch model"))))
     (message "No active Claude session")))
 
 (defun claude-agent-mcp-list ()
@@ -3646,9 +3735,9 @@ latest version of each model family."
   "Compact the conversation history.
 Sends /compact as a message to Claude."
   (interactive)
-  (if (and claude-agent--process (process-live-p claude-agent--process))
+  (if (claude-agent--backend-alive-p)
       (progn
-        (claude-agent--send-json '((type . "message") (text . "/compact")))
+        (claude-agent--backend-send-json '((type . "message") (text . "/compact")))
         (message "Compacting conversation..."))
     (message "No active Claude session")))
 
@@ -3656,9 +3745,9 @@ Sends /compact as a message to Claude."
   "Clear the conversation history and start fresh.
 Sends /clear as a message to Claude."
   (interactive)
-  (if (and claude-agent--process (process-live-p claude-agent--process))
+  (if (claude-agent--backend-alive-p)
       (when (yes-or-no-p "Clear conversation history? ")
-        (claude-agent--send-json '((type . "message") (text . "/clear")))
+        (claude-agent--backend-send-json '((type . "message") (text . "/clear")))
         (message "Clearing conversation..."))
     (message "No active Claude session")))
 
@@ -3672,9 +3761,8 @@ This reloads the MCP server and Python agent while preserving the session."
      (error "No work directory set for this session"))
    (let ((work-dir claude-agent--work-dir)
          (buf (current-buffer)))
-     ;; Kill existing process
-     (when (and claude-agent--process (process-live-p claude-agent--process))
-       (delete-process claude-agent--process))
+     ;; Kill existing backend
+     (claude-agent--backend-shutdown)
      ;; Clean up MCP config file if it exists
      (when (and claude-agent--mcp-config-file
                 (file-exists-p claude-agent--mcp-config-file))
@@ -3688,9 +3776,16 @@ This reloads the MCP server and Python agent while preserving the session."
      (claude-agent--append-to-log
       "\n⟳ Restarting session...\n"
       'claude-agent-session-face)
-     ;; Start new process with --continue to resume the session
-     (let ((proc (claude-agent--start-process work-dir buf nil t)))
-       (setq claude-agent--process proc))
+     ;; Restart with the appropriate backend
+     (if (bound-and-true-p claude-acp--backend-active)
+         ;; ACP backend - restart ACP session
+         (progn
+           (require 'claude-acp)
+           (let ((session-id claude-acp--session-id))
+             (claude-acp-start-session buf work-dir (buffer-name buf) session-id)))
+       ;; Python backend - start new process with --continue
+       (let ((proc (claude-agent--start-process work-dir buf nil t)))
+         (setq claude-agent--process proc)))
      (claude-agent--render-dynamic-section)
      ;; Send a message to the agent after a short delay to let it initialize
      (run-with-timer
@@ -3698,14 +3793,10 @@ This reloads the MCP server and Python agent while preserving the session."
       (lambda (buffer)
         (when (buffer-live-p buffer)
           (with-current-buffer buffer
-            (when (and claude-agent--process
-                       (process-live-p claude-agent--process))
-              (process-send-string
-               claude-agent--process
-               (concat (json-encode
-                        '((type . "message")
-                          (text . "Session restarted. MCP server reloaded with any code changes. Please continue.")))
-                       "\n"))))))
+            (when (claude-agent--backend-alive-p)
+              (claude-agent--backend-send-json
+               '((type . "message")
+                 (text . "Session restarted. MCP server reloaded with any code changes. Please continue.")))))))
       buf)
      (message "Session restarted, MCP server reloaded."))))
 

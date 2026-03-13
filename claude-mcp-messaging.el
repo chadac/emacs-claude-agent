@@ -32,6 +32,7 @@
 (declare-function claude-agent--dispatch-user-message "claude-agent-repl")
 (declare-function claude-agent--render-dynamic-section "claude-agent-repl")
 (declare-function claude-agent-run "claude-agent-repl")
+(declare-function claude-agent--backend-alive-p "claude-agent-repl")
 
 ;;;; Message Queue System
 ;;
@@ -243,11 +244,9 @@ If EXPECTING-REPLY-P is non-nil, append a reply reminder to the message."
   ;; Determine sender
   (let ((sender (or from-buffer "unknown")))
 
-    ;; Verify it's a Claude agent buffer with a live process
+    ;; Verify it's a Claude agent buffer with a live backend
     (with-current-buffer buffer-name
-      (unless (and (boundp 'claude-agent--process)
-                   claude-agent--process
-                   (process-live-p claude-agent--process))
+      (unless (claude-agent--backend-alive-p)
         (error "Buffer '%s' does not have a live Claude agent process" buffer-name)))
 
     ;; Add to MCP-level message queue (for send_and_wait reply matching)

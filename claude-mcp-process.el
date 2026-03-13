@@ -23,7 +23,29 @@
 (declare-function claude--package-root "claude-agent")
 (declare-function claude-agent--log-file "claude-agent")
 
+;; ACP backend (optional)
+(declare-function claude-acp-start-session "claude-acp")
+(declare-function claude-acp--process-live-p "claude-acp")
+(declare-function claude-acp-shutdown "claude-acp")
+(declare-function claude-acp--send-user-message "claude-acp")
+(declare-function claude-agent--backend-alive-p "claude-agent-repl")
+(declare-function claude-agent--backend-shutdown "claude-agent-repl")
+(declare-function claude-agent--dispatch-user-message "claude-agent-repl")
+(defvar claude-acp--backend-active)
+(defvar claude-acp--client)
+
 ;;;; Customization
+
+(defcustom claude-mcp-backend 'python
+  "Backend to use for Claude agent communication.
+When set to \='python, uses the existing Python wrapper (claude_agent/).
+When set to \='acp, uses the ACP (Agent Client Protocol) backend.
+The ACP backend communicates directly with claude-agent-acp via JSON-RPC,
+eliminating the Python intermediary."
+  :type '(choice (const :tag "Python SDK wrapper" python)
+                 (const :tag "ACP (Agent Client Protocol)" acp))
+  :group 'claude-agent)
+
 
 (defcustom claude-mcp-switch-to-buffer-on-create t
   "Whether to switch to the Claude buffer when creating a new session.
@@ -150,7 +172,7 @@ Returns t if switched successfully, nil if no buffer exists."
   (if-let* ((buffer (claude-mcp--session-buffer)))
       (progn
         (with-current-buffer buffer
-          (unless (and claude-agent--process (process-live-p claude-agent--process))
+          (unless (claude-agent--backend-alive-p)
             (error "Claude session exists but process is not running. Please kill *claude:...* buffer and re-start")))
         ;; we have a running agent process
         (display-buffer buffer)
@@ -164,8 +186,7 @@ Returns t if switched successfully, nil if no buffer exists."
     (unless buffer
       (error "No Claude MCP session is active"))
     (with-current-buffer buffer
-      (unless (and claude-agent--process
-                   (process-live-p claude-agent--process))
+      (unless (claude-agent--backend-alive-p)
         (error "Claude agent process is not running"))))
   t)
 
@@ -324,9 +345,32 @@ WORK-DIR can be either:
       (claude-agent-mode)
       (claude-agent--init-buffer short-name)
       (setq-local claude-mcp--cwd expanded-dir)
-      ;; Start the agent process
-      (let ((proc (claude-agent--start-process-with-args expanded-dir buf agent-args)))
-        (setq claude-agent--process proc))
+      ;; Start the appropriate backend
+      (if (eq claude-mcp-backend 'acp)
+          ;; ACP backend
+          (progn
+            (require 'claude-acp)
+            (setq-local claude-acp--backend-active t)
+            ;; Determine resume session ID
+            (let ((resume-id (cond
+                               ;; Explicit session ID: --resume <id>
+                               ((and (member "--resume" args)
+                                     (cadr (member "--resume" args)))
+                                (cadr (member "--resume" args)))
+                               ;; --resume without ID or --continue: find most recent
+                               ((or (member "--resume" args)
+                                    (member "--continue" args))
+                                (claude-mcp--get-most-recent-session-id expanded-dir))
+                               (t nil)))
+                  (system-prompt (when (and prompt-file (file-exists-p prompt-file))
+                                   (with-temp-buffer
+                                     (insert-file-contents prompt-file)
+                                     (buffer-string)))))
+              (claude-acp-start-session buf expanded-dir buffer-name
+                                        resume-id system-prompt)))
+        ;; Python backend (existing)
+        (let ((proc (claude-agent--start-process-with-args expanded-dir buf agent-args)))
+          (setq claude-agent--process proc)))
       ;; Run startup hook
       (run-hooks 'claude-mcp-startup-hook))
 
@@ -359,9 +403,14 @@ If CLEAR-FIRST is non-nil, clear the input area before inserting."
               (with-current-buffer input-buf
                 (goto-char (point-max))
                 (insert message))))
-        ;; Send message with [INPUT] framing
-        (process-send-string claude-agent--process
-                           (format "[INPUT]\n%s\n[/INPUT]\n" message))))
+        ;; Send message via appropriate backend
+        (if (bound-and-true-p claude-acp--backend-active)
+            (claude-acp--send-user-message message)
+          ;; Python backend - send with [INPUT] framing
+          (when (and claude-agent--process
+                     (process-live-p claude-agent--process))
+            (process-send-string claude-agent--process
+                               (format "[INPUT]\n%s\n[/INPUT]\n" message))))))
 
     (unless no-switch
       (claude-mcp--switch-to-buffer))))
@@ -403,11 +452,13 @@ TARGET-BUFFER-NAME is the exact buffer name to use (optional)."
          (if (and buffer
                   (buffer-live-p buffer)
                   (with-current-buffer buffer
-                    (and claude-agent--process (process-live-p claude-agent--process))))
+                    (claude-agent--backend-alive-p)))
              ;; Send the message
              (with-current-buffer buffer
-               (process-send-string claude-agent--process
-                                  (format "[INPUT]\n%s\n[/INPUT]\n" msg))
+               (if (bound-and-true-p claude-acp--backend-active)
+                   (claude-acp--send-user-message msg)
+                 (process-send-string claude-agent--process
+                                    (format "[INPUT]\n%s\n[/INPUT]\n" msg)))
                (message "Continuation message sent to Claude"))
            (message "Warning: Buffer %s not ready to receive message" buf-name))))
      buffer-name message)))
@@ -444,8 +495,7 @@ With prefix ARG, prompt for the project directory."
   (if-let* ((claude-buffer (claude-mcp--session-buffer)))
       (progn
         (with-current-buffer claude-buffer
-          (when (and claude-agent--process (process-live-p claude-agent--process))
-            (delete-process claude-agent--process))
+          (claude-agent--backend-shutdown)
           (kill-buffer claude-buffer))
         (message "Claude MCP session killed"))
     (error "There is no Claude MCP session in this workspace or project")))

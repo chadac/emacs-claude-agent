@@ -16,6 +16,10 @@
 (require 'tabulated-list)
 (require 'cl-lib)
 
+;; Forward declarations
+(declare-function claude-agent--backend-alive-p "claude-agent-repl")
+(declare-function claude-agent--backend-shutdown "claude-agent-repl")
+
 ;;;; Customization
 
 (defgroup claude-sessions nil
@@ -112,28 +116,25 @@ Returns one of: `ready', `thinking', `waiting', or `dead'."
     (cl-return-from claude-sessions--get-session-status 'dead))
 
   (with-current-buffer buffer
-    ;; Check for new agent architecture first
+    ;; Check if any backend is alive (Python process or ACP client)
     (cond
-     ;; New agent architecture: claude-agent--process
-     ((and (boundp 'claude-agent--process) claude-agent--process)
-      (if (not (process-live-p claude-agent--process))
-          'dead
-        ;; Process is running, check status
-        (cond
-         ;; Waiting for permission: permission-data is set
-         ((and (boundp 'claude-agent--permission-data)
-               claude-agent--permission-data)
-          'waiting)
-         ;; Thinking: claude-agent--thinking-status is set
-         ((and (boundp 'claude-agent--thinking-status)
-               claude-agent--thinking-status)
-          'thinking)
-         ;; Compacting: conversation being summarized
-         ((and (boundp 'claude-agent--compacting)
-               claude-agent--compacting)
-          'thinking)
-         ;; Ready: Not thinking, process alive
-         (t 'ready))))
+     ((claude-agent--backend-alive-p)
+      ;; Backend is running, check status
+      (cond
+       ;; Waiting for permission: permission-data is set
+       ((and (boundp 'claude-agent--permission-data)
+             claude-agent--permission-data)
+        'waiting)
+       ;; Thinking: claude-agent--thinking-status is set
+       ((and (boundp 'claude-agent--thinking-status)
+             claude-agent--thinking-status)
+        'thinking)
+       ;; Compacting: conversation being summarized
+       ((and (boundp 'claude-agent--compacting)
+             claude-agent--compacting)
+        'thinking)
+       ;; Ready: Not thinking, backend alive
+       (t 'ready)))
 
      ;; No recognized architecture - dead
      (t 'dead))))
@@ -296,9 +297,7 @@ Columns: Project, Label, Status, Worktree, Directory."
 (defun claude-sessions--kill-session-process (buffer)
   "Kill the process associated with session BUFFER."
   (with-current-buffer buffer
-    (when (and (boundp 'claude-agent--process) claude-agent--process)
-      (when (process-live-p claude-agent--process)
-        (delete-process claude-agent--process)))))
+    (claude-agent--backend-shutdown)))
 
 (defun claude-sessions-kill-session ()
   "Kill the session at point."

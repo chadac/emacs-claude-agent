@@ -41,6 +41,8 @@
 (declare-function claude-agent-run "claude-agent-repl")
 (declare-function claude-mcp-send-message "claude-mcp-messaging")
 (declare-function claude-mcp-send-and-wait "claude-mcp-messaging")
+(declare-function claude-agent--backend-alive-p "claude-agent-repl")
+(defvar claude-agent--process)
 
 ;;;; Customization
 
@@ -220,9 +222,7 @@ Returns the buffer name of the expert."
 
     (if (and existing-buffer
              (with-current-buffer existing-buffer
-               (and (boundp 'claude-agent--process)
-                    claude-agent--process
-                    (process-live-p claude-agent--process))))
+               (claude-agent--backend-alive-p)))
         ;; Expert already exists and is running
         buffer-name
       ;; Create new expert session
@@ -465,9 +465,7 @@ Returns JSON with running experts and available projects."
         (when (claude-agent-expert--is-expert-session-p name)
           (let ((project (claude-agent-expert--get-project-from-buffer name))
                 (alive (with-current-buffer buffer
-                         (and (boundp 'claude-agent--process)
-                              claude-agent--process
-                              (process-live-p claude-agent--process)))))
+                         (claude-agent--backend-alive-p))))
             (push `((project . ,project)
                     (buffer . ,name)
                     (status . ,(if alive "running" "stopped"))

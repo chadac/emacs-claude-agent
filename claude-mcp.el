@@ -27,6 +27,12 @@
 (require 'claude-mcp-notes)
 (require 'claude-kb)
 (require 'claude-agent-expert)
+
+;; Forward declarations for backend abstraction
+(declare-function claude-agent--backend-alive-p "claude-agent-repl")
+(declare-function claude-agent--backend-send-json "claude-agent-repl")
+(defvar claude-agent--process)
+
 ;;;; Tool Registry
 ;;
 ;; The tool registry (claude-mcp-tools, claude-mcp-deftool macro, etc.)
@@ -1672,10 +1678,8 @@ Designed to be called via emacsclient by Claude AI."
       (with-current-buffer buffer-name
         (cond
          ;; Claude agent REPL buffer
-         ((and (boundp 'claude-agent--process) claude-agent--process
-               (process-live-p claude-agent--process))
-          (process-send-string claude-agent--process
-                               (format "[INPUT]\n%s\n[/INPUT]\n" text))
+         ((claude-agent--backend-alive-p)
+          (claude-agent--backend-send-json `((type . "message") (text . ,text)))
           (format "Sent input to claude agent '%s'" buffer-name))
          ;; comint-mode buffers
          ((and (boundp 'comint-mode) (derived-mode-p 'comint-mode))
@@ -1763,10 +1767,8 @@ Designed to be called via emacsclient by Claude AI."
         ;; Send input
         (with-current-buffer buffer-name
           (cond
-           ((and (boundp 'claude-agent--process) claude-agent--process
-                 (process-live-p claude-agent--process))
-            (process-send-string claude-agent--process
-                                 (format "[INPUT]\n%s\n[/INPUT]\n" input)))
+           ((claude-agent--backend-alive-p)
+            (claude-agent--backend-send-json `((type . "message") (text . ,input))))
            ((derived-mode-p 'comint-mode)
             (goto-char (point-max))
             (insert input)
@@ -2010,10 +2012,7 @@ Designed to be called via MCP by Claude AI."
   (let ((original-size 0)
         (new-size 0))
     (with-current-buffer buffer-name
-      (unless (and (boundp 'claude-agent--process) claude-agent--process)
-        (error "Buffer '%s' is not a Claude buffer (no claude-agent--process)" buffer-name))
-
-      (unless (process-live-p claude-agent--process)
+      (unless (claude-agent--backend-alive-p)
         (error "Claude agent in '%s' is not running" buffer-name))
 
       ;; Capture original size
@@ -3206,7 +3205,7 @@ The conversation will be continued from where it left off.
 This function expects to be called in the context of the Claude buffer
 \(via :needs-session-cwd t which wraps execution in the session buffer)."
   ;; When called via MCP with :needs-session-cwd t, we're already in the right buffer
-  (if (and (boundp 'claude-agent--process) claude-agent--process)
+  (if (claude-agent--backend-alive-p)
       (progn
         (claude-agent-restart)
         "Session restarting... MCP server will be reloaded.")

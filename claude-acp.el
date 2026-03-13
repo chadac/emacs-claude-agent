@@ -50,6 +50,7 @@
 (defvar claude-agent--process)
 (defvar claude-agent--session-info)
 (defvar claude-agent--pending-output)
+(defvar claude-mcp--session-id)
 
 ;;;; Customization
 
@@ -61,10 +62,10 @@
   "Command to run the ACP agent binary.
 When nil (default), auto-detects from:
   1. `claude-agent-acp' on PATH
-  2. Vendored wrapper script at <package-root>/scripts/claude-agent-acp-wrapper.sh
-  3. Vendored binary at <package-root>/vendor/claude-agent-acp/node_modules/.bin/claude-agent-acp
+  2. Vendored wrapper script
+  3. Vendored npm binary
 
-Can be set to an absolute path to override auto-detection."
+Can be set to an absolute path to override."
   :type '(choice (const :tag "Auto-detect" nil)
                  (string :tag "Command path"))
   :group 'claude-acp)
@@ -282,6 +283,9 @@ MODEL is optional model ID."
      :on-success (lambda (result)
                    (let ((session-id (map-elt result 'sessionId)))
                      (setq claude-acp--session-id session-id)
+                     ;; Store in claude-mcp--session-id for persistence/resume
+                     (when (boundp 'claude-mcp--session-id)
+                       (setq claude-mcp--session-id session-id))
                      ;; Set model if requested
                      (when model
                        (claude-acp--set-model client buffer session-id model))
@@ -311,6 +315,9 @@ CALLBACK is called on success."
      :on-success (lambda (result)
                    (setq claude-acp--session-id
                          (or (map-elt result 'sessionId) session-id))
+                   ;; Store in claude-mcp--session-id for persistence/resume
+                   (when (boundp 'claude-mcp--session-id)
+                     (setq claude-mcp--session-id claude-acp--session-id))
                    (setq claude-agent--session-info
                          (plist-put claude-agent--session-info :session-id
                                     claude-acp--session-id))
@@ -591,7 +598,10 @@ PARAMS contains the permission request details."
         ;; No policy match - show interactive prompt
         (_
          ;; Dispatch to the existing REPL permission UI
-         (claude-agent--dispatch-message "permission_request" permission-data))))))
+         ;; Mark as policy-checked to skip re-evaluation in show-permission-prompt
+         (let ((data-with-flag (append permission-data
+                                       '((policy_checked . t)))))
+           (claude-agent--dispatch-message "permission_request" data-with-flag)))))))
 
 (defun claude-acp--scope-to-option-id (scope options)
   "Map permission SCOPE to an ACP option ID from OPTIONS.
@@ -784,13 +794,37 @@ MODEL is optional model identifier."
                  '((type . "ready"))))
              system-prompt model))))))))
 
-;;;; Integration bridge - compatibility layer for claude-mcp-process.el
+;;;; Integration bridge - compatibility layer
+
+(defvar-local claude-acp--backend-active nil
+  "Non-nil when this buffer is using the ACP backend instead of Python.")
 
 (defun claude-acp--process-live-p ()
   "Return non-nil if the ACP client process is alive.
 Drop-in replacement for checking `claude-agent--process'."
   (and claude-acp--client
        (acp--client-started-p claude-acp--client)))
+
+(defun claude-acp--send-user-message (text)
+  "Send user message TEXT via the ACP backend.
+This is called from `claude-agent--dispatch-user-message' when ACP is active."
+  (claude-acp-send-prompt text))
+
+(defun claude-acp--send-permission-response-bridge (action &optional _tool-use-id)
+  "Bridge permission response ACTION back to the ACP client.
+ACTION is \"allow_once\", \"allow_session\", \"allow_always\", or \"deny\".
+_TOOL-USE-ID is ignored (ACP uses request-id tracking instead)."
+  (when claude-acp--pending-permission-request-id
+    (claude-acp-respond-to-permission action)))
+
+(defun claude-acp--interrupt ()
+  "Interrupt the current ACP operation."
+  (claude-acp-cancel))
+
+(defun claude-acp--kill ()
+  "Kill the ACP session and clean up."
+  (claude-acp-shutdown)
+  (setq claude-acp--backend-active nil))
 
 (provide 'claude-acp)
 ;;; claude-acp.el ends here

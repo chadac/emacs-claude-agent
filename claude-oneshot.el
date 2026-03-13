@@ -21,6 +21,13 @@
 (require 'claude-agent-permissions)
 (require 'claude-mcp)
 
+;; Forward declarations for ACP backend
+(defvar claude-mcp-backend)
+(defvar claude-acp--backend-active)
+(declare-function claude-acp-start-session "claude-acp")
+(declare-function claude-acp--process-live-p "claude-acp")
+(declare-function claude-acp-shutdown "claude-acp")
+
 ;;;; Customization
 
 (defgroup claude-oneshot nil
@@ -564,11 +571,22 @@ Returns the buffer of the new agent."
     ;; Pass scope-appropriate allowed tools so the agent can edit without permission prompts
     ;; System prompt is sent via stdin as system_message (injected into first user message)
     (let* ((system-prompt (claude-oneshot--get-scope-system-prompt scope target))
-           (allowed-tools (claude-oneshot--get-allowed-tools-for-scope scope target))
-           (proc (claude-agent--start-process
-                  work-dir buf nil nil claude-oneshot-model nil allowed-tools)))
+           (allowed-tools (claude-oneshot--get-allowed-tools-for-scope scope target)))
+      ;; Start appropriate backend
+      (if (eq (bound-and-true-p claude-mcp-backend) 'acp)
+          ;; ACP backend
+          (with-current-buffer buf
+            (require 'claude-acp)
+            (setq-local claude-acp--backend-active t)
+            (claude-acp-start-session buf work-dir buf-name
+                                      nil system-prompt claude-oneshot-model))
+        ;; Python backend
+        (let ((proc (claude-agent--start-process
+                     work-dir buf nil nil claude-oneshot-model nil allowed-tools)))
+          (with-current-buffer buf
+            (setq claude-agent--process proc))))
+
       (with-current-buffer buf
-        (setq claude-agent--process proc)
         ;; Set up timeout timer
         (setq claude-oneshot--timeout-timer
               (run-with-timer claude-oneshot-timeout nil
@@ -583,28 +601,20 @@ Returns the buffer of the new agent."
                claude-oneshot--active-agents)
 
       ;; Send system message first, then user prompt after a short delay
-      ;; The system_message type queues text for injection into next user message
       (run-with-timer
        1.5 nil
        (lambda (buffer sys-prompt user-prompt)
          (when (buffer-live-p buffer)
            (with-current-buffer buffer
-             (when (and claude-agent--process
-                        (process-live-p claude-agent--process))
-               ;; Send system message first (gets injected into user message)
-               (process-send-string
-                claude-agent--process
-                (concat (json-encode
-                         `((type . "system_message")
-                           (text . ,sys-prompt)))
-                        "\n"))
+             (when (claude-agent--backend-alive-p)
+               ;; Send system message (queued for ACP, sent directly for Python)
+               (claude-agent--backend-send-json
+                `((type . "system_message")
+                  (text . ,sys-prompt)))
                ;; Then send the user request
-               (process-send-string
-                claude-agent--process
-                (concat (json-encode
-                         `((type . "message")
-                           (text . ,user-prompt)))
-                        "\n"))))))
+               (claude-agent--backend-send-json
+                `((type . "message")
+                  (text . ,user-prompt)))))))
        buf system-prompt prompt))
 
     ;; Return the buffer (but don't display it)
@@ -632,14 +642,10 @@ Sends a reminder to call done or ask for input."
                         (and claude-oneshot--is-oneshot
                              (not claude-agent--thinking-status))))
              (with-current-buffer buf
-               (when (and claude-agent--process
-                          (process-live-p claude-agent--process))
-                 (process-send-string
-                  claude-agent--process
-                  (concat (json-encode
-                           '((type . "message")
-                             (text . "REMINDER: You're in oneshot mode. Call mcp__emacs__done if finished, or use mcp__emacs__prompt_choice/mcp__emacs__confirm if you need user input.")))
-                          "\n"))))))
+               (when (claude-agent--backend-alive-p)
+                 (claude-agent--backend-send-json
+                  '((type . "message")
+                    (text . "REMINDER: You're in oneshot mode. Call mcp__emacs__done if finished, or use mcp__emacs__prompt_choice/mcp__emacs__confirm if you need user input.")))))))
          buffer)))))
 
 (defun claude-oneshot--cleanup (buffer &optional result)
@@ -657,9 +663,8 @@ Sends a reminder to call done or ask for input."
         ;; Unregister from source buffer (removes header line if no agents left)
         (claude-oneshot--unregister-from-source claude-oneshot--source-buffer buffer))
 
-      ;; Kill the process if still running
-      (when (and claude-agent--process (process-live-p claude-agent--process))
-        (delete-process claude-agent--process))
+      ;; Kill the backend if still running
+      (claude-agent--backend-shutdown)
 
       ;; Remove from active agents
       (remhash (buffer-name buffer) claude-oneshot--active-agents)

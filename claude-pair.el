@@ -206,9 +206,7 @@ Returns list of (buffer-name . buffer) pairs."
     (dolist (buf (buffer-list))
       (when (and (string-match-p "^\\*claude" (buffer-name buf))
                  (with-current-buffer buf
-                   (and (boundp 'claude-agent--process)
-                        claude-agent--process
-                        (process-live-p claude-agent--process))))
+                   (claude-agent--backend-alive-p)))
         (push (cons (buffer-name buf) buf) buffers)))
     (nreverse buffers)))
 
@@ -278,14 +276,10 @@ TIMEOUT is max seconds to wait (default 5).  Returns t if ready, nil if timeout.
   (let ((deadline (+ (float-time) (or timeout 5))))
     (while (and (< (float-time) deadline)
                 (not (with-current-buffer buffer
-                       (and (boundp 'claude-agent--process)
-                            claude-agent--process
-                            (process-live-p claude-agent--process)))))
+                       (claude-agent--backend-alive-p))))
       (sit-for 0.1))
     (with-current-buffer buffer
-      (and (boundp 'claude-agent--process)
-           claude-agent--process
-           (process-live-p claude-agent--process)))))
+      (claude-agent--backend-alive-p))))
 
 (defun claude-pair--send-to-agent (text)
   "Send TEXT to the Claude agent for the current project.
@@ -297,9 +291,7 @@ Starts a new agent if one doesn't exist for this project."
           (unless (claude-pair--wait-for-process claude-buffer)
             (error "Timed out waiting for Claude agent to start"))
           (with-current-buffer claude-buffer
-            (process-send-string
-             claude-agent--process
-             (concat (json-encode `((type . "message") (text . ,text))) "\n"))))
+            (claude-agent--backend-send-json `((type . "message") (text . ,text)))))
       (error "No project found.  Open a file in a project first"))))
 
 ;;;; Point-based Quick Actions
@@ -486,7 +478,10 @@ Uses org-mode formatting for display in Emacs."
 ;; Forward declarations
 (declare-function claude-menu "claude-transient")
 (declare-function claude-agent-run "claude-agent")
+(declare-function claude-agent--backend-alive-p "claude-agent-repl")
+(declare-function claude-agent--backend-send-json "claude-agent-repl")
 (defvar claude-agent-mode)
+(defvar claude-agent--process)
 
 (defvar claude-pair-mode-map
   (let ((map (make-sparse-keymap)))

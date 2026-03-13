@@ -280,6 +280,8 @@ Press 'i' or RET in the log area to jump to input."
 ;; Forward declarations for session commands
 (declare-function claude-agent-run "claude-agent")
 (declare-function claude-list-sessions "claude-sessions")
+(declare-function claude-agent--backend-alive-p "claude-agent-repl")
+(defvar claude-agent--process)
 
 (defun claude-transient--session-exists-for-dir (dir)
   "Check if a Claude session already exists for DIR.
@@ -288,9 +290,7 @@ Returns the buffer if found, nil otherwise."
     (cl-find-if
      (lambda (buf)
        (with-current-buffer buf
-         (and (boundp 'claude-agent--process)
-              claude-agent--process
-              (process-live-p claude-agent--process)
+         (and (claude-agent--backend-alive-p)
               (boundp 'claude-agent--work-dir)
               claude-agent--work-dir
               (string= (expand-file-name claude-agent--work-dir)
@@ -332,9 +332,7 @@ to create a named session (e.g., *claude:project:my-slug*)."
   (let ((buffers (cl-remove-if-not
                   (lambda (buf)
                     (with-current-buffer buf
-                      (and (boundp 'claude-agent--process)
-                           claude-agent--process
-                           (process-live-p claude-agent--process))))
+                      (claude-agent--backend-alive-p)))
                   (buffer-list))))
     (if (null buffers)
         (message "No active Claude sessions")
@@ -510,8 +508,9 @@ If a session already exists for this project, prompts for a slug."
 
 (defun claude-transient--in-agent-buffer-p ()
   "Return non-nil if current buffer is a Claude agent buffer."
-  (and (boundp 'claude-agent--process)
-       claude-agent--process))
+  (or (and (boundp 'claude-agent--process)
+           claude-agent--process)
+      (bound-and-true-p claude-acp--backend-active)))
 
 ;;;###autoload
 (defun claude-menu ()

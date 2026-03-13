@@ -70,6 +70,10 @@ cannot be determined."
 (declare-function flycheck-error-message "flycheck")
 (declare-function flycheck-overlay-errors-in "flycheck")
 (declare-function projectile-project-root "projectile")
+(declare-function claude-agent--backend-alive-p "claude-agent-repl")
+(declare-function claude-agent--backend-send-json "claude-agent-repl")
+(declare-function claude-agent--backend-shutdown "claude-agent-repl")
+(defvar claude-agent--process)
 
 ;;;; Customization
 (defgroup claude-agent nil
@@ -346,8 +350,7 @@ Returns t if switched successfully, nil if no buffer exists."
   (if-let* ((buffer (claude--get-buffer)))
       (progn
         (with-current-buffer buffer
-          (unless (and (boundp 'claude-agent--process) claude-agent--process
-                       (process-live-p claude-agent--process))
+          (unless (claude-agent--backend-alive-p)
             (error "Claude session exists but process is not running. Please kill *claude:...* buffer and re-start")))
         (display-buffer buffer)
         (select-window (get-buffer-window buffer))
@@ -615,9 +618,7 @@ With prefix ARG, prompt for the project directory."
   (if-let* ((claude-buffer (claude--get-buffer)))
       (progn
         (with-current-buffer claude-buffer
-          (when (and (boundp 'claude-agent--process) claude-agent--process
-                     (process-live-p claude-agent--process))
-            (delete-process claude-agent--process))
+          (claude-agent--backend-shutdown)
           (kill-buffer claude-buffer))
         (message "Claude session killed"))
     (error "There is no Claude session in this workspace or project")))
@@ -704,12 +705,10 @@ TARGET-BUFFER-NAME is the exact buffer name to use (optional)."
          (if (and buffer
                   (buffer-live-p buffer)
                   (with-current-buffer buffer
-                    (and (boundp 'claude-agent--process) claude-agent--process
-                         (process-live-p claude-agent--process))))
+                    (claude-agent--backend-alive-p)))
              ;; Send the message via the REPL backend
              (with-current-buffer buffer
-               (process-send-string claude-agent--process
-                                    (format "[INPUT]\n%s\n[/INPUT]\n" msg))
+               (claude-agent--backend-send-json `((type . "message") (text . ,msg)))
                (message "Continuation message sent to Claude"))
            (message "Warning: Buffer %s not ready to receive message" buf-name))))
      buffer-name message)))
@@ -764,9 +763,7 @@ Otherwise, restart the session for the current project."
     ;; Kill the target session
     (message "Killing Claude session for %s..." work-dir)
     (with-current-buffer claude-buffer
-      (when (and (boundp 'claude-agent--process) claude-agent--process
-                 (process-live-p claude-agent--process))
-        (delete-process claude-agent--process))
+      (claude-agent--backend-shutdown)
       (kill-buffer claude-buffer))
 
     ;; Reload elisp files
@@ -813,9 +810,7 @@ Otherwise, restart the session for the current project."
     (unless buffer
       (error "No Claude session is active"))
     (with-current-buffer buffer
-      (unless (and (boundp 'claude-agent--process) claude-agent--process)
-        (error "Claude session exists but process is not initialized. Please kill buffer and restart"))
-      (unless (process-live-p claude-agent--process)
+      (unless (claude-agent--backend-alive-p)
         (error "Claude session exists but process is not running. Please kill buffer and restart"))))
   t)
 
@@ -868,9 +863,8 @@ If CLEAR-FIRST is non-nil, clear any partial input first."
               (with-current-buffer input-buf
                 (goto-char (point-max))
                 (insert message))))
-        ;; Send message with [INPUT] framing
-        (process-send-string claude-agent--process
-                             (format "[INPUT]\n%s\n[/INPUT]\n" message))))
+        ;; Send message via backend abstraction
+        (claude-agent--backend-send-json `((type . "message") (text . ,message)))))
     (unless no-switch
       (claude--switch-to-buffer))))
 

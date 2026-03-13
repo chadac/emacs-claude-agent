@@ -29,6 +29,11 @@
 (require 'org-element)
 (require 'org-id)
 
+;; Forward declarations for backend abstraction
+(declare-function claude-agent--backend-alive-p "claude-agent-repl")
+(declare-function claude-agent--backend-send-json "claude-agent-repl")
+(defvar claude-agent--process)
+
 ;;;; Org-roam Integration (optional)
 
 (defvar claude-notes-use-org-roam t
@@ -203,10 +208,8 @@ Called from org-capture-after-finalize-hook."
       (when (and claude-buffer title)
         (let ((message-text (format "[TODO] %s\n\n%s" title (or body ""))))
           (with-current-buffer claude-buffer
-            (when (and (boundp 'claude-agent--process) claude-agent--process
-                       (process-live-p claude-agent--process))
-              (process-send-string claude-agent--process
-                                   (format "[INPUT]\n%s\n[/INPUT]\n" message-text))))
+            (when (claude-agent--backend-alive-p)
+              (claude-agent--backend-send-json `((type . "message") (text . ,message-text)))))
           (message "Sent TODO to claude: %s" title)))
       ;; Clear state
       (setq claude-notes--todo-target-project nil
@@ -1338,10 +1341,8 @@ This helps Claude identify messages sent via the notes integration.")
           (if buf
               (progn
                 (with-current-buffer buf
-                  (when (and (boundp 'claude-agent--process) claude-agent--process
-                             (process-live-p claude-agent--process))
-                    (process-send-string claude-agent--process
-                                         (format "[INPUT]\n%s\n[/INPUT]\n" prefixed-text))))
+                  (when (claude-agent--backend-alive-p)
+                    (claude-agent--backend-send-json `((type . "message") (text . ,prefixed-text)))))
                 (message "Sent to claude: %s..." (truncate-string-to-width text 50)))
             (user-error "Claude buffer not found for %s" work-dir)))
       (user-error "Not in a Claude notes buffer"))))
